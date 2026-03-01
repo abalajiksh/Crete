@@ -7,7 +7,7 @@ CXX       ?= g++
 CXXFLAGS   = -std=c++17 -Wall -Wextra -Wpedantic
 LDFLAGS    =
 
-VERSION   ?= 0.1.1
+VERSION   ?= 0.1.0
 CXXFLAGS  += -DCRETE_VERSION='"$(VERSION)"'
 
 SRC        = main.cpp
