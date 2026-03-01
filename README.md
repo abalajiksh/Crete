@@ -59,6 +59,21 @@ crete-gui
 
 Browse for a file or folder (or drag and drop), select output format, and click Analyze. Results are displayed in a sortable table with color-coded DR values. A log file is automatically saved to the analysis folder or a custom location.
 
+#### Screenshots
+
+<table>
+  <tr>
+    <td><img src="screenshots/1.png" width="200"/></td>
+    <td><img src="screenshots/2.png" width="200"/></td>
+    <td rowspan="2"><img src="screenshots/5.png" width="420"/></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/3.png" width="200"/></td>
+    <td><img src="screenshots/4.png" width="200"/></td>
+  </tr>
+</table>
+
+
 ## Supported Formats
 
 | Format | Extension | Notes |
