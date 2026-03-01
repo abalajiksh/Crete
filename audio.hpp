@@ -791,10 +791,117 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// DSF (DSD Stream File) Decoder with decimation to PCM
+// DSD → PCM Decimation Engine
 //
-// DSD is 1-bit at 2.8224 MHz (DSD64) or multiples thereof.
-// We decimate to PCM using a windowed-sinc FIR lowpass filter.
+// DSD (Direct Stream Digital) is 1-bit sigma-delta modulation at 2.8224 MHz
+// (DSD64) or multiples. The noise shaping pushes quantization noise to
+// ultrasonic frequencies, which means the reconstructed PCM signal can
+// exhibit peaks ABOVE 0 dBFS — a property invisible to simple box-filter
+// decimation (which bounds output to ±1.0 by construction).
+//
+// We use a two-stage decimation pipeline:
+//
+//   Stage 1: CIC (box) filter at DSD rate, decimate by M (8 for DSD64)
+//     - Output: 352.8 kHz PCM, bounded to [-1.0, +1.0]
+//     - Fast: just bit counting, no multiplies
+//     - Passband droop: ~-1 dB at 100 kHz, ~-3.8 dB at Nyquist
+//
+//   Stage 2: FIR lowpass filter at 352.8 kHz, no decimation
+//     - 48-tap windowed-sinc (Blackman), cutoff at 150 kHz
+//     - Negative coefficients allow Gibbs-type overshoot above ±1.0
+//     - Cleans up CIC aliasing artifacts
+//     - Output CAN exceed ±1.0, recovering above-0-dBFS peaks
+//
+// The stage 2 FIR's negative lobes reconstruct inter-sample peaks that the
+// CIC's all-positive coefficients suppress. This matches foobar2000's DSD
+// playback behavior (352.8 kHz output with peaks above full scale).
+//
+// Target output: 352.8 kHz — matches foobar2000 DR Meter reference.
+// ════════════════════════════════════════════════════════════════════════════
+
+namespace dsd {
+
+// ── Windowed-sinc lowpass FIR design (Blackman window) ─────────────────────
+inline std::vector<double> design_lowpass(int num_taps, double cutoff_hz,
+                                           double sample_rate) {
+    std::vector<double> h(num_taps);
+    double fc = cutoff_hz / sample_rate;
+    int M = num_taps - 1;
+    constexpr double PI = 3.14159265358979323846;
+
+    for (int n = 0; n < num_taps; ++n) {
+        double x = n - M / 2.0;
+        h[n] = (std::abs(x) < 1e-10) ? 2.0 * fc
+               : std::sin(2.0 * PI * fc * x) / (PI * x);
+        double w = 0.42 - 0.5 * std::cos(2.0 * PI * n / M)
+                        + 0.08 * std::cos(4.0 * PI * n / M);
+        h[n] *= w;
+    }
+    double sum = 0.0;
+    for (double v : h) sum += v;
+    if (sum != 0.0) for (double& v : h) v /= sum;
+    return h;
+}
+
+// ── Two-stage DSD→PCM decimation for one channel ──────────────────────────
+// ch_dsd:     raw DSD byte stream for one channel
+// total_bits: number of valid DSD bits
+// decimation: CIC decimation ratio (e.g. 8 for DSD64→352.8k)
+// lsb_first:  true for DSF (LSB-first), false for DFF (MSB-first)
+inline std::vector<double> decimate_channel(
+        const std::vector<uint8_t>& ch_dsd,
+        size_t total_bits,
+        int decimation,
+        bool lsb_first) {
+
+    size_t n_out = total_bits / decimation;
+    if (n_out == 0) return {};
+
+    // ── Stage 1: CIC (box) filter with decimation ────────────────────
+    // Average 'decimation' consecutive DSD bits (±1) → bounded to [-1, +1]
+    std::vector<double> cic(n_out);
+    for (size_t i = 0; i < n_out; ++i) {
+        double sum = 0.0;
+        size_t base = i * decimation;
+        for (int d = 0; d < decimation; ++d) {
+            size_t bit_idx = base + d;
+            if (bit_idx >= total_bits) break;
+            size_t byte_idx = bit_idx / 8;
+            if (byte_idx >= ch_dsd.size()) break;
+            int bit_pos = lsb_first ? (bit_idx % 8) : (7 - (bit_idx % 8));
+            bool bit = (ch_dsd[byte_idx] >> bit_pos) & 1;
+            sum += bit ? 1.0 : -1.0;
+        }
+        cic[i] = sum / decimation;
+    }
+
+    // ── Stage 2: FIR lowpass at output rate (352.8 kHz) ──────────────
+    // 48 taps, 150 kHz cutoff — allows overshoot above ±1.0
+    static const int FIR_TAPS = 48;
+    static const double FIR_CUTOFF = 150000.0;
+    static const double FS_OUT = 352800.0;
+
+    auto fir = design_lowpass(FIR_TAPS, FIR_CUTOFF, FS_OUT);
+    int fir_half = FIR_TAPS / 2;
+
+    std::vector<double> pcm(n_out);
+    for (size_t i = 0; i < n_out; ++i) {
+        double acc = 0.0;
+        for (int k = 0; k < FIR_TAPS; ++k) {
+            int64_t idx = static_cast<int64_t>(i) + k - fir_half;
+            if (idx >= 0 && idx < static_cast<int64_t>(n_out))
+                acc += fir[k] * cic[static_cast<size_t>(idx)];
+        }
+        pcm[i] = acc;
+    }
+
+    return pcm;
+}
+
+} // namespace dsd
+
+// ════════════════════════════════════════════════════════════════════════════
+// DSF (DSD Stream File) Decoder
 // ════════════════════════════════════════════════════════════════════════════
 
 inline AudioData decode_dsf(const std::vector<uint8_t>& buf) {
@@ -837,21 +944,15 @@ inline AudioData decode_dsf(const std::vector<uint8_t>& buf) {
     const uint8_t* dsd_data = buf.data() + data_pos + 12;
     size_t dsd_data_size = static_cast<size_t>(data_chunk_size) - 12;
 
-    // Determine decimation ratio: DSD → PCM at target rate
-    // DSD64 = 2822400 Hz, DSD128 = 5644800, etc.
-    // Target: 88200 Hz for DSD64 (32:1), 176400 for DSD128
-    uint32_t pcm_rate;
-    int decimation;
-    if (dsd_sample_rate <= 2822400) {
-        pcm_rate = 88200;    // DSD64 → 88.2k
-        decimation = dsd_sample_rate / pcm_rate;
-    } else if (dsd_sample_rate <= 5644800) {
-        pcm_rate = 176400;   // DSD128 → 176.4k
-        decimation = dsd_sample_rate / pcm_rate;
-    } else {
-        pcm_rate = 352800;   // DSD256+ → 352.8k
-        decimation = dsd_sample_rate / pcm_rate;
-    }
+    // Determine decimation ratio: DSD → PCM at 352.8 kHz
+    // DSD64 = 2822400 Hz → 352800 (8:1)
+    // DSD128 = 5644800 Hz → 352800 (16:1)
+    // DSD256 = 11289600 Hz → 352800 (32:1)
+    // Using 352.8 kHz preserves ultrasonic peaks that DSD sigma-delta
+    // encoding can produce above 0 dBFS in PCM domain.
+    uint32_t pcm_rate = 352800;
+    int decimation = static_cast<int>(dsd_sample_rate / pcm_rate);
+    if (decimation < 1) decimation = 1;
 
     ad.sample_rate = pcm_rate;
     ad.bit_depth   = 1;  // original is 1-bit
@@ -879,29 +980,17 @@ inline AudioData decode_dsf(const std::vector<uint8_t>& buf) {
         }
     }
 
-    // Simple DSD → PCM decimation using box filter (adequate for DR analysis)
-    // Each DSD bit: 1 → +1.0, 0 → -1.0
-    // Average 'decimation' bits to get one PCM sample
-    size_t pcm_samples_per_ch = total_dsd_samples_per_ch / decimation;
-
+    // ── Two-stage decimation: DSD → CIC → FIR → 352.8 kHz PCM ─────────
     ad.channels.resize(n_channels);
     for (uint32_t c = 0; c < n_channels; ++c) {
-        ad.channels[c].resize(pcm_samples_per_ch);
-        for (size_t i = 0; i < pcm_samples_per_ch; ++i) {
-            double sum = 0.0;
-            for (int d = 0; d < decimation; ++d) {
-                size_t bit_idx = i * decimation + d;
-                size_t byte_idx = bit_idx / 8;
-                int bit_pos = bit_idx % 8;  // LSB first in DSF
-
-                if (byte_idx < ch_dsd[c].size()) {
-                    bool bit = (ch_dsd[c][byte_idx] >> bit_pos) & 1;
-                    sum += bit ? 1.0 : -1.0;
-                }
-            }
-            ad.channels[c][i] = sum / decimation;
-        }
+        ad.channels[c] = dsd::decimate_channel(
+            ch_dsd[c], static_cast<size_t>(total_dsd_samples_per_ch),
+            decimation, true /* LSB first in DSF */);
     }
+
+    // Free DSD byte streams (no longer needed, save memory)
+    ch_dsd.clear();
+    ch_dsd.shrink_to_fit();
 
     return ad;
 }
@@ -957,18 +1046,15 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf) {
 
     // DFF stores data interleaved by byte: [ch0_byte][ch1_byte][ch0_byte]...
     // Bits are MSB-first
-    uint32_t pcm_rate;
-    int decimation;
-    if (dsd_sample_rate <= 2822400)       { pcm_rate = 88200; }
-    else if (dsd_sample_rate <= 5644800)  { pcm_rate = 176400; }
-    else                                   { pcm_rate = 352800; }
-    decimation = dsd_sample_rate / pcm_rate;
+    // All DSD rates → 352.8 kHz to preserve ultrasonic peaks
+    uint32_t pcm_rate = 352800;
+    int decimation = static_cast<int>(dsd_sample_rate / pcm_rate);
+    if (decimation < 1) decimation = 1;
 
     ad.sample_rate = pcm_rate;
 
     size_t total_bytes_per_ch = dsd_data_size / n_channels;
     size_t total_bits_per_ch = total_bytes_per_ch * 8;
-    size_t pcm_samples_per_ch = total_bits_per_ch / decimation;
 
     // Deinterleave
     std::vector<std::vector<uint8_t>> ch_dsd(n_channels);
@@ -979,25 +1065,17 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf) {
         ch_dsd[c].push_back(dsd_data[i]);
     }
 
-    // Decimate DSD → PCM (MSB-first for DFF)
+    // ── Two-stage decimation: DSD → CIC → FIR → 352.8 kHz PCM ─────────
     ad.channels.resize(n_channels);
     for (uint32_t c = 0; c < n_channels; ++c) {
-        ad.channels[c].resize(pcm_samples_per_ch);
-        for (size_t i = 0; i < pcm_samples_per_ch; ++i) {
-            double sum = 0.0;
-            for (int d = 0; d < decimation; ++d) {
-                size_t bit_idx = i * decimation + d;
-                size_t byte_idx = bit_idx / 8;
-                int bit_pos = 7 - (bit_idx % 8);  // MSB first in DFF
-
-                if (byte_idx < ch_dsd[c].size()) {
-                    bool bit = (ch_dsd[c][byte_idx] >> bit_pos) & 1;
-                    sum += bit ? 1.0 : -1.0;
-                }
-            }
-            ad.channels[c][i] = sum / decimation;
-        }
+        ad.channels[c] = dsd::decimate_channel(
+            ch_dsd[c], total_bits_per_ch,
+            decimation, false /* MSB first in DFF */);
     }
+
+    // Free DSD byte streams
+    ch_dsd.clear();
+    ch_dsd.shrink_to_fit();
 
     return ad;
 }

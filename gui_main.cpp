@@ -92,12 +92,23 @@ struct AppState {
     std::vector<std::string> collect_files_from_path() {
         std::vector<std::string> files;
         std::string p = path_buf;
+
+        // Trim trailing whitespace and slashes
+        while (!p.empty() && (p.back() == ' ' || p.back() == '\n' || p.back() == '\r'))
+            p.pop_back();
+        while (p.size() > 1 && (p.back() == '/' || p.back() == '\\'))
+            p.pop_back();
+
         if (p.empty()) return files;
 
         try {
             if (fs::is_regular_file(p)) {
                 if (audio::is_supported_format(p))
                     files.push_back(p);
+                else {
+                    std::lock_guard<std::mutex> lock(mtx);
+                    error_log += "Unsupported format: " + fs::path(p).extension().string() + "\n";
+                }
             } else if (fs::is_directory(p)) {
                 for (const auto& entry : fs::directory_iterator(p)) {
                     if (entry.is_regular_file() &&
@@ -105,8 +116,18 @@ struct AppState {
                         files.push_back(entry.path().string());
                 }
                 std::sort(files.begin(), files.end());
+                if (files.empty()) {
+                    std::lock_guard<std::mutex> lock(mtx);
+                    error_log += "No supported audio files (.wav .flac .aif .dsf .dff) in folder.\n";
+                }
+            } else {
+                std::lock_guard<std::mutex> lock(mtx);
+                error_log += "Path not found: " + p + "\n";
             }
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lock(mtx);
+            error_log += "Error scanning path: " + std::string(e.what()) + "\n";
+        }
         return files;
     }
 
