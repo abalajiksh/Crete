@@ -658,9 +658,9 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
     double norm = 1.0 / (1LL << (si.bits_per_sample - 1));
 
     // Decode audio frames
-    // Scan for frame sync: 0xFFF8 or 0xFFF9
+    // Frame sync: 14-bit 0x3FFE, then reserved(0), then blocking strategy
     while (pos + 2 < buf.size()) {
-        // Find sync code
+        // Fast byte-level pre-filter: 0xFF followed by 0xF8 or 0xF9
         if (buf[pos] != 0xFF || (buf[pos+1] & 0xFC) != 0xF8) {
             pos++;
             continue;
@@ -670,19 +670,31 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
         flac::BitReader br(buf.data() + pos, buf.size() - pos);
 
         try {
-            // Frame header
+            // Frame header (FLAC format spec):
+            //   14 bits: sync code = 0x3FFE
+            //    1 bit:  reserved (must be 0)
+            //    1 bit:  blocking strategy (0=fixed, 1=variable)
+            //    4 bits: block size code
+            //    4 bits: sample rate code
+            //    4 bits: channel assignment
+            //    3 bits: sample size code
+            //    1 bit:  reserved (must be 0)
             uint32_t sync = br.read_bits(14);
-            if (sync != 0x3FF8 && sync != 0x3FF9) {
+            if (sync != 0x3FFE) {
                 pos++;
                 continue;
             }
 
-            [[maybe_unused]] bool variable_blocksize = (sync & 1);
+            uint32_t reserved0 = br.read_bits(1);
+            if (reserved0 != 0) { pos++; continue; }
+
+            [[maybe_unused]] uint32_t blocking_strategy = br.read_bits(1);
             uint32_t bs_code = br.read_bits(4);
             uint32_t sr_code = br.read_bits(4);
             uint32_t ch_assign = br.read_bits(4);
             [[maybe_unused]] uint32_t bps_code = br.read_bits(3);
-            br.read_bits(1);  // reserved
+            uint32_t reserved1 = br.read_bits(1);
+            if (reserved1 != 0) { pos++; continue; }
 
             // Frame/sample number (UTF-8 coded)
             br.read_utf8();
