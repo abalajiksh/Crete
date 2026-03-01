@@ -92,6 +92,8 @@ Browse for a file or folder (or drag and drop), select output format, and click 
 
 ## Output Formats
 
+**Official Album Data:** https://dr.loudness-war.info/album/view/200279
+
 ### Standard (`-f std`, default)
 Compatible with dr.loudness-war.info submission:
 ```
