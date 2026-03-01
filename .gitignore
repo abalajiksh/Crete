@@ -1,1 +1,5 @@
 crete
+crete-gui
+build/
+third_party/
+*.o
