@@ -245,26 +245,22 @@ inline double compute_integrated_loudness(const double* samples, size_t n,
 // ── TT Dynamic Range Meter ──────────────────────────────────────────────────
 // Pleasurize Music Foundation algorithm (matches foobar2000 DR Meter).
 //
-// Per channel:
-//   1. Find track peak (max |sample|)
-//   2. Split into 3-second non-overlapping blocks
-//   3. Compute RMS per block, discard silent blocks (< -60 dBFS)
-//   4. Sort by RMS descending, select top 20%
-//   5. loud_rms = sqrt( mean(rms_i²) )  — quadratic mean, NOT arithmetic
-//   6. DR_channel = 20·log10(track_peak / loud_rms)
+// The algorithm operates on multi-channel blocks, NOT per-channel:
+//   1. Split audio into 3-second non-overlapping blocks
+//   2. Per block: RMS = sqrt( Σ_all_channels(samples²) / N_per_channel )
+//      (sums power across channels, divides by per-channel sample count)
+//   3. Per block: peak = max |sample| across all channels
+//   4. Discard near-silent blocks (RMS < -60 dBFS)
+//   5. Sort blocks by RMS descending, select top 20%
+//   6. DR = 20·log10( mean(top_peaks) / mean(top_rms) )
+//      where means are arithmetic in linear domain
 //
-// Final DR = round( mean(DR_channel) )
-//
-// Displayed RMS = power-summed across channels:
-//   sqrt( (Σ L² + Σ R²) / N_per_channel )
-// This sums channel energy (divides by per-channel N, not total N),
-// giving +3.01 dB vs per-channel average for stereo.
+// The displayed RMS uses the same power-summing convention.
 // ────────────────────────────────────────────────────────────────────────────
 
 struct TTDRResult {
-    double dr;                  // averaged across channels
+    double dr;
     size_t blocks;
-    std::vector<double> dr_per_channel;
     double overall_rms_dbfs;    // power-summed across channels
     double overall_peak_dbfs;   // max across channels
     bool   is_clipping;
@@ -280,7 +276,6 @@ inline TTDRResult compute_tt_dr_multichannel(
     size_t block_size = static_cast<size_t>(block_seconds * sample_rate);
 
     TTDRResult result;
-    result.blocks = (n >= block_size) ? n / block_size : 1;
 
     // ── Overall track peak and power-summed RMS ──────────────────────
     double track_peak = 0.0;
@@ -294,69 +289,74 @@ inline TTDRResult compute_tt_dr_multichannel(
         }
     }
 
-    // Displayed RMS: divide by N_per_channel (sums channel power)
     result.overall_rms_dbfs  = to_dbfs(std::sqrt(total_sum_sq / static_cast<double>(n)));
     result.overall_peak_dbfs = to_dbfs(track_peak);
     result.is_clipping       = (track_peak >= 0.9999);
 
-    // ── Per-channel DR computation ───────────────────────────────────
-    double dr_sum = 0.0;
+    if (n < block_size) {
+        double rms = std::sqrt(total_sum_sq / static_cast<double>(n));
+        result.dr = to_dbfs(track_peak) - to_dbfs(rms);
+        result.blocks = 1;
+        return result;
+    }
 
-    for (size_t ch = 0; ch < nch; ++ch) {
-        const auto& samp = channels[ch];
+    // ── Multi-channel block analysis ─────────────────────────────────
+    size_t n_blocks = n / block_size;
+    result.blocks = n_blocks;
 
-        // Channel peak
-        double ch_peak = peak_of(samp.data(), n);
+    std::vector<double> block_rms, block_peak;
+    block_rms.reserve(n_blocks);
+    block_peak.reserve(n_blocks);
 
-        if (n < block_size) {
-            double rms = rms_of(samp.data(), n);
-            double dr_ch = to_dbfs(ch_peak) - to_dbfs(rms);
-            result.dr_per_channel.push_back(dr_ch);
-            dr_sum += dr_ch;
-            continue;
-        }
+    for (size_t b = 0; b < n_blocks; ++b) {
+        size_t start = b * block_size;
+        double sum_sq = 0.0;
+        double pk = 0.0;
 
-        size_t n_blocks = n / block_size;
-        std::vector<double> block_rms;
-        block_rms.reserve(n_blocks);
-
-        for (size_t b = 0; b < n_blocks; ++b) {
-            size_t start = b * block_size;
-            double rms = rms_of(&samp[start], block_size);
-
-            // Exclude near-silent blocks (< -60 dBFS)
-            if (rms > 1e-3) {
-                block_rms.push_back(rms);
+        for (size_t ch = 0; ch < nch; ++ch) {
+            for (size_t i = start; i < start + block_size; ++i) {
+                double s = channels[ch][i];
+                sum_sq += s * s;
+                pk = std::max(pk, std::abs(s));
             }
         }
 
-        if (block_rms.empty()) {
-            result.dr_per_channel.push_back(0.0);
-            dr_sum += 0.0;
-            continue;
+        // RMS: divide by per-channel block size (sums channel power)
+        double rms = std::sqrt(sum_sq / static_cast<double>(block_size));
+
+        // Exclude near-silent blocks (< -60 dBFS)
+        if (rms > 1e-3) {
+            block_rms.push_back(rms);
+            block_peak.push_back(pk);
         }
-
-        // Sort descending
-        std::sort(block_rms.begin(), block_rms.end(), std::greater<double>());
-
-        // Top 20%
-        size_t n_top = std::max<size_t>(1,
-            static_cast<size_t>(std::ceil(block_rms.size() * 0.2)));
-        n_top = std::min(n_top, block_rms.size());
-
-        // Quadratic mean (RMS-of-RMS) of top 20% blocks
-        double sum_rms_sq = 0.0;
-        for (size_t i = 0; i < n_top; ++i)
-            sum_rms_sq += block_rms[i] * block_rms[i];
-        double loud_rms = std::sqrt(sum_rms_sq / static_cast<double>(n_top));
-
-        // DR = track_peak_dB - loud_rms_dB
-        double dr_ch = to_dbfs(ch_peak) - to_dbfs(loud_rms);
-        result.dr_per_channel.push_back(dr_ch);
-        dr_sum += dr_ch;
     }
 
-    result.dr = dr_sum / static_cast<double>(nch);
+    if (block_rms.empty()) {
+        result.dr = 0.0;
+        return result;
+    }
+
+    // ── Sort by RMS descending, take top 20% ─────────────────────────
+    std::vector<size_t> indices(block_rms.size());
+    std::iota(indices.begin(), indices.end(), 0);
+    std::sort(indices.begin(), indices.end(),
+              [&](size_t a, size_t b) { return block_rms[a] > block_rms[b]; });
+
+    size_t n_top = std::max<size_t>(1,
+        std::min<size_t>(block_rms.size(),
+            static_cast<size_t>(std::ceil(block_rms.size() * 0.2))));
+
+    // Arithmetic mean of top-20% peak and RMS (linear domain)
+    double sum_peak = 0.0, sum_rms = 0.0;
+    for (size_t i = 0; i < n_top; ++i) {
+        sum_peak += block_peak[indices[i]];
+        sum_rms  += block_rms[indices[i]];
+    }
+
+    double avg_peak = sum_peak / static_cast<double>(n_top);
+    double avg_rms  = sum_rms / static_cast<double>(n_top);
+    result.dr = to_dbfs(avg_peak) - to_dbfs(avg_rms);
+
     return result;
 }
 
