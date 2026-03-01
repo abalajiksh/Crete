@@ -4,6 +4,8 @@ Zero-dependency C++17 dynamic range meter. The name is French for *peak* / *cres
 
 Measures **TT Dynamic Range** (Pleasurize Music Foundation algorithm), **EBU R128 integrated loudness**, and **crest factor** for lossless audio files. Output is compatible with [dr.loudness-war.info](http://dr.loudness-war.info/) submission format.
 
+**NOTE:** DSD support is flaky and is being actively worked on.
+
 ## Build
 
 ### CLI (zero dependencies)
@@ -93,16 +95,101 @@ Browse for a file or folder (or drag and drop), select output format, and click 
 ### Standard (`-f std`, default)
 Compatible with dr.loudness-war.info submission:
 ```
+abalaji@fedora:~/Projects/Crete$ ./crete -f std /home/abalaji/Downloads/Daft\ Punk\ -\ Random\ Access\ Memories\ -\ 10th\ Anniversary\ E
+dition/Disc\ 2/
+----------------------------------------------------------------------------------------------                      
+ Analyzed Folder: /home/abalaji/Downloads/Daft Punk - Random Access Memories - 10th Anniversary Edition/Disc 2/
+----------------------------------------------------------------------------------------------
 DR         Peak       RMS        Filename
-DR9        over       -10.30 dB  01 - Give Life Back to Music.flac
+----------------------------------------------------------------------------------------------
+
+DR11       -1.77 dB   -17.31 dB  01. Horizon Ouverture - Daft Punk.wav
+DR10       -0.01 dB   -12.91 dB  02. Horizon (Japan CD) - Daft Punk.wav
+DR9        over       -10.56 dB  03. GLBTM (Studio Outtakes) - Daft Punk.wav
+DR7        -0.09 dB   -8.09 dB   04. Infinity Repeating (2013 Demo) [feat. Julian Casablancas+The Voidz] - Daft Punk.wav
+DR9        over       -10.44 dB  05. GL (Early Take) [feat. Pharrell Williams and Nile Rodgers] - Daft Punk.wav
+DR9        over       -10.64 dB  06. Prime (2012 Unfinished) - Daft Punk.wav
+DR8        over       -8.87 dB   07. LYTD (Vocoder Tests) [feat. Pharrell Williams] - Daft Punk.wav
+DR11       over       -12.78 dB  08. The Writing of Fragments of Time (feat. Todd Edwards) - Daft Punk.wav
+DR7        -0.09 dB   -11.09 dB  09. Touch (2021 Epilogue) [feat. Paul Williams] - Daft Punk.wav
+----------------------------------------------------------------------------------------------
+
+ Number of Files: 9
+ Official DR Value: DR9
+
+==============================================================================================
 ```
 
 ### foobar2000 (`-f foobar`)
 Mimics foobar2000 DR Meter 1.1.1 output with duration and technical info.
+```
+abalaji@fedora:~/Projects/Crete$ ./crete -f foobar /home/abalaji/Downloads/Daft\ Punk\ -\ Random\ Access\ Memories\ -\ 10th\ Anniversary
+\ Edition/Disc\ 2/
+crête 0.2.1 / TT DR Offline Meter                                               ..                                  
+log date: 2026-03-01 12:19:06
 
+--------------------------------------------------------------------------------
+Analyzed: Disc 2 / 
+--------------------------------------------------------------------------------
+
+DR         Peak         RMS     Duration Track
+--------------------------------------------------------------------------------
+DR11        -1.77 dB   -17.31 dB     2:08 01. Horizon Ouverture - Daft Punk
+DR10        -0.01 dB   -12.91 dB     4:22 02. Horizon (Japan CD) - Daft Punk
+DR9          0.00 dB   -10.56 dB     6:21 03. GLBTM (Studio Outtakes) - Daft Punk
+DR7         -0.09 dB    -8.09 dB     3:59 04. Infinity Repeating (2013 Demo) [feat. Julian Casablancas+The Voidz] - Daft Punk
+DR9          0.00 dB   -10.44 dB     0:32 05. GL (Early Take) [feat. Pharrell Williams and Nile Rodgers] - Daft Punk
+DR9          0.00 dB   -10.64 dB     4:46 06. Prime (2012 Unfinished) - Daft Punk
+DR8          0.00 dB    -8.87 dB     2:08 07. LYTD (Vocoder Tests) [feat. Pharrell Williams] - Daft Punk
+DR11         0.00 dB   -12.78 dB     8:17 08. The Writing of Fragments of Time (feat. Todd Edwards) - Daft Punk
+DR7         -0.09 dB   -11.09 dB     3:01 09. Touch (2021 Epilogue) [feat. Paul Williams] - Daft Punk
+--------------------------------------------------------------------------------
+
+Number of tracks:  9
+Official DR value: DR9
+
+Samplerate:        44100 Hz
+Channels:          2
+Bits per sample:   16
+Codec:             WAV
+================================================================================
+```
 ### Extended (`-f ext`)
 All metrics in one table — DR, peak, RMS, integrated loudness (LUFS), peak-to-loudness ratio, crest factor, duration.
+```
+abalaji@fedora:~/Projects/Crete$ ./crete -f ext /home/abalaji/Downloads/Daft\ Punk\ -\ Random\ Access\ Memories\ -\ 10th\ Anniversary\ E
+dition/Disc\ 2/
+crête 0.2.1 — Extended Dynamic Range Analysis                                   ..                                  
+log date: 2026-03-01 12:19:24
 
+------------------------------------------------------------------------------------------------------------------------
+Analyzed: Disc 2 / 
+------------------------------------------------------------------------------------------------------------------------
+
+DR     Peak       RMS        LUFS       PLR        Crest    Dur       Filename
+------------------------------------------------------------------------------------------------------------------------
+DR11   -1.77 dB   -17.31 dB  -20.3      18.6 dB    17.6 dB  2:08      01. Horizon Ouverture - Daft Punk
+DR10   -0.01 dB   -12.91 dB  -16.5      16.5 dB    15.9 dB  4:22      02. Horizon (Japan CD) - Daft Punk
+DR9    over       -10.56 dB  -14.6      14.6 dB    13.6 dB  6:21      03. GLBTM (Studio Outtakes) - Daft Punk
+DR7    -0.09 dB   -8.09 dB   -12.0      11.9 dB    11.0 dB  3:59      04. Infinity Repeating (2013 Demo) [feat. Julian Casablancas+The Voidz] - Daft Punk
+DR9    over       -10.44 dB  -13.4      13.4 dB    13.6 dB  0:32      05. GL (Early Take) [feat. Pharrell Williams and Nile Rodgers] - Daft Punk
+DR9    over       -10.64 dB  -14.2      14.2 dB    13.7 dB  4:46      06. Prime (2012 Unfinished) - Daft Punk
+DR8    over       -8.87 dB   -13.0      13.0 dB    11.9 dB  2:08      07. LYTD (Vocoder Tests) [feat. Pharrell Williams] - Daft Punk
+DR11   over       -12.78 dB  -16.1      16.1 dB    15.8 dB  8:17      08. The Writing of Fragments of Time (feat. Todd Edwards) - Daft Punk
+DR7    -0.09 dB   -11.09 dB  -13.8      13.7 dB    14.0 dB  3:01      09. Touch (2021 Epilogue) [feat. Paul Williams] - Daft Punk
+------------------------------------------------------------------------------------------------------------------------
+
+Number of tracks:  9
+Official DR value: DR9
+Avg. loudness:     -14.9 LUFS
+
+Samplerate:        44100 Hz
+Channels:          2
+Bits per sample:   16
+Codec:             WAV
+Verdict:           Normal (DR 8-13)
+========================================================================================================================
+```
 ## Algorithm
 
 The TT Dynamic Range algorithm:
