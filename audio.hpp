@@ -795,33 +795,34 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
 //
 // DSD (Direct Stream Digital) is 1-bit sigma-delta modulation at 2.8224 MHz
 // (DSD64) or multiples. The noise shaping pushes quantization noise to
-// ultrasonic frequencies, which means the reconstructed PCM signal can
-// exhibit peaks ABOVE 0 dBFS — a property invisible to simple box-filter
-// decimation (which bounds output to ±1.0 by construction).
+// ultrasonic frequencies — typically 40-60 dB above the audio signal.
 //
 // We use a two-stage decimation pipeline:
 //
-//   Stage 1: CIC (box) filter at DSD rate, decimate by M (8 for DSD64)
-//     - Output: 352.8 kHz PCM, bounded to [-1.0, +1.0]
-//     - Fast: just bit counting, no multiplies
-//     - Passband droop: ~-1 dB at 100 kHz, ~-3.8 dB at Nyquist
+//   Stage 1: CIC^5 (5th-order Cascaded Integrator-Comb) at DSD rate
+//     - 5 cascaded integrators at DSD bit rate + decimation + 5 comb filters
+//     - Stopband rejection: ~75 dB at first alias band
+//     - DC gain: M^5, normalized after comb stage
+//     - Much better noise rejection than CIC^1 (box filter, ~13 dB)
 //
-//   Stage 2: FIR lowpass filter at 352.8 kHz, no decimation
-//     - 48-tap windowed-sinc (Blackman), cutoff at 150 kHz
+//   Stage 2: FIR lowpass at 352.8 kHz output rate
+//     - 128-tap Blackman-Harris windowed sinc, cutoff at 50 kHz
+//     - ~92 dB sidelobe rejection from 4-term Blackman-Harris window
 //     - Negative coefficients allow Gibbs-type overshoot above ±1.0
-//     - Cleans up CIC aliasing artifacts
+//     - Rejects residual CIC aliasing, cleans up transition band
 //     - Output CAN exceed ±1.0, recovering above-0-dBFS peaks
 //
-// The stage 2 FIR's negative lobes reconstruct inter-sample peaks that the
-// CIC's all-positive coefficients suppress. This matches foobar2000's DSD
-// playback behavior (352.8 kHz output with peaks above full scale).
+// The CIC^5 removes the bulk of DSD's ultrasonic noise. The FIR provides
+// a sharp transition band and recovers true inter-sample peaks that the
+// sigma-delta modulator can produce above full scale.
 //
 // Target output: 352.8 kHz — matches foobar2000 DR Meter reference.
 // ════════════════════════════════════════════════════════════════════════════
 
 namespace dsd {
 
-// ── Windowed-sinc lowpass FIR design (Blackman window) ─────────────────────
+// ── Blackman-Harris windowed-sinc lowpass FIR design ───────────────────────
+// 4-term Blackman-Harris: ~92 dB sidelobe rejection
 inline std::vector<double> design_lowpass(int num_taps, double cutoff_hz,
                                            double sample_rate) {
     std::vector<double> h(num_taps);
@@ -831,54 +832,130 @@ inline std::vector<double> design_lowpass(int num_taps, double cutoff_hz,
 
     for (int n = 0; n < num_taps; ++n) {
         double x = n - M / 2.0;
+        // Sinc kernel
         h[n] = (std::abs(x) < 1e-10) ? 2.0 * fc
                : std::sin(2.0 * PI * fc * x) / (PI * x);
-        double w = 0.42 - 0.5 * std::cos(2.0 * PI * n / M)
-                        + 0.08 * std::cos(4.0 * PI * n / M);
+        // 4-term Blackman-Harris window
+        double w = 0.35875
+                 - 0.48829 * std::cos(2.0 * PI * n / M)
+                 + 0.14128 * std::cos(4.0 * PI * n / M)
+                 - 0.01168 * std::cos(6.0 * PI * n / M);
         h[n] *= w;
     }
+    // Normalize to unity DC gain
     double sum = 0.0;
     for (double v : h) sum += v;
     if (sum != 0.0) for (double& v : h) v /= sum;
     return h;
 }
 
-// ── Two-stage DSD→PCM decimation for one channel ──────────────────────────
+// ── CIC^5 + FIR decimation for one DSD channel ───────────────────────────
+//
+// Stage 1: 5th-order CIC (Cascaded Integrator-Comb) at DSD rate
+//   - 5 cascaded integrators at the DSD bit rate
+//   - Decimate by M
+//   - 5 cascaded comb filters at the output rate
+//   - Stopband rejection: ~75 dB at first alias band (vs ~13 dB for CIC^1)
+//   - DC gain: M^5, normalized out after comb stage
+//
+// Stage 2: 128-tap FIR lowpass at 352.8 kHz output rate
+//   - Blackman-Harris window (~92 dB sidelobes)
+//   - 50 kHz cutoff — preserves full audio band, rejects DSD noise
+//   - Negative coefficients enable Gibbs overshoot above ±1.0
+//   - Compensates residual CIC aliasing artifacts
+//
+// The CIC^5 removes the bulk of DSD's ultrasonic noise (which can be
+// 40-60 dB above the audio signal). The FIR cleans up any residual
+// and provides the sharp transition band needed for accurate measurement.
+//
 // ch_dsd:     raw DSD byte stream for one channel
 // total_bits: number of valid DSD bits
 // decimation: CIC decimation ratio (e.g. 8 for DSD64→352.8k)
 // lsb_first:  true for DSF (LSB-first), false for DFF (MSB-first)
+// ──────────────────────────────────────────────────────────────────────────
+
 inline std::vector<double> decimate_channel(
         const std::vector<uint8_t>& ch_dsd,
         size_t total_bits,
         int decimation,
         bool lsb_first) {
 
+    static constexpr int CIC_ORDER = 5;
+
     size_t n_out = total_bits / decimation;
     if (n_out == 0) return {};
 
-    // ── Stage 1: CIC (box) filter with decimation ────────────────────
-    // Average 'decimation' consecutive DSD bits (±1) → bounded to [-1, +1]
-    std::vector<double> cic(n_out);
-    for (size_t i = 0; i < n_out; ++i) {
-        double sum = 0.0;
-        size_t base = i * decimation;
-        for (int d = 0; d < decimation; ++d) {
-            size_t bit_idx = base + d;
-            if (bit_idx >= total_bits) break;
-            size_t byte_idx = bit_idx / 8;
-            if (byte_idx >= ch_dsd.size()) break;
-            int bit_pos = lsb_first ? (bit_idx % 8) : (7 - (bit_idx % 8));
-            bool bit = (ch_dsd[byte_idx] >> bit_pos) & 1;
-            sum += bit ? 1.0 : -1.0;
+    // ── Stage 1a: CIC integrators (run at DSD bit rate) ──────────────
+    // 5 cascaded integrators: y[n] = y[n-1] + x[n]
+    // Input is ±1 (DSD bits). Using int64_t for overflow safety —
+    // CIC with modular arithmetic works correctly as long as the
+    // final comb output fits in the integer width.
+    int64_t integ[CIC_ORDER] = {};
+    std::vector<int64_t> integ_decimated;
+    integ_decimated.reserve(n_out);
+
+    size_t total_bytes = (total_bits + 7) / 8;
+    if (total_bytes > ch_dsd.size()) total_bytes = ch_dsd.size();
+
+    size_t bit_counter = 0;
+    size_t global_bit = 0;
+
+    for (size_t byte_idx = 0; byte_idx < total_bytes && global_bit < total_bits; ++byte_idx) {
+        uint8_t b = ch_dsd[byte_idx];
+
+        for (int bit = 0; bit < 8 && global_bit < total_bits; ++bit, ++global_bit) {
+            int bit_pos = lsb_first ? bit : (7 - bit);
+            int x = ((b >> bit_pos) & 1) * 2 - 1;  // branchless: 1→+1, 0→-1
+
+            // Cascaded integrators
+            integ[0] += x;
+            integ[1] += integ[0];
+            integ[2] += integ[1];
+            integ[3] += integ[2];
+            integ[4] += integ[3];
+
+            // Decimate: take every M-th output
+            if (++bit_counter == static_cast<size_t>(decimation)) {
+                bit_counter = 0;
+                integ_decimated.push_back(integ[CIC_ORDER - 1]);
+            }
         }
-        cic[i] = sum / decimation;
     }
 
+    n_out = integ_decimated.size();
+    if (n_out == 0) return {};
+
+    // ── Stage 1b: CIC comb filters (run at decimated rate) ───────────
+    // 5 cascaded combs: y[n] = x[n] - x[n-1]
+    // Normalizes by M^N (CIC DC gain)
+    double cic_gain = 1.0;
+    for (int i = 0; i < CIC_ORDER; ++i) cic_gain *= decimation;
+
+    std::vector<double> cic(n_out);
+    {
+        int64_t comb_delay[CIC_ORDER] = {};
+        for (size_t i = 0; i < n_out; ++i) {
+            int64_t val = integ_decimated[i];
+            for (int s = 0; s < CIC_ORDER; ++s) {
+                int64_t prev = comb_delay[s];
+                comb_delay[s] = val;
+                val = val - prev;
+            }
+            cic[i] = static_cast<double>(val) / cic_gain;
+        }
+    }
+
+    // Free integrator output (no longer needed)
+    integ_decimated.clear();
+    integ_decimated.shrink_to_fit();
+
     // ── Stage 2: FIR lowpass at output rate (352.8 kHz) ──────────────
-    // 48 taps, 150 kHz cutoff — allows overshoot above ±1.0
-    static const int FIR_TAPS = 48;
-    static const double FIR_CUTOFF = 150000.0;
+    // 128 taps, 50 kHz cutoff — preserves audio band + inter-sample peaks,
+    // rejects residual DSD noise above transition band (~50-60 kHz).
+    // Blackman-Harris window provides ~92 dB sidelobe rejection.
+    // Negative coefficients enable overshoot above ±1.0 for true peak recovery.
+    static const int FIR_TAPS = 128;
+    static const double FIR_CUTOFF = 50000.0;
     static const double FS_OUT = 352800.0;
 
     auto fir = design_lowpass(FIR_TAPS, FIR_CUTOFF, FS_OUT);
@@ -887,10 +964,13 @@ inline std::vector<double> decimate_channel(
     std::vector<double> pcm(n_out);
     for (size_t i = 0; i < n_out; ++i) {
         double acc = 0.0;
-        for (int k = 0; k < FIR_TAPS; ++k) {
-            int64_t idx = static_cast<int64_t>(i) + k - fir_half;
-            if (idx >= 0 && idx < static_cast<int64_t>(n_out))
-                acc += fir[k] * cic[static_cast<size_t>(idx)];
+        // Determine valid range for this sample
+        int64_t k_start = std::max<int64_t>(0, fir_half - static_cast<int64_t>(i));
+        int64_t k_end = std::min<int64_t>(FIR_TAPS,
+            static_cast<int64_t>(n_out) - static_cast<int64_t>(i) + fir_half);
+        for (int64_t k = k_start; k < k_end; ++k) {
+            acc += fir[static_cast<size_t>(k)]
+                 * cic[static_cast<size_t>(static_cast<int64_t>(i) + k - fir_half)];
         }
         pcm[i] = acc;
     }
