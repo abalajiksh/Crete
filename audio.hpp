@@ -794,13 +794,13 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
 //
 //   Stage 2: CIC-compensated FIR lowpass at 352.8 kHz output rate
 //     - 256-tap, designed via frequency-sampling with inverse-CIC response
-//     - Passband (0-22 kHz): gain = 1/H_cic(f) → flat combined response
-//     - Cosine-rolloff transition band (22-36 kHz)
-//     - Stopband (>36 kHz): ~100 dB rejection (Blackman-Harris window)
+//     - Passband (0-50 kHz): gain = 1/H_cic(f) → flat combined response
+//     - Cosine-rolloff transition band (50-80 kHz)
+//     - Stopband (>80 kHz): ~50 dB rejection (Blackman-Harris window)
 //     - Negative coefficients enable Gibbs overshoot above ±1.0
 //
 // The compensation FIR inverts the CIC's passband droop so that the
-// overall chain has flat response from 0-22 kHz. This preserves both
+// overall chain has flat response from 0-50 kHz. This preserves both
 // peak levels and RMS accuracy, enabling detection of above-0-dBFS
 // peaks that DSD's sigma-delta modulation can produce.
 //
@@ -822,8 +822,8 @@ namespace dsd {
 //
 // NOT sin(pi*M*f)/(M*sin(pi*f)) — that would be the input-rate formula!
 //
-// passband_hz:  upper edge of flat passband (e.g. 22 kHz)
-// stopband_hz:  start of stopband (e.g. 36 kHz)
+// passband_hz:  upper edge of flat passband (e.g. 50 kHz)
+// stopband_hz:  start of stopband (e.g. 80 kHz)
 // sample_rate:  output sample rate after CIC decimation
 // cic_order:    CIC cascade order (N in CIC^N)
 // cic_M:        CIC decimation factor
@@ -971,11 +971,13 @@ inline std::vector<double> decimate_channel(
     integ_decimated.shrink_to_fit();
 
     // ── Stage 2: CIC-compensated FIR lowpass ─────────────────────────
-    // 256 taps, passband 22 kHz, stopband 36 kHz
-    // Compensates CIC^3 droop for flat 0-22 kHz response
+    // 256 taps, passband 50 kHz, stopband 80 kHz
+    // Wide passband preserves ultrasonic peak excursions from DSD's
+    // sigma-delta modulation, matching foobar2000's DSD→PCM conversion.
+    // A narrow 22 kHz cutoff loses 2-4 dB of peak content and ~0.4 dB RMS.
     static const int FIR_TAPS = 256;
-    static const double PASSBAND_HZ = 22000.0;
-    static const double STOPBAND_HZ = 36000.0;
+    static const double PASSBAND_HZ = 50000.0;
+    static const double STOPBAND_HZ = 80000.0;
     static const double FS_OUT = 352800.0;
 
     auto fir = design_cic_compensated_lowpass(
