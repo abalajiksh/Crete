@@ -20,6 +20,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace audio {
@@ -788,7 +789,7 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
 //
 //   - 768-tap prototype lowpass FIR designed at DSD rate (2.8224 MHz)
 //   - Kaiser window (β=7.86) for ~80 dB sidelobe rejection
-//   - 160 kHz passband cutoff to match foobar2000's DSD decoder bandwidth
+//   - 150 kHz passband cutoff to match foobar2000's DSD decoder bandwidth
 //   - Split into M polyphase phases (96 taps each for DSD64)
 //   - Operates directly on ±1 DSD bits: output = Σ h[k]·bit[k]
 //
@@ -879,12 +880,11 @@ inline std::vector<double> decimate_channel(
 
     // Prototype FIR parameters
     // 768 taps = 96 per polyphase phase (for M=8)
-    // 160 kHz cutoff approaches the 176.4 kHz Nyquist of 352.8 kHz output.
-    // foobar2000's SACD decoder preserves bandwidth nearly to Nyquist.
-    // More taps give a sharper transition band, preventing aliasing
-    // while maximizing passband width for accurate DSD peak recovery.
+    // 150 kHz cutoff balances ultrasonic peak preservation with noise rejection.
+    // 160 kHz overshoots foobar's peaks by ~0.5-1 dB (too much DSD noise),
+    // 140 kHz undershoots by ~1 dB. 150 kHz is the sweet spot.
     static const int PROTO_TAPS = 768;
-    static const double CUTOFF_HZ = 160000.0;
+    static const double CUTOFF_HZ = 150000.0;
 
     double fs_dsd = 352800.0 * decimation;
 
@@ -893,37 +893,49 @@ inline std::vector<double> decimate_channel(
     size_t n_out = total_bits / decimation;
     if (n_out == 0) return {};
 
-    size_t total_bytes = (total_bits + 7) / 8;
-    if (total_bytes > ch_dsd.size()) total_bytes = ch_dsd.size();
-
-    // Helper: read DSD bit at position idx as +1.0 or -1.0
-    // (processes directly from byte array — no memory expansion)
-    auto get_bit = [&](size_t idx) -> double {
-        if (idx >= total_bits) return 0.0;
-        size_t byte_idx = idx / 8;
-        int bit_in_byte = static_cast<int>(idx % 8);
-        if (byte_idx >= ch_dsd.size()) return 0.0;
-        int bit_pos = lsb_first ? bit_in_byte : (7 - bit_in_byte);
-        return ((ch_dsd[byte_idx] >> bit_pos) & 1) ? 1.0 : -1.0;
-    };
-
-    // Polyphase FIR decimation
-    // For each output sample i:
-    //   output[i] = Σ_k h[k] · bit[i·M + PROTO_TAPS - 1 - k]
     int fir_len = static_cast<int>(fir.size());
+    const double* fir_data = fir.data();
+    const uint8_t* dsd_data = ch_dsd.data();
+    size_t dsd_bytes = ch_dsd.size();
+
+    // ── Parallel polyphase FIR decimation ────────────────────────────
     std::vector<double> pcm(n_out);
 
-    for (size_t i = 0; i < n_out; ++i) {
-        double acc = 0.0;
-        size_t base = i * decimation;
+    unsigned int n_threads = std::thread::hardware_concurrency();
+    if (n_threads < 1) n_threads = 1;
+    if (n_threads > 32) n_threads = 32;
 
-        for (int k = 0; k < fir_len; ++k) {
-            size_t bit_pos = base + fir_len - 1 - k;
-            if (bit_pos < total_bits) {
-                acc += fir[k] * get_bit(bit_pos);
+    auto worker = [&](size_t out_start, size_t out_end) {
+        for (size_t i = out_start; i < out_end; ++i) {
+            double acc = 0.0;
+            size_t bit_base = i * decimation;
+
+            for (int k = 0; k < fir_len; ++k) {
+                size_t bp = bit_base + (fir_len - 1 - k);
+                if (bp >= total_bits) continue;
+                size_t byte_idx = bp >> 3;          // bp / 8
+                if (byte_idx >= dsd_bytes) continue;
+                int bit_in_byte = static_cast<int>(bp & 7);  // bp % 8
+                int bit_pos = lsb_first ? bit_in_byte : (7 - bit_in_byte);
+                double bv = ((dsd_data[byte_idx] >> bit_pos) & 1) ? 1.0 : -1.0;
+                acc += fir_data[k] * bv;
             }
+            pcm[i] = acc;
         }
-        pcm[i] = acc;
+    };
+
+    if (n_threads <= 1 || n_out < 10000) {
+        worker(0, n_out);
+    } else {
+        std::vector<std::thread> threads;
+        size_t chunk = (n_out + n_threads - 1) / n_threads;
+        for (unsigned int t = 0; t < n_threads; ++t) {
+            size_t start = t * chunk;
+            size_t end = std::min(start + chunk, n_out);
+            if (start < end)
+                threads.emplace_back(worker, start, end);
+        }
+        for (auto& th : threads) th.join();
     }
 
     return pcm;
@@ -1003,12 +1015,18 @@ inline AudioData decode_dsf(const std::vector<uint8_t>& buf) {
         }
     }
 
-    // Polyphase FIR decimation: DSD → 352.8 kHz PCM
+    // Polyphase FIR decimation: DSD → 352.8 kHz PCM (channels in parallel)
     ad.channels.resize(n_channels);
-    for (uint32_t c = 0; c < n_channels; ++c) {
-        ad.channels[c] = dsd::decimate_channel(
-            ch_dsd[c], static_cast<size_t>(total_dsd_samples_per_ch),
-            decimation, true /* LSB first in DSF */);
+    {
+        std::vector<std::thread> ch_threads;
+        for (uint32_t c = 0; c < n_channels; ++c) {
+            ch_threads.emplace_back([&, c]() {
+                ad.channels[c] = dsd::decimate_channel(
+                    ch_dsd[c], static_cast<size_t>(total_dsd_samples_per_ch),
+                    decimation, true /* LSB first in DSF */);
+            });
+        }
+        for (auto& t : ch_threads) t.join();
     }
 
     ch_dsd.clear();
@@ -1083,12 +1101,18 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf) {
         ch_dsd[c].push_back(dsd_data[i]);
     }
 
-    // Polyphase FIR decimation: DSD → 352.8 kHz PCM
+    // Polyphase FIR decimation: DSD → 352.8 kHz PCM (channels in parallel)
     ad.channels.resize(n_channels);
-    for (uint32_t c = 0; c < n_channels; ++c) {
-        ad.channels[c] = dsd::decimate_channel(
-            ch_dsd[c], total_bits_per_ch,
-            decimation, false /* MSB first in DFF */);
+    {
+        std::vector<std::thread> ch_threads;
+        for (uint32_t c = 0; c < n_channels; ++c) {
+            ch_threads.emplace_back([&, c]() {
+                ad.channels[c] = dsd::decimate_channel(
+                    ch_dsd[c], total_bits_per_ch,
+                    decimation, false /* MSB first in DFF */);
+            });
+        }
+        for (auto& t : ch_threads) t.join();
     }
 
     ch_dsd.clear();
