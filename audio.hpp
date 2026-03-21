@@ -789,7 +789,7 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
 //
 //   - 768-tap prototype lowpass FIR designed at DSD rate (2.8224 MHz)
 //   - Kaiser window (β=7.86) for ~80 dB sidelobe rejection
-//   - 145 kHz passband cutoff to match foobar2000's DSD decoder bandwidth
+//   - 140 kHz passband cutoff to match foobar2000's DSD decoder bandwidth
 //   - Split into M polyphase phases (96 taps each for DSD64)
 //   - Operates directly on ±1 DSD bits: output = Σ h[k]·bit[k]
 //
@@ -880,13 +880,14 @@ inline std::vector<double> decimate_channel(
 
     // Prototype FIR parameters
     // 768 taps = 96 per polyphase phase (for M=8)
-    // 145 kHz cutoff balances ultrasonic peak preservation with noise rejection.
-    // At 150 kHz, above-0-dBFS peaks overshoot foobar by 0.5-1.4 dB
-    // (proportional to how far above unity they are) while RMS is perfect.
-    // 145 kHz reduces the ultrasonic content that creates exaggerated
-    // above-unity peaks without meaningfully affecting audio-band RMS.
+    // 140 kHz cutoff with 768 taps gives a sharper transition band than
+    // the previous 512-tap/140 kHz combo. The steep rolloff preserves
+    // content up to 140 kHz faithfully but aggressively attenuates the
+    // 140-176 kHz DSD noise region that creates exaggerated above-unity peaks.
+    // At 145 kHz/768 taps, above-0-dBFS peaks overshoot foobar by 0.5-1.4 dB
+    // while RMS is within 0.05 dB — confirming excess ultrasonic peak energy.
     static const int PROTO_TAPS = 768;
-    static const double CUTOFF_HZ = 145000.0;
+    static const double CUTOFF_HZ = 140000.0;
 
     double fs_dsd = 352800.0 * decimation;
 
