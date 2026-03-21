@@ -658,7 +658,6 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
     double norm = 1.0 / (1LL << (si.bits_per_sample - 1));
 
     // Decode audio frames
-    // Frame sync: 14-bit 0x3FFE, then reserved(0), then blocking strategy
     while (pos + 2 < buf.size()) {
         // Fast byte-level pre-filter: 0xFF followed by 0xF8 or 0xF9
         if (buf[pos] != 0xFF || (buf[pos+1] & 0xFC) != 0xF8) {
@@ -670,15 +669,6 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
         flac::BitReader br(buf.data() + pos, buf.size() - pos);
 
         try {
-            // Frame header (FLAC format spec):
-            //   14 bits: sync code = 0x3FFE
-            //    1 bit:  reserved (must be 0)
-            //    1 bit:  blocking strategy (0=fixed, 1=variable)
-            //    4 bits: block size code
-            //    4 bits: sample rate code
-            //    4 bits: channel assignment
-            //    3 bits: sample size code
-            //    1 bit:  reserved (must be 0)
             uint32_t sync = br.read_bits(14);
             if (sync != 0x3FFE) {
                 pos++;
@@ -738,28 +728,25 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
                 subframes[sf].resize(block_size);
                 int sf_bps = bps;
                 // Side channel gets +1 bit
-                if (ch_assign == 8 && sf == 1) sf_bps++;  // left-side: side is ch1
-                else if (ch_assign == 9 && sf == 0) sf_bps++;  // side-right: side is ch0
-                else if (ch_assign == 10 && sf == 1) sf_bps++;  // mid-side: side is ch1
+                if (ch_assign == 8 && sf == 1) sf_bps++;
+                else if (ch_assign == 9 && sf == 0) sf_bps++;
+                else if (ch_assign == 10 && sf == 1) sf_bps++;
 
                 flac::decode_subframe(br, subframes[sf].data(), block_size, sf_bps);
             }
 
             // Decorrelate channels
             if (ch_assign == 8) {
-                // Left-side → left, right = left - side
                 for (size_t i = 0; i < block_size; ++i)
                     subframes[1][i] = subframes[0][i] - subframes[1][i];
             } else if (ch_assign == 9) {
-                // Side-right → left = side + right, right
                 for (size_t i = 0; i < block_size; ++i)
                     subframes[0][i] = subframes[0][i] + subframes[1][i];
             } else if (ch_assign == 10) {
-                // Mid-side → left = (mid*2 + side) / 2, right = (mid*2 - side) / 2
                 for (size_t i = 0; i < block_size; ++i) {
                     int64_t mid  = subframes[0][i];
                     int64_t side = subframes[1][i];
-                    mid = mid * 2 + (side & 1);  // restore mid
+                    mid = mid * 2 + (side & 1);
                     subframes[0][i] = static_cast<int32_t>((mid + side) >> 1);
                     subframes[1][i] = static_cast<int32_t>((mid - side) >> 1);
                 }
@@ -774,7 +761,7 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
 
             // Align to byte boundary and skip CRC-16
             br.align();
-            br.read_bits(16);  // CRC-16
+            br.read_bits(16);
 
             pos = frame_start + br.position_bytes();
         }
@@ -802,18 +789,15 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
 //   Stage 1: CIC^3 (3rd-order Cascaded Integrator-Comb) at DSD rate
 //     - 3 cascaded integrators + decimate by M + 3 comb filters
 //     - ~45 dB rejection at first alias band
-//     - Passband droop: -9.4 dB at 20 kHz (compensated in Stage 2)
+//     - Passband droop: ~0.2 dB at 22 kHz (minimal for M=8)
 //     - DC gain: M^3, normalized after comb stage
 //
 //   Stage 2: CIC-compensated FIR lowpass at 352.8 kHz output rate
 //     - 256-tap, designed via frequency-sampling with inverse-CIC response
 //     - Passband (0-22 kHz): gain = 1/H_cic(f) → flat combined response
 //     - Cosine-rolloff transition band (22-36 kHz)
-//     - Stopband (>36 kHz): ~80 dB rejection (Blackman-Harris window)
+//     - Stopband (>36 kHz): ~100 dB rejection (Blackman-Harris window)
 //     - Negative coefficients enable Gibbs overshoot above ±1.0
-//
-// Combined noise rejection: ~45 (CIC) + ~80 (FIR) - ~12 (compensation)
-//   ≈ 113 dB, well exceeding DSD's ~60 dB ultrasonic noise.
 //
 // The compensation FIR inverts the CIC's passband droop so that the
 // overall chain has flat response from 0-22 kHz. This preserves both
@@ -831,6 +815,12 @@ namespace dsd {
 //
 // Uses frequency-sampling: compute desired H(f) = 1/H_cic(f) in passband,
 // cosine-rolloff transition band, zero in stopband. IDFT → window → normalize.
+//
+// CRITICAL: frequency f is normalized to the OUTPUT (decimated) rate.
+// The CIC transfer function at output-rate frequency f is:
+//   |H_cic(f)| = |sin(pi*f) / (M * sin(pi*f/M))|^N
+//
+// NOT sin(pi*M*f)/(M*sin(pi*f)) — that would be the input-rate formula!
 //
 // passband_hz:  upper edge of flat passband (e.g. 22 kHz)
 // stopband_hz:  start of stopband (e.g. 36 kHz)
@@ -862,8 +852,10 @@ inline std::vector<double> design_cic_compensated_lowpass(
                 if (f < 1e-10) {
                     cic_mag = 1.0;
                 } else {
-                    double sinc_r = std::sin(PI * cic_M * f)
-                                  / (cic_M * std::sin(PI * f));
+                    // CIC response at output-rate frequency f:
+                    //   |H(f)| = |sin(pi*f) / (M * sin(pi*f/M))|^N
+                    double sinc_r = std::sin(PI * f)
+                                  / (cic_M * std::sin(PI * f / cic_M));
                     cic_mag = std::pow(std::abs(sinc_r), cic_order);
                 }
                 H_desired = 1.0 / std::max(cic_mag, 0.001);
@@ -871,8 +863,8 @@ inline std::vector<double> design_cic_compensated_lowpass(
                 // Transition band: cosine rolloff with compensation
                 double t = (f - fp) / (fs - fp);
                 double rolloff = 0.5 * (1.0 + std::cos(PI * t));
-                double sinc_r = std::sin(PI * cic_M * f)
-                              / (cic_M * std::sin(PI * f));
+                double sinc_r = std::sin(PI * f)
+                              / (cic_M * std::sin(PI * f / cic_M));
                 double cic_mag = std::pow(std::abs(sinc_r), cic_order);
                 H_desired = rolloff / std::max(cic_mag, 0.001);
             }
@@ -906,22 +898,6 @@ inline std::vector<double> design_cic_compensated_lowpass(
 }
 
 // ── CIC^3 + compensated FIR decimation for one DSD channel ────────────────
-//
-// Stage 1: CIC^3 (3rd-order Cascaded Integrator-Comb)
-//   - 3 cascaded integrators at DSD bit rate, decimate by M, 3 comb filters
-//   - ~45 dB rejection at first alias band
-//   - Passband droop: -9.4 dB at 20 kHz (compensated by FIR)
-//   - DC gain: M^3, normalized after comb stage
-//
-// Stage 2: 256-tap CIC-compensated FIR at decimated rate
-//   - Passband (0-22 kHz): gain = 1/H_cic(f) → flat combined response
-//   - Cosine-rolloff transition (22-36 kHz)
-//   - Stopband (>36 kHz): maximum rejection
-//   - Blackman-Harris window (~92 dB sidelobes)
-//   - Negative coefficients enable overshoot above ±1.0
-//
-// Combined rejection: CIC (~45 dB) + FIR (~80 dB) - compensation (~12 dB)
-//   ≈ 113 dB total, well above DSD's ~60 dB ultrasonic noise
 //
 // ch_dsd:     raw DSD byte stream for one channel
 // total_bits: number of valid DSD bits
@@ -1069,22 +1045,14 @@ inline AudioData decode_dsf(const std::vector<uint8_t>& buf) {
     const uint8_t* dsd_data = buf.data() + data_pos + 12;
     size_t dsd_data_size = static_cast<size_t>(data_chunk_size) - 12;
 
-    // Determine decimation ratio: DSD → PCM at 352.8 kHz
-    // DSD64 = 2822400 Hz → 352800 (8:1)
-    // DSD128 = 5644800 Hz → 352800 (16:1)
-    // DSD256 = 11289600 Hz → 352800 (32:1)
-    // Using 352.8 kHz preserves ultrasonic peaks that DSD sigma-delta
-    // encoding can produce above 0 dBFS in PCM domain.
     uint32_t pcm_rate = 352800;
     int decimation = static_cast<int>(dsd_sample_rate / pcm_rate);
     if (decimation < 1) decimation = 1;
 
     ad.sample_rate = pcm_rate;
-    ad.bit_depth   = 1;  // original is 1-bit
+    ad.bit_depth   = 1;
 
     // Deinterleave DSD blocks
-    // DSF stores data in blocks: [ch0_block][ch1_block][ch0_block][ch1_block]...
-    // Each block is block_size_per_ch bytes of DSD data for one channel
     size_t total_dsd_blocks = dsd_data_size / (block_size_per_ch * n_channels);
     size_t total_dsd_bytes_per_ch = total_dsd_blocks * block_size_per_ch;
     uint64_t total_dsd_samples_per_ch = std::min<uint64_t>(
@@ -1105,7 +1073,7 @@ inline AudioData decode_dsf(const std::vector<uint8_t>& buf) {
         }
     }
 
-    // ── Two-stage decimation: DSD → CIC → FIR → 352.8 kHz PCM ─────────
+    // Two-stage decimation: DSD → CIC → FIR → 352.8 kHz PCM
     ad.channels.resize(n_channels);
     for (uint32_t c = 0; c < n_channels; ++c) {
         ad.channels[c] = dsd::decimate_channel(
@@ -1113,7 +1081,6 @@ inline AudioData decode_dsf(const std::vector<uint8_t>& buf) {
             decimation, true /* LSB first in DSF */);
     }
 
-    // Free DSD byte streams (no longer needed, save memory)
     ch_dsd.clear();
     ch_dsd.shrink_to_fit();
 
@@ -1145,7 +1112,6 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf) {
         const uint8_t* chunk = buf.data() + pos + 12;
 
         if (std::memcmp(buf.data()+pos, "PROP", 4) == 0) {
-            // Property chunk — parse sub-chunks
             size_t sub_pos = 4;  // skip "SND "
             while (sub_pos + 12 <= chunk_size) {
                 uint64_t sub_size = rd64be(chunk + sub_pos + 4);
@@ -1169,9 +1135,6 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf) {
     if (!dsd_data || n_channels == 0 || dsd_sample_rate == 0)
         throw std::runtime_error("DFF: incomplete header");
 
-    // DFF stores data interleaved by byte: [ch0_byte][ch1_byte][ch0_byte]...
-    // Bits are MSB-first
-    // All DSD rates → 352.8 kHz to preserve ultrasonic peaks
     uint32_t pcm_rate = 352800;
     int decimation = static_cast<int>(dsd_sample_rate / pcm_rate);
     if (decimation < 1) decimation = 1;
@@ -1190,7 +1153,7 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf) {
         ch_dsd[c].push_back(dsd_data[i]);
     }
 
-    // ── Two-stage decimation: DSD → CIC → FIR → 352.8 kHz PCM ─────────
+    // Two-stage decimation: DSD → CIC → FIR → 352.8 kHz PCM
     ad.channels.resize(n_channels);
     for (uint32_t c = 0; c < n_channels; ++c) {
         ad.channels[c] = dsd::decimate_channel(
@@ -1198,7 +1161,6 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf) {
             decimation, false /* MSB first in DFF */);
     }
 
-    // Free DSD byte streams
     ch_dsd.clear();
     ch_dsd.shrink_to_fit();
 
