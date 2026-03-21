@@ -784,111 +784,75 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
 // (DSD64) or multiples. Noise shaping pushes quantization noise to ultrasonic
 // frequencies — typically 40-60 dB above the audio signal above 100 kHz.
 //
-// Two-stage decimation with CIC droop compensation:
+// Direct polyphase FIR decimation:
 //
-//   Stage 1: CIC^3 (3rd-order Cascaded Integrator-Comb) at DSD rate
-//     - 3 cascaded integrators + decimate by M + 3 comb filters
-//     - ~45 dB rejection at first alias band
-//     - Passband droop: ~0.2 dB at 22 kHz (minimal for M=8)
-//     - DC gain: M^3, normalized after comb stage
+//   - 512-tap prototype lowpass FIR designed at DSD rate (2.8224 MHz)
+//   - Kaiser window (β=7.86) for ~80 dB sidelobe rejection
+//   - 50 kHz passband cutoff, ~300 kHz transition band to first alias
+//   - Split into M polyphase phases (64 taps each for DSD64)
+//   - Operates directly on ±1 DSD bits: output = Σ h[k]·bit[k]
 //
-//   Stage 2: CIC-compensated FIR lowpass at 352.8 kHz output rate
-//     - 256-tap, designed via frequency-sampling with inverse-CIC response
-//     - Passband (0-50 kHz): gain = 1/H_cic(f) → flat combined response
-//     - Cosine-rolloff transition band (50-80 kHz)
-//     - Stopband (>80 kHz): ~50 dB rejection (Blackman-Harris window)
-//     - Negative coefficients enable Gibbs overshoot above ±1.0
+// CRITICAL: Unlike CIC-based approaches, direct polyphase FIR is NOT
+// bounded to ±1.0 output. For ±1 input, max output = Σ|h[k]| ≈ 1.67,
+// enabling detection of above-0-dBFS peaks that DSD's sigma-delta
+// noise shaping produces. CIC architectures bound output to ±1.0
+// (since they compute weighted averages), making them unable to recover
+// these peaks regardless of post-CIC FIR compensation.
 //
-// The compensation FIR inverts the CIC's passband droop so that the
-// overall chain has flat response from 0-50 kHz. This preserves both
-// peak levels and RMS accuracy, enabling detection of above-0-dBFS
-// peaks that DSD's sigma-delta modulation can produce.
+// For ±1 input, the FIR multiply is just sign selection (add/subtract
+// coefficient), so each output sample costs only N additions.
 //
 // Target output: 352.8 kHz — matches foobar2000 DR Meter reference.
 // ════════════════════════════════════════════════════════════════════════════
 
 namespace dsd {
 
-// ── CIC-compensated lowpass FIR design ─────────────────────────────────────
-// Designs a lowpass FIR whose passband response is the inverse of the CIC
-// droop, so the combined CIC+FIR chain has flat passband response.
-//
-// Uses frequency-sampling: compute desired H(f) = 1/H_cic(f) in passband,
-// cosine-rolloff transition band, zero in stopband. IDFT → window → normalize.
-//
-// CRITICAL: frequency f is normalized to the OUTPUT (decimated) rate.
-// The CIC transfer function at output-rate frequency f is:
-//   |H_cic(f)| = |sin(pi*f) / (M * sin(pi*f/M))|^N
-//
-// NOT sin(pi*M*f)/(M*sin(pi*f)) — that would be the input-rate formula!
-//
-// passband_hz:  upper edge of flat passband (e.g. 50 kHz)
-// stopband_hz:  start of stopband (e.g. 80 kHz)
-// sample_rate:  output sample rate after CIC decimation
-// cic_order:    CIC cascade order (N in CIC^N)
-// cic_M:        CIC decimation factor
-inline std::vector<double> design_cic_compensated_lowpass(
-        int num_taps, double passband_hz, double stopband_hz,
-        double sample_rate, int cic_order, int cic_M) {
+// ── Kaiser window I0 (modified Bessel function of first kind, order 0) ────
+inline double bessel_i0(double x) {
+    double sum = 1.0, term = 1.0;
+    for (int k = 1; k < 25; ++k) {
+        term *= (x / (2.0 * k)) * (x / (2.0 * k));
+        sum += term;
+        if (term < 1e-15 * sum) break;
+    }
+    return sum;
+}
+
+// ── Design prototype lowpass FIR at DSD rate ───────────────────────────────
+// Kaiser-windowed sinc, normalized to unity DC gain.
+// cutoff_hz:   passband edge in Hz
+// fs:          DSD sample rate in Hz
+// num_taps:    filter length (should be multiple of decimation factor)
+// beta:        Kaiser window parameter (7.86 ≈ 80 dB rejection)
+inline std::vector<double> design_prototype_fir(
+        double cutoff_hz, double fs, int num_taps, double beta = 7.86) {
 
     constexpr double PI = 3.14159265358979323846;
-    double fp = passband_hz / sample_rate;  // normalized passband edge
-    double fs = stopband_hz / sample_rate;  // normalized stopband edge
+    double f_cut = cutoff_hz / fs;  // normalized cutoff
     int half = num_taps / 2;
+    double i0_beta = bessel_i0(beta);
 
-    // Frequency-sampling: compute h[n] = IDFT of desired response
-    int Nfreq = 4096;
     std::vector<double> h(num_taps);
 
     for (int n = 0; n < num_taps; ++n) {
-        double sum = 0.0;
-        for (int k = 0; k <= Nfreq / 2; ++k) {
-            double f = static_cast<double>(k) / Nfreq;  // 0..0.5
+        double x = n - half;
 
-            double H_desired = 0.0;
-            if (f <= fp) {
-                // Passband: compensate CIC droop
-                double cic_mag;
-                if (f < 1e-10) {
-                    cic_mag = 1.0;
-                } else {
-                    // CIC response at output-rate frequency f:
-                    //   |H(f)| = |sin(pi*f) / (M * sin(pi*f/M))|^N
-                    double sinc_r = std::sin(PI * f)
-                                  / (cic_M * std::sin(PI * f / cic_M));
-                    cic_mag = std::pow(std::abs(sinc_r), cic_order);
-                }
-                H_desired = 1.0 / std::max(cic_mag, 0.001);
-            } else if (f < fs) {
-                // Transition band: cosine rolloff with compensation
-                double t = (f - fp) / (fs - fp);
-                double rolloff = 0.5 * (1.0 + std::cos(PI * t));
-                double sinc_r = std::sin(PI * f)
-                              / (cic_M * std::sin(PI * f / cic_M));
-                double cic_mag = std::pow(std::abs(sinc_r), cic_order);
-                H_desired = rolloff / std::max(cic_mag, 0.001);
-            }
-            // else: stopband, H_desired = 0
+        // Sinc
+        if (std::abs(x) < 1e-10)
+            h[n] = 2.0 * f_cut;
+        else
+            h[n] = std::sin(2.0 * PI * f_cut * x) / (PI * x);
 
-            double phase = 2.0 * PI * f * (n - half);
-            double contrib = H_desired * std::cos(phase);
-            // DC and Nyquist counted once, others twice (real symmetry)
-            sum += (k == 0 || k == Nfreq / 2) ? contrib : 2.0 * contrib;
-        }
-        h[n] = sum / Nfreq;
+        // Kaiser window
+        double t = 2.0 * x / num_taps;
+        double arg_sq = 1.0 - t * t;
+        if (arg_sq > 0.0)
+            h[n] *= bessel_i0(beta * std::sqrt(arg_sq)) / i0_beta;
+        else
+            h[n] = 0.0;
     }
 
-    // Blackman-Harris window (4-term, ~92 dB sidelobe rejection)
-    int M = num_taps - 1;
-    for (int n = 0; n < num_taps; ++n) {
-        double w = 0.35875
-                 - 0.48829 * std::cos(2.0 * PI * n / M)
-                 + 0.14128 * std::cos(4.0 * PI * n / M)
-                 - 0.01168 * std::cos(6.0 * PI * n / M);
-        h[n] *= w;
-    }
-
-    // Normalize to unity DC gain
+    // Normalize DC gain to 1.0
     double dc = 0.0;
     for (double v : h) dc += v;
     if (std::abs(dc) > 1e-10)
@@ -897,11 +861,14 @@ inline std::vector<double> design_cic_compensated_lowpass(
     return h;
 }
 
-// ── CIC^3 + compensated FIR decimation for one DSD channel ────────────────
+// ── Polyphase FIR decimation for one DSD channel ──────────────────────────
+//
+// Applies prototype FIR directly to ±1 DSD bits, producing PCM output
+// at decimated rate. No CIC stage — output is NOT bounded to ±1.0.
 //
 // ch_dsd:     raw DSD byte stream for one channel
 // total_bits: number of valid DSD bits
-// decimation: CIC decimation ratio (e.g. 8 for DSD64→352.8k)
+// decimation: decimation ratio (e.g. 8 for DSD64→352.8k)
 // lsb_first:  true for DSF (LSB-first), false for DFF (MSB-first)
 
 inline std::vector<double> decimate_channel(
@@ -910,90 +877,48 @@ inline std::vector<double> decimate_channel(
         int decimation,
         bool lsb_first) {
 
-    static constexpr int CIC_ORDER = 3;
+    // Prototype FIR parameters
+    // 512 taps = 64 per polyphase phase (for M=8)
+    // 50 kHz cutoff at DSD rate for audio passband preservation
+    static const int PROTO_TAPS = 512;
+    static const double CUTOFF_HZ = 50000.0;
+
+    double fs_dsd = 352800.0 * decimation;
+
+    auto fir = design_prototype_fir(CUTOFF_HZ, fs_dsd, PROTO_TAPS);
 
     size_t n_out = total_bits / decimation;
     if (n_out == 0) return {};
 
-    // ── Stage 1a: CIC integrators (run at DSD bit rate) ──────────────
-    int64_t integ[CIC_ORDER] = {};
-    std::vector<int64_t> integ_decimated;
-    integ_decimated.reserve(n_out);
-
     size_t total_bytes = (total_bits + 7) / 8;
     if (total_bytes > ch_dsd.size()) total_bytes = ch_dsd.size();
 
-    size_t bit_counter = 0;
-    size_t global_bit = 0;
+    // Helper: read DSD bit at position idx as +1.0 or -1.0
+    // (processes directly from byte array — no memory expansion)
+    auto get_bit = [&](size_t idx) -> double {
+        if (idx >= total_bits) return 0.0;
+        size_t byte_idx = idx / 8;
+        int bit_in_byte = static_cast<int>(idx % 8);
+        if (byte_idx >= ch_dsd.size()) return 0.0;
+        int bit_pos = lsb_first ? bit_in_byte : (7 - bit_in_byte);
+        return ((ch_dsd[byte_idx] >> bit_pos) & 1) ? 1.0 : -1.0;
+    };
 
-    for (size_t byte_idx = 0; byte_idx < total_bytes && global_bit < total_bits; ++byte_idx) {
-        uint8_t b = ch_dsd[byte_idx];
-
-        for (int bit = 0; bit < 8 && global_bit < total_bits; ++bit, ++global_bit) {
-            int bit_pos = lsb_first ? bit : (7 - bit);
-            int x = ((b >> bit_pos) & 1) * 2 - 1;
-
-            // 3 cascaded integrators
-            integ[0] += x;
-            integ[1] += integ[0];
-            integ[2] += integ[1];
-
-            // Decimate: take every M-th output
-            if (++bit_counter == static_cast<size_t>(decimation)) {
-                bit_counter = 0;
-                integ_decimated.push_back(integ[CIC_ORDER - 1]);
-            }
-        }
-    }
-
-    n_out = integ_decimated.size();
-    if (n_out == 0) return {};
-
-    // ── Stage 1b: CIC comb filters (run at decimated rate) ───────────
-    double cic_gain = 1.0;
-    for (int i = 0; i < CIC_ORDER; ++i) cic_gain *= decimation;
-
-    std::vector<double> cic(n_out);
-    {
-        int64_t comb_delay[CIC_ORDER] = {};
-        for (size_t i = 0; i < n_out; ++i) {
-            int64_t val = integ_decimated[i];
-            for (int s = 0; s < CIC_ORDER; ++s) {
-                int64_t prev = comb_delay[s];
-                comb_delay[s] = val;
-                val = val - prev;
-            }
-            cic[i] = static_cast<double>(val) / cic_gain;
-        }
-    }
-
-    integ_decimated.clear();
-    integ_decimated.shrink_to_fit();
-
-    // ── Stage 2: CIC-compensated FIR lowpass ─────────────────────────
-    // 256 taps, passband 50 kHz, stopband 80 kHz
-    // Wide passband preserves ultrasonic peak excursions from DSD's
-    // sigma-delta modulation, matching foobar2000's DSD→PCM conversion.
-    // A narrow 22 kHz cutoff loses 2-4 dB of peak content and ~0.4 dB RMS.
-    static const int FIR_TAPS = 256;
-    static const double PASSBAND_HZ = 50000.0;
-    static const double STOPBAND_HZ = 80000.0;
-    static const double FS_OUT = 352800.0;
-
-    auto fir = design_cic_compensated_lowpass(
-        FIR_TAPS, PASSBAND_HZ, STOPBAND_HZ, FS_OUT,
-        CIC_ORDER, decimation);
-    int fir_half = FIR_TAPS / 2;
-
+    // Polyphase FIR decimation
+    // For each output sample i:
+    //   output[i] = Σ_k h[k] · bit[i·M + PROTO_TAPS - 1 - k]
+    int fir_len = static_cast<int>(fir.size());
     std::vector<double> pcm(n_out);
+
     for (size_t i = 0; i < n_out; ++i) {
         double acc = 0.0;
-        int64_t k_start = std::max<int64_t>(0, fir_half - static_cast<int64_t>(i));
-        int64_t k_end = std::min<int64_t>(FIR_TAPS,
-            static_cast<int64_t>(n_out) - static_cast<int64_t>(i) + fir_half);
-        for (int64_t k = k_start; k < k_end; ++k) {
-            acc += fir[static_cast<size_t>(k)]
-                 * cic[static_cast<size_t>(static_cast<int64_t>(i) + k - fir_half)];
+        size_t base = i * decimation;
+
+        for (int k = 0; k < fir_len; ++k) {
+            size_t bit_pos = base + fir_len - 1 - k;
+            if (bit_pos < total_bits) {
+                acc += fir[k] * get_bit(bit_pos);
+            }
         }
         pcm[i] = acc;
     }
@@ -1075,7 +1000,7 @@ inline AudioData decode_dsf(const std::vector<uint8_t>& buf) {
         }
     }
 
-    // Two-stage decimation: DSD → CIC → FIR → 352.8 kHz PCM
+    // Polyphase FIR decimation: DSD → 352.8 kHz PCM
     ad.channels.resize(n_channels);
     for (uint32_t c = 0; c < n_channels; ++c) {
         ad.channels[c] = dsd::decimate_channel(
@@ -1155,7 +1080,7 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf) {
         ch_dsd[c].push_back(dsd_data[i]);
     }
 
-    // Two-stage decimation: DSD → CIC → FIR → 352.8 kHz PCM
+    // Polyphase FIR decimation: DSD → 352.8 kHz PCM
     ad.channels.resize(n_channels);
     for (uint32_t c = 0; c < n_channels; ++c) {
         ad.channels[c] = dsd::decimate_channel(
