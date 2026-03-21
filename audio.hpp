@@ -789,7 +789,7 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
 //
 //   - 640-tap prototype lowpass FIR designed at DSD rate (2.8224 MHz)
 //   - Kaiser window (β=7.86) for ~80 dB sidelobe rejection
-//   - 120 kHz passband cutoff to match foobar2000's DSD decoder bandwidth
+//   - 140 kHz passband cutoff (tunable pending reference validation)
 //   - Split into M polyphase phases (80 taps each for DSD64)
 //   - Operates directly on ±1 DSD bits: output = Σ h[k]·bit[k]
 //
@@ -879,15 +879,14 @@ inline std::vector<double> decimate_channel(
         bool lsb_first) {
 
     // Prototype FIR parameters
-    // 640 taps = 80 per polyphase phase (for M=8), 120 kHz cutoff.
-    // Above-unity peak accuracy is controlled by how much ultrasonic DSD
-    // noise enters the filter. Our direct polyphase FIR on ±1 bits can
-    // produce larger peaks than foobar's likely two-stage CIC+FIR decoder
-    // (where CIC bounds the intermediate signal to ±1.0 before compensation).
-    // 140 kHz overshoots above-unity peaks by 0.5-1.4 dB; 100 kHz
-    // undershoots below-unity peaks by ~2 dB. 120 kHz targets the midpoint.
+    // 640 taps = 80 per polyphase phase (for M=8), 140 kHz cutoff.
+    // RMS accuracy is excellent at 140 kHz (within 0.05 dB of foobar).
+    // Above-unity peaks overshoot by 0.5-1.2 dB — further tuning requires
+    // reference data from foobar2000 and MaatDROffline running directly
+    // on the same files (website data has inconsistent decoder settings).
+    // The cutoff sweet spot is likely between 120-140 kHz.
     static const int PROTO_TAPS = 640;
-    static const double CUTOFF_HZ = 120000.0;
+    static const double CUTOFF_HZ = 140000.0;
     static const double KAISER_BETA = 5.0;
 
     double fs_dsd = 352800.0 * decimation;
