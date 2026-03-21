@@ -29,7 +29,7 @@ CXX        = $(CROSS)g++
 CXXFLAGS   = -std=c++17 -Wall -Wextra -Wpedantic
 LDFLAGS    =
 
-VERSION   ?= 0.3.7
+VERSION   ?= 0.3.8
 CXXFLAGS  += -DCRETE_VERSION='"$(VERSION)"'
 
 PREFIX    ?= /usr/local

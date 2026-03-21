@@ -879,17 +879,20 @@ inline std::vector<double> decimate_channel(
         bool lsb_first) {
 
     // Prototype FIR parameters
-    // 640 taps = 80 per polyphase phase (for M=8)
-    // 140 kHz cutoff. Tap count controls maximum possible output for ±1 DSD
-    // input via Σ|h[k]|: 768 taps overshoots foobar's above-unity peaks by
-    // 0.6-1.2 dB, while 512 taps undershoots below-unity peaks by ~0.5 dB.
-    // 640 taps targets the intermediate Σ|h[k]| that matches foobar's decoder.
+    // 640 taps = 80 per polyphase phase (for M=8), 140 kHz cutoff.
+    // Kaiser β controls sidelobe depth and thus the magnitude of negative
+    // FIR coefficients. Larger β = deeper sidelobes = larger negative taps
+    // = higher Σ|h[k]| = larger above-unity peaks for ±1 DSD input.
+    // β=7.86 (~80 dB) overshoots foobar's above-unity peaks by 0.5-1.2 dB;
+    // reducing to β=5.0 (~50 dB) shrinks the negative coefficients while
+    // maintaining adequate noise rejection for DR measurement.
     static const int PROTO_TAPS = 640;
     static const double CUTOFF_HZ = 140000.0;
+    static const double KAISER_BETA = 5.0;
 
     double fs_dsd = 352800.0 * decimation;
 
-    auto fir = design_prototype_fir(CUTOFF_HZ, fs_dsd, PROTO_TAPS);
+    auto fir = design_prototype_fir(CUTOFF_HZ, fs_dsd, PROTO_TAPS, KAISER_BETA);
 
     size_t n_out = total_bits / decimation;
     if (n_out == 0) return {};
