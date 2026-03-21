@@ -428,6 +428,11 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     r.rms_dbfs       = tt.overall_rms_dbfs;
     r.is_clipping    = tt.is_clipping;
 
+    // DSD peaks above 0 dBFS are normal (sigma-delta reconstruction),
+    // not clipping. Only flag clipping for integer PCM formats where
+    // 1.0 is a hard ceiling.
+    if (codec == "DSD") r.is_clipping = false;
+
     // ── EBU R128 and crest factor (per-channel, then average) ────────
     double sum_lufs = 0.0, sum_crest = 0.0;
     for (size_t ch = 0; ch < channels.size(); ++ch) {
