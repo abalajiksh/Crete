@@ -136,7 +136,7 @@ $(GUI_TARGET): $(GUI_SRC) $(IMGUI_OBJS) analysis.hpp audio.hpp file_dialog.hpp
 # ── ImGui object files ──────────────────────────────────────────────────────
 $(BUILD_DIR)/%.o: $(IMGUI_DIR)/%.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(GUI_CXXFLAGS) -c -o $@ $
+	$(CXX) $(GUI_CXXFLAGS) -c -o $@ $<
 
 # ── Install ─────────────────────────────────────────────────────────────────
 install: release
