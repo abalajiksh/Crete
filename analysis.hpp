@@ -245,35 +245,37 @@ inline double compute_integrated_loudness(const double* samples, size_t n,
 // ── TT Dynamic Range Meter ──────────────────────────────────────────────────
 // Pleasurize Music Foundation algorithm (matches foobar2000 DR Meter).
 //
-// The algorithm operates on MULTI-CHANNEL blocks:
+// Multi-channel block algorithm:
 //   1. Split audio into 3-second non-overlapping blocks
 //   2. Per block, across ALL channels simultaneously:
 //      a. Peak = max |sample| across all channels in the block
-//      b. RMS  = sqrt( sum_of_squares_all_channels / N_per_channel )
-//         (power-summed across channels, normalized by per-channel count)
-//   3. Discard near-silent blocks (RMS < -60 dBFS threshold)
+//      b. RMS  = sqrt( sum_of_squares_all_channels / (block_size × nch) )
+//         (total power divided by TOTAL sample count across all channels)
+//   3. Discard near-silent blocks (RMS < 1e-3 linear ≈ -60 dBFS)
 //   4. Sort remaining blocks by RMS descending, select top 20%
 //   5. DR = 20·log10( mean(top_peaks) / mean(top_rms) )
 //      using arithmetic means in the linear domain
 //   6. Round to nearest integer
 //
-// CRITICAL: blocks must be multi-channel, not per-channel-then-averaged.
-// Per-channel computation inflates DR by ~3 dB for stereo because block
-// RMS is sqrt(nch) lower per channel while peak stays roughly the same.
-// The multi-channel RMS = sqrt(sum_ch(rms_ch²)) ≈ sqrt(nch) × single_ch_RMS,
-// but max(peak_ch) ≈ peak of any single channel, so the ratio shrinks.
+// CRITICAL: the RMS divisor must be block_size × nch (total samples),
+// NOT just block_size (per-channel count). Dividing by block_size only
+// inflates stereo RMS by √2 ≈ 3 dB, deflating DR by ~2 points.
+// Per-channel DR averaged inflates DR by ~2 points because each channel
+// gets its own independent top-20% block selection.
+// The correct approach shares one block set across channels with properly
+// normalized RMS.
 // ────────────────────────────────────────────────────────────────────────────
 
 struct TTDRResult {
-    double dr;                     // multi-channel DR value
-    std::vector<double> dr_per_ch; // kept for compatibility
+    double dr;
+    std::vector<double> dr_per_ch;
     size_t blocks;
-    double overall_rms_dbfs;       // power-summed across channels (display)
-    double overall_peak_dbfs;      // max across channels (display)
+    double overall_rms_dbfs;
+    double overall_peak_dbfs;
     bool   is_clipping;
 };
 
-inline TTDRResult compute_tt_dr_multichannel(
+inline TTDRResult compute_tt_dr(
         const std::vector<std::vector<double>>& channels,
         double sample_rate,
         double block_seconds = 3.0) {
@@ -285,7 +287,7 @@ inline TTDRResult compute_tt_dr_multichannel(
     TTDRResult result;
     result.blocks = (n >= block_size) ? (n / block_size) : 1;
 
-    // ── Overall track peak and power-summed RMS (for display) ────────
+    // ── Overall track peak and RMS (for display) ─────────────────────
     double track_peak = 0.0;
     double total_sum_sq = 0.0;
 
@@ -297,14 +299,13 @@ inline TTDRResult compute_tt_dr_multichannel(
         }
     }
 
-    result.overall_rms_dbfs  = to_dbfs(std::sqrt(total_sum_sq / static_cast<double>(n)));
     result.overall_peak_dbfs = to_dbfs(track_peak);
+    result.overall_rms_dbfs  = to_dbfs(std::sqrt(total_sum_sq / static_cast<double>(n)));
     result.is_clipping       = (track_peak >= 0.9999);
 
     // ── Multi-channel block analysis ─────────────────────────────────
     if (n < block_size) {
-        // Too short for block analysis — use whole-track crest factor
-        double rms = std::sqrt(total_sum_sq / static_cast<double>(n));
+        double rms = std::sqrt(total_sum_sq / static_cast<double>(n * nch));
         if (rms <= 0.0) { result.dr = 0.0; return result; }
         result.dr = to_dbfs(track_peak) - to_dbfs(rms);
         result.dr_per_ch = {result.dr};
@@ -327,14 +328,14 @@ inline TTDRResult compute_tt_dr_multichannel(
                 pk = std::max(pk, std::abs(channels[ch][i]));
         }
 
-        // RMS: power-summed across ALL channels, divided by block_size
-        // (per-channel sample count, NOT total samples across channels)
+        // RMS: power across ALL channels, divided by TOTAL sample count
+        // (block_size × nch), so stereo RMS ≈ single-channel RMS
         double sum_sq = 0.0;
         for (size_t ch = 0; ch < nch; ++ch) {
             for (size_t i = start; i < start + block_size; ++i)
                 sum_sq += channels[ch][i] * channels[ch][i];
         }
-        double rms = std::sqrt(sum_sq / static_cast<double>(block_size));
+        double rms = std::sqrt(sum_sq / static_cast<double>(block_size * nch));
 
         // Discard near-silent blocks (< -60 dBFS)
         if (rms > 1e-3) {
@@ -357,7 +358,6 @@ inline TTDRResult compute_tt_dr_multichannel(
         std::min<size_t>(block_rms_vals.size(),
             static_cast<size_t>(std::ceil(block_rms_vals.size() * 0.2))));
 
-    // Arithmetic mean of top-20% peak and RMS (linear domain)
     double sum_peak = 0.0, sum_rms = 0.0;
     for (size_t i = 0; i < n_top; ++i) {
         sum_peak += block_peak_vals[indices[i]];
@@ -376,21 +376,14 @@ inline TTDRResult compute_tt_dr_multichannel(
 }
 
 // ── True peak via 4x oversampling (sinc interpolation) ─────────────────────
-// Simplified true peak estimation using linear-phase FIR upsampling.
-// For exact ITU-R BS.1770-4 compliance you'd want the full 4-tap polyphase,
-// but this is close enough for DR measurement purposes.
 inline double compute_true_peak(const double* samples, size_t n) {
     if (n == 0) return 0.0;
     double peak = 0.0;
-    // Check actual samples first
     for (size_t i = 0; i < n; ++i)
         peak = std::max(peak, std::abs(samples[i]));
 
-    // 4x oversampled check: linear interpolation between samples
-    // (This catches inter-sample peaks that exceed sample peaks)
     for (size_t i = 0; i + 1 < n; ++i) {
         double s0 = samples[i], s1 = samples[i+1];
-        // Check 3 interpolated points between each pair
         for (int k = 1; k <= 3; ++k) {
             double t = k / 4.0;
             double interp = s0 + t * (s1 - s0);
@@ -401,7 +394,6 @@ inline double compute_true_peak(const double* samples, size_t n) {
 }
 
 // ── Full track analysis ────────────────────────────────────────────────────
-// channels: vector of per-channel sample vectors
 inline TrackResult analyze_track(const std::vector<std::vector<double>>& channels,
                                   uint32_t sample_rate,
                                   uint32_t bit_depth,
@@ -419,10 +411,11 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
 
     if (channels.empty() || r.total_samples == 0) return r;
 
-    // ── TT DR (multi-channel blocks) ─────────────────────────────────
-    auto tt = compute_tt_dr_multichannel(channels, sample_rate);
+    // ── TT DR (per-channel, then averaged) ───────────────────────────
+    auto tt = compute_tt_dr(channels, sample_rate);
     r.dr_score_raw   = tt.dr;
     r.dr_score       = static_cast<int>(std::round(tt.dr));
+    r.dr_per_channel = tt.dr_per_ch;
     r.tt_block_count = tt.blocks;
     r.peak_dbfs      = tt.overall_peak_dbfs;
     r.rms_dbfs       = tt.overall_rms_dbfs;
