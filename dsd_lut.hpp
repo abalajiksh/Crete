@@ -9,8 +9,10 @@
 // ceil(N/8) table lookups and additions instead of N multiply-
 // accumulates — roughly 8× fewer operations with better cache locality.
 //
-// The direct-indexing approach (no circular buffer) makes each output
-// sample independent, enabling trivial multi-threaded parallelism.
+// Threading model: each call to decimate_channel() processes one channel
+// sequentially. Callers parallelize across channels (one thread per
+// channel), matching the foobar2000 SACD plugin architecture. This
+// avoids cache-hostile overlapping reads within a single channel.
 //
 // Technique based on the ctable method from Maxim Anisiutkin's SACD
 // Decoder plugin (LGPL 2.1). This is a clean-room implementation.
@@ -19,7 +21,6 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <thread>
 #include <vector>
 
 namespace dsd {
@@ -71,11 +72,11 @@ inline std::vector<ctable_t> build_ctables(
 
 // ── Decimate a DSD byte stream using precomputed lookup tables ─────────────
 //
-// Direct-indexing approach: each output sample independently computes its
-// result by indexing into the input byte array. No circular buffer needed.
-// Bytes before the start of the array are treated as silence (warmup).
+// Processes one channel sequentially. Callers handle per-channel parallelism.
 //
-// This independence enables trivial parallelism across output samples.
+// Direct-indexing approach: each output sample computes its result by
+// indexing into the input byte array. No circular buffer needed.
+// Bytes before the start of the array are treated as silence (warmup).
 //
 // dsd_bytes:       raw DSD byte stream for one channel
 // num_bytes:       byte count of the DSD stream
@@ -99,43 +100,21 @@ inline std::vector<double> decimate_with_lut(
     std::vector<double> pcm(num_out);
     int nb = static_cast<int>(num_bytes);
 
-    // ── Worker: process a range of output samples ────────────────────
-    auto worker = [&](size_t out_start, size_t out_end) {
-        for (size_t s = out_start; s < out_end; ++s) {
-            // For output sample s, the newest input byte consumed is at
-            // index (s+1)*byte_dec - 1, and the convolution window extends
-            // num_tables bytes back from there.
-            int base = static_cast<int>((s + 1) * byte_dec) - num_tables;
-            double acc = 0.0;
+    for (size_t s = 0; s < num_out; ++s) {
+        // For output sample s, the newest input byte consumed is at
+        // index (s+1)*byte_dec - 1, and the convolution window extends
+        // num_tables bytes back from there.
+        int base = static_cast<int>((s + 1) * byte_dec) - num_tables;
+        double acc = 0.0;
 
-            for (int ct = 0; ct < num_tables; ++ct) {
-                int byte_idx = base + ct;
-                uint8_t bv = (byte_idx >= 0 && byte_idx < nb)
-                             ? dsd_bytes[byte_idx]
-                             : DSD_SILENCE_BYTE;
-                acc += tables[ct][bv];
-            }
-            pcm[s] = acc;
+        for (int ct = 0; ct < num_tables; ++ct) {
+            int byte_idx = base + ct;
+            uint8_t bv = (byte_idx >= 0 && byte_idx < nb)
+                         ? dsd_bytes[byte_idx]
+                         : DSD_SILENCE_BYTE;
+            acc += tables[ct][bv];
         }
-    };
-
-    // ── Parallel dispatch ────────────────────────────────────────────
-    unsigned n_threads = std::thread::hardware_concurrency();
-    if (n_threads < 1) n_threads = 1;
-    if (n_threads > 16) n_threads = 16;
-
-    if (n_threads <= 1 || num_out < 10000) {
-        worker(0, num_out);
-    } else {
-        std::vector<std::thread> threads;
-        size_t chunk = (num_out + n_threads - 1) / n_threads;
-        for (unsigned t = 0; t < n_threads; ++t) {
-            size_t start = t * chunk;
-            size_t end = std::min(start + chunk, num_out);
-            if (start < end)
-                threads.emplace_back(worker, start, end);
-        }
-        for (auto& th : threads) th.join();
+        pcm[s] = acc;
     }
 
     return pcm;
@@ -158,10 +137,10 @@ inline double bessel_i0(double x) {
 // cutoff_hz:   passband edge in Hz
 // fs:          DSD sample rate in Hz
 // num_taps:    filter length (should be multiple of 8 for clean LUT grouping)
-// beta:        Kaiser parameter (5.0 ≈ 44 dB, 7.86 ≈ 80 dB rejection)
+// beta:        Kaiser parameter (4.5 ≈ 40 dB, 5.0 ≈ 44 dB, 7.86 ≈ 80 dB)
 
 inline std::vector<double> design_prototype_fir(
-        double cutoff_hz, double fs, int num_taps, double beta = 5.0) {
+        double cutoff_hz, double fs, int num_taps, double beta = 4.5) {
 
     constexpr double PI = 3.14159265358979323846;
     double f_cut = cutoff_hz / fs;
@@ -196,17 +175,25 @@ inline std::vector<double> design_prototype_fir(
     return h;
 }
 
-// ── High-level: design FIR + build LUTs + decimate ─────────────────────────
+// ── High-level: design FIR + build LUTs + decimate one channel ─────────────
 //
-// Drop-in replacement for the previous per-bit dsd::decimate_channel().
-// Same signature, same output, ~8× faster.
+// Drop-in replacement for the previous dsd::decimate_channel().
+// Same signature. Called once per channel; callers spawn one thread
+// per channel for parallelism.
 //
-// Filter parameters:
-//   640 taps, 140 kHz cutoff, Kaiser β=5.0
-//   Target output: 352.8 kHz for all DSD rates
+// Filter parameters (tuned to reduce peak overshoot vs foobar reference):
 //
-// These can be tuned to better match a specific reference (foobar2000,
-// MaatDROffline, etc.) by adjusting cutoff, beta, and tap count.
+//   160 taps at DSD rate → 20 byte-LUT tables per output sample
+//   50 kHz cutoff — well above audible band (20 kHz), wide transition
+//     band to Nyquist (176.4 kHz). This avoids the steep brick-wall
+//     rolloff that causes excessive Gibbs ringing on DSD transients.
+//   Kaiser β=4.5 — moderate sidelobe rejection (~40 dB), smooth
+//     passband-to-stopband transition. Lower β = less overshoot.
+//
+// The combination of fewer taps + lower cutoff + lower β gives a gentle
+// rolloff that lets DSD noise shaping energy through gradually (like
+// foobar's 80-tap fir1_8) rather than brick-walling it (like the old
+// 640-tap/140 kHz design that caused 0.5-1.2 dB excess peak overshoot).
 
 inline std::vector<double> decimate_channel(
         const std::vector<uint8_t>& ch_dsd,
@@ -215,9 +202,9 @@ inline std::vector<double> decimate_channel(
         bool lsb_first) {
 
     // ── Filter parameters ────────────────────────────────────────────
-    static constexpr int    PROTO_TAPS  = 640;
-    static constexpr double CUTOFF_HZ   = 140000.0;
-    static constexpr double KAISER_BETA = 5.0;
+    static constexpr int    PROTO_TAPS  = 160;
+    static constexpr double CUTOFF_HZ   = 50000.0;
+    static constexpr double KAISER_BETA = 4.5;
 
     double fs_dsd = 352800.0 * decimation;
 
