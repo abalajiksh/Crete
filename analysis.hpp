@@ -106,6 +106,28 @@ inline double peak_of(const double* data, size_t n) {
     return pk;
 }
 
+// ── Second-highest absolute sample value ───────────────────────────────────
+// The TT Dynamic Range spec uses the second-highest |sample| per block,
+// not the absolute max. This prevents single rogue samples (clicks,
+// digital errors) from inflating the block peak.
+// If the block has fewer than 2 samples, returns the max.
+inline double second_peak_of(const double* data, size_t n) {
+    if (n == 0) return 0.0;
+    if (n == 1) return std::abs(data[0]);
+
+    double first = 0.0, second = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        double v = std::abs(data[i]);
+        if (v >= first) {
+            second = first;
+            first = v;
+        } else if (v > second) {
+            second = v;
+        }
+    }
+    return second;
+}
+
 inline double rms_of(const double* data, size_t n) {
     if (n == 0) return 0.0;
     double sum = 0.0;
@@ -149,7 +171,6 @@ inline std::vector<double> biquad_filter(const double* input, size_t n,
 
 // ── K-weighting filter coefficients (ITU-R BS.1770-4) ──────────────────────
 inline BiquadCoeffs k_weight_prefilter(double fs) {
-    // High-shelf pre-filter
     if (std::abs(fs - 48000.0) < 1.0) {
         return {{1.53512485958697, -2.69169618940638, 1.19839281085285},
                 {1.0, -1.69065929318241, 0.73248077421585}};
@@ -174,7 +195,6 @@ inline BiquadCoeffs k_weight_prefilter(double fs) {
 }
 
 inline BiquadCoeffs k_weight_highpass(double fs) {
-    // RLB weighting high-pass
     if (std::abs(fs - 48000.0) < 1.0) {
         return {{1.0, -2.0, 1.0},
                 {1.0, -1.99004745483398, 0.99007225036621}};
@@ -245,75 +265,46 @@ inline double compute_integrated_loudness(const double* samples, size_t n,
 // ── TT Dynamic Range Meter ──────────────────────────────────────────────────
 // Pleasurize Music Foundation algorithm (matches foobar2000 DR Meter).
 //
-// Multi-channel block algorithm:
-//   1. Split audio into 3-second non-overlapping blocks
-//   2. Per block, across ALL channels simultaneously:
-//      a. Peak = max |sample| across all channels in the block
-//      b. RMS  = sqrt( sum_of_squares_all_channels / (block_size × nch) )
-//         (total power divided by TOTAL sample count across all channels)
+// Per-channel algorithm:
+//   1. Split each channel into 3-second non-overlapping blocks
+//   2. Per block: compute peak (second-highest |sample|), RMS
 //   3. Discard near-silent blocks (RMS < 1e-3 linear ≈ -60 dBFS)
 //   4. Sort remaining blocks by RMS descending, select top 20%
 //   5. DR = 20·log10( mean(top_peaks) / mean(top_rms) )
 //      using arithmetic means in the linear domain
-//   6. Round to nearest integer
+//   6. Average DR across channels, round to nearest integer
 //
-// CRITICAL: the RMS divisor must be block_size × nch (total samples),
-// NOT just block_size (per-channel count). Dividing by block_size only
-// inflates stereo RMS by √2 ≈ 3 dB, deflating DR by ~2 points.
-// Per-channel DR averaged inflates DR by ~2 points because each channel
-// gets its own independent top-20% block selection.
-// The correct approach shares one block set across channels with properly
-// normalized RMS.
+// CRITICAL: block peak uses the SECOND-HIGHEST absolute sample value,
+// not the absolute max. This prevents single rogue samples (clicks,
+// digital errors, inter-sample spikes) from inflating the block peak.
+// This is a known aspect of the TT DR spec, confirmed by foobar2000
+// DR Meter changelog (v0.2, v1.0.4).
 // ────────────────────────────────────────────────────────────────────────────
 
 struct TTDRResult {
-    double dr;
-    std::vector<double> dr_per_ch;
+    double dr;                     // averaged across channels
+    std::vector<double> dr_per_ch; // per-channel DR values
     size_t blocks;
-    double overall_rms_dbfs;
-    double overall_peak_dbfs;
+    double overall_rms_dbfs;       // power-summed across channels (display)
+    double overall_peak_dbfs;      // max across channels (display)
     bool   is_clipping;
 };
 
-inline TTDRResult compute_tt_dr(
-        const std::vector<std::vector<double>>& channels,
+// ── Compute DR for a single channel ────────────────────────────────────────
+inline double compute_tt_dr_single_channel(
+        const double* samples, size_t n,
         double sample_rate,
         double block_seconds = 3.0) {
 
-    size_t nch = channels.size();
-    size_t n = channels[0].size();
     size_t block_size = static_cast<size_t>(block_seconds * sample_rate);
-
-    TTDRResult result;
-    result.blocks = (n >= block_size) ? (n / block_size) : 1;
-
-    // ── Overall track peak and RMS (for display) ─────────────────────
-    double track_peak = 0.0;
-    double total_sum_sq = 0.0;
-
-    for (size_t ch = 0; ch < nch; ++ch) {
-        for (size_t i = 0; i < n; ++i) {
-            double s = channels[ch][i];
-            track_peak = std::max(track_peak, std::abs(s));
-            total_sum_sq += s * s;
-        }
-    }
-
-    result.overall_peak_dbfs = to_dbfs(track_peak);
-    result.overall_rms_dbfs  = to_dbfs(std::sqrt(total_sum_sq / static_cast<double>(n)));
-    result.is_clipping       = (track_peak >= 0.9999);
-
-    // ── Multi-channel block analysis ─────────────────────────────────
     if (n < block_size) {
-        double rms = std::sqrt(total_sum_sq / static_cast<double>(n * nch));
-        if (rms <= 0.0) { result.dr = 0.0; return result; }
-        result.dr = to_dbfs(track_peak) - to_dbfs(rms);
-        result.dr_per_ch = {result.dr};
-        return result;
+        double pk = second_peak_of(samples, n);
+        double rms = rms_of(samples, n);
+        if (rms <= 0.0) return 0.0;
+        return to_dbfs(pk) - to_dbfs(rms);
     }
 
     size_t n_blocks = n / block_size;
-
     std::vector<double> block_rms_vals, block_peak_vals;
     block_rms_vals.reserve(n_blocks);
     block_peak_vals.reserve(n_blocks);
@@ -321,30 +312,20 @@ inline TTDRResult compute_tt_dr(
     for (size_t b = 0; b < n_blocks; ++b) {
         size_t start = b * block_size;
 
-        // Peak: max |sample| across ALL channels in this block
-        double pk = 0.0;
-        for (size_t ch = 0; ch < nch; ++ch) {
-            for (size_t i = start; i < start + block_size; ++i)
-                pk = std::max(pk, std::abs(channels[ch][i]));
-        }
+        // Second-highest |sample| in the block
+        double pk = second_peak_of(samples + start, block_size);
 
-        // RMS: power across ALL channels, divided by TOTAL sample count
-        // (block_size × nch), so stereo RMS ≈ single-channel RMS
-        double sum_sq = 0.0;
-        for (size_t ch = 0; ch < nch; ++ch) {
-            for (size_t i = start; i < start + block_size; ++i)
-                sum_sq += channels[ch][i] * channels[ch][i];
-        }
-        double rms = std::sqrt(sum_sq / static_cast<double>(block_size * nch));
+        // RMS of the block
+        double rms = rms_of(samples + start, block_size);
 
-        // Discard near-silent blocks (< -60 dBFS)
+        // Discard near-silent blocks
         if (rms > 1e-3) {
             block_rms_vals.push_back(rms);
             block_peak_vals.push_back(pk);
         }
     }
 
-    if (block_rms_vals.empty()) { result.dr = 0.0; return result; }
+    if (block_rms_vals.empty()) return 0.0;
 
     // Sort by RMS descending, take top 20%
     std::vector<size_t> indices(block_rms_vals.size());
@@ -367,11 +348,52 @@ inline TTDRResult compute_tt_dr(
     double avg_peak = sum_peak / static_cast<double>(n_top);
     double avg_rms  = sum_rms / static_cast<double>(n_top);
 
-    if (avg_rms <= 0.0) { result.dr = 0.0; return result; }
+    if (avg_rms <= 0.0) return 0.0;
+    return to_dbfs(avg_peak) - to_dbfs(avg_rms);
+}
 
-    result.dr = to_dbfs(avg_peak) - to_dbfs(avg_rms);
-    result.dr_per_ch = {result.dr};
+// ── Multi-channel wrapper: per-channel DR then average ─────────────────────
+inline TTDRResult compute_tt_dr(
+        const std::vector<std::vector<double>>& channels,
+        double sample_rate,
+        double block_seconds = 3.0) {
 
+    size_t nch = channels.size();
+    size_t n = channels[0].size();
+    size_t block_size = static_cast<size_t>(block_seconds * sample_rate);
+
+    TTDRResult result;
+    result.blocks = (n >= block_size) ? (n / block_size) : 1;
+
+    // ── Overall track peak and RMS (for display) ─────────────────────
+    // Peak: max across all channels (absolute max, not second-highest)
+    // RMS: power-summed across channels, divided by per-channel count
+    double track_peak = 0.0;
+    double total_sum_sq = 0.0;
+
+    for (size_t ch = 0; ch < nch; ++ch) {
+        for (size_t i = 0; i < n; ++i) {
+            double s = channels[ch][i];
+            track_peak = std::max(track_peak, std::abs(s));
+            total_sum_sq += s * s;
+        }
+    }
+
+    result.overall_peak_dbfs = to_dbfs(track_peak);
+    result.overall_rms_dbfs  = to_dbfs(std::sqrt(total_sum_sq / static_cast<double>(n)));
+    result.is_clipping       = (track_peak >= 0.9999);
+
+    // ── Per-channel DR computation ───────────────────────────────────
+    result.dr_per_ch.resize(nch);
+    double sum_dr = 0.0;
+
+    for (size_t ch = 0; ch < nch; ++ch) {
+        result.dr_per_ch[ch] = compute_tt_dr_single_channel(
+            channels[ch].data(), n, sample_rate, block_seconds);
+        sum_dr += result.dr_per_ch[ch];
+    }
+
+    result.dr = sum_dr / static_cast<double>(nch);
     return result;
 }
 
@@ -422,8 +444,7 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     r.is_clipping    = tt.is_clipping;
 
     // DSD peaks above 0 dBFS are normal (sigma-delta reconstruction),
-    // not clipping. Only flag clipping for integer PCM formats where
-    // 1.0 is a hard ceiling.
+    // not clipping.
     if (codec == "DSD") r.is_clipping = false;
 
     // ── EBU R128 and crest factor (per-channel, then average) ────────
