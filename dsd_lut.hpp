@@ -184,7 +184,7 @@ inline std::vector<double> design_prototype_fir(
 // Filter parameters tuned against foobar2000 SACD Multistage reference:
 //
 //   160 taps at DSD rate → 20 byte-LUT tables per output sample
-//   130 kHz cutoff — above the audio band, with a 46 kHz transition
+//   135 kHz cutoff — above the audio band, with a 41 kHz transition
 //     band to Nyquist (176.4 kHz). Lets most ultrasonic peak energy
 //     through while the short filter + low β keep ringing controlled.
 //   Kaiser β=4.5 — ~40 dB sidelobe rejection.
@@ -193,7 +193,8 @@ inline std::vector<double> design_prototype_fir(
 //   640 taps / 140 kHz / β=5.0 → +3.31 dBFS (+0.80 excess)
 //   160 taps /  50 kHz / β=4.5 → -1.04 dBFS (-3.55 deficit)
 //   160 taps / 100 kHz / β=4.5 → +0.67 dBFS (-1.84 deficit)
-//   160 taps / 130 kHz / β=4.5 → TBD
+//   160 taps / 130 kHz / β=4.5 → +2.67 dBFS (+0.16 excess, RMS ~0.2 dB low)
+//   160 taps / 135 kHz / β=4.5 → TBD
 
 inline std::vector<double> decimate_channel(
         const std::vector<uint8_t>& ch_dsd,
@@ -203,7 +204,7 @@ inline std::vector<double> decimate_channel(
 
     // ── Filter parameters ────────────────────────────────────────────
     static constexpr int    PROTO_TAPS  = 160;
-    static constexpr double CUTOFF_HZ   = 130000.0;
+    static constexpr double CUTOFF_HZ   = 135000.0;
     static constexpr double KAISER_BETA = 4.5;
 
     double fs_dsd = 352800.0 * decimation;
