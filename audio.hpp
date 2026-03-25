@@ -779,172 +779,14 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// DSD → PCM Decimation Engine
+// DSD → PCM Decimation — Byte-LUT polyphase FIR engine
 //
-// DSD (Direct Stream Digital) is 1-bit sigma-delta modulation at 2.8224 MHz
-// (DSD64) or multiples. Noise shaping pushes quantization noise to ultrasonic
-// frequencies — typically 40-60 dB above the audio signal above 100 kHz.
-//
-// Direct polyphase FIR decimation:
-//
-//   - 640-tap prototype lowpass FIR designed at DSD rate (2.8224 MHz)
-//   - Kaiser window (β=7.86) for ~80 dB sidelobe rejection
-//   - 140 kHz passband cutoff (tunable pending reference validation)
-//   - Split into M polyphase phases (80 taps each for DSD64)
-//   - Operates directly on ±1 DSD bits: output = Σ h[k]·bit[k]
-//
-// CRITICAL: Unlike CIC-based approaches, direct polyphase FIR is NOT
-// bounded to ±1.0 output. For ±1 input, max output = Σ|h[k]| ≈ 1.67,
-// enabling detection of above-0-dBFS peaks that DSD's sigma-delta
-// noise shaping produces. CIC architectures bound output to ±1.0
-// (since they compute weighted averages), making them unable to recover
-// these peaks regardless of post-CIC FIR compensation.
-//
-// For ±1 input, the FIR multiply is just sign selection (add/subtract
-// coefficient), so each output sample costs only N additions.
-//
-// Target output: 352.8 kHz — matches foobar2000 DR Meter reference.
+// See dsd_lut.hpp for implementation details. The LUT approach replaces
+// per-bit FIR convolution with precomputed byte lookup tables, achieving
+// ~8× speedup while producing identical output.
 // ════════════════════════════════════════════════════════════════════════════
 
-namespace dsd {
-
-// ── Kaiser window I0 (modified Bessel function of first kind, order 0) ────
-inline double bessel_i0(double x) {
-    double sum = 1.0, term = 1.0;
-    for (int k = 1; k < 25; ++k) {
-        term *= (x / (2.0 * k)) * (x / (2.0 * k));
-        sum += term;
-        if (term < 1e-15 * sum) break;
-    }
-    return sum;
-}
-
-// ── Design prototype lowpass FIR at DSD rate ───────────────────────────────
-// Kaiser-windowed sinc, normalized to unity DC gain.
-// cutoff_hz:   passband edge in Hz
-// fs:          DSD sample rate in Hz
-// num_taps:    filter length (should be multiple of decimation factor)
-// beta:        Kaiser window parameter (7.86 ≈ 80 dB rejection)
-inline std::vector<double> design_prototype_fir(
-        double cutoff_hz, double fs, int num_taps, double beta = 7.86) {
-
-    constexpr double PI = 3.14159265358979323846;
-    double f_cut = cutoff_hz / fs;  // normalized cutoff
-    int half = num_taps / 2;
-    double i0_beta = bessel_i0(beta);
-
-    std::vector<double> h(num_taps);
-
-    for (int n = 0; n < num_taps; ++n) {
-        double x = n - half;
-
-        // Sinc
-        if (std::abs(x) < 1e-10)
-            h[n] = 2.0 * f_cut;
-        else
-            h[n] = std::sin(2.0 * PI * f_cut * x) / (PI * x);
-
-        // Kaiser window
-        double t = 2.0 * x / num_taps;
-        double arg_sq = 1.0 - t * t;
-        if (arg_sq > 0.0)
-            h[n] *= bessel_i0(beta * std::sqrt(arg_sq)) / i0_beta;
-        else
-            h[n] = 0.0;
-    }
-
-    // Normalize DC gain to 1.0
-    double dc = 0.0;
-    for (double v : h) dc += v;
-    if (std::abs(dc) > 1e-10)
-        for (double& v : h) v /= dc;
-
-    return h;
-}
-
-// ── Polyphase FIR decimation for one DSD channel ──────────────────────────
-//
-// Applies prototype FIR directly to ±1 DSD bits, producing PCM output
-// at decimated rate. No CIC stage — output is NOT bounded to ±1.0.
-//
-// ch_dsd:     raw DSD byte stream for one channel
-// total_bits: number of valid DSD bits
-// decimation: decimation ratio (e.g. 8 for DSD64→352.8k)
-// lsb_first:  true for DSF (LSB-first), false for DFF (MSB-first)
-
-inline std::vector<double> decimate_channel(
-        const std::vector<uint8_t>& ch_dsd,
-        size_t total_bits,
-        int decimation,
-        bool lsb_first) {
-
-    // Prototype FIR parameters
-    // 640 taps = 80 per polyphase phase (for M=8), 140 kHz cutoff.
-    // RMS accuracy is excellent at 140 kHz (within 0.05 dB of foobar).
-    // Above-unity peaks overshoot by 0.5-1.2 dB — further tuning requires
-    // reference data from foobar2000 and MaatDROffline running directly
-    // on the same files (website data has inconsistent decoder settings).
-    // The cutoff sweet spot is likely between 120-140 kHz.
-    static const int PROTO_TAPS = 640;
-    static const double CUTOFF_HZ = 140000.0;
-    static const double KAISER_BETA = 5.0;
-
-    double fs_dsd = 352800.0 * decimation;
-
-    auto fir = design_prototype_fir(CUTOFF_HZ, fs_dsd, PROTO_TAPS, KAISER_BETA);
-
-    size_t n_out = total_bits / decimation;
-    if (n_out == 0) return {};
-
-    int fir_len = static_cast<int>(fir.size());
-    const double* fir_data = fir.data();
-    const uint8_t* dsd_data = ch_dsd.data();
-    size_t dsd_bytes = ch_dsd.size();
-
-    // ── Parallel polyphase FIR decimation ────────────────────────────
-    std::vector<double> pcm(n_out);
-
-    unsigned int n_threads = std::thread::hardware_concurrency();
-    if (n_threads < 1) n_threads = 1;
-    if (n_threads > 32) n_threads = 32;
-
-    auto worker = [&](size_t out_start, size_t out_end) {
-        for (size_t i = out_start; i < out_end; ++i) {
-            double acc = 0.0;
-            size_t bit_base = i * decimation;
-
-            for (int k = 0; k < fir_len; ++k) {
-                size_t bp = bit_base + (fir_len - 1 - k);
-                if (bp >= total_bits) continue;
-                size_t byte_idx = bp >> 3;          // bp / 8
-                if (byte_idx >= dsd_bytes) continue;
-                int bit_in_byte = static_cast<int>(bp & 7);  // bp % 8
-                int bit_pos = lsb_first ? bit_in_byte : (7 - bit_in_byte);
-                double bv = ((dsd_data[byte_idx] >> bit_pos) & 1) ? 1.0 : -1.0;
-                acc += fir_data[k] * bv;
-            }
-            pcm[i] = acc;
-        }
-    };
-
-    if (n_threads <= 1 || n_out < 10000) {
-        worker(0, n_out);
-    } else {
-        std::vector<std::thread> threads;
-        size_t chunk = (n_out + n_threads - 1) / n_threads;
-        for (unsigned int t = 0; t < n_threads; ++t) {
-            size_t start = t * chunk;
-            size_t end = std::min(start + chunk, n_out);
-            if (start < end)
-                threads.emplace_back(worker, start, end);
-        }
-        for (auto& th : threads) th.join();
-    }
-
-    return pcm;
-}
-
-} // namespace dsd
+#include "dsd_lut.hpp"
 
 // ════════════════════════════════════════════════════════════════════════════
 // DSF (DSD Stream File) Decoder
@@ -1018,7 +860,7 @@ inline AudioData decode_dsf(const std::vector<uint8_t>& buf) {
         }
     }
 
-    // Polyphase FIR decimation: DSD → 352.8 kHz PCM (channels in parallel)
+    // Byte-LUT polyphase FIR decimation: DSD → 352.8 kHz PCM
     ad.channels.resize(n_channels);
     {
         std::vector<std::thread> ch_threads;
@@ -1104,7 +946,7 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf) {
         ch_dsd[c].push_back(dsd_data[i]);
     }
 
-    // Polyphase FIR decimation: DSD → 352.8 kHz PCM (channels in parallel)
+    // Byte-LUT polyphase FIR decimation: DSD → 352.8 kHz PCM
     ad.channels.resize(n_channels);
     {
         std::vector<std::thread> ch_threads;
