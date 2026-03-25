@@ -23,6 +23,8 @@
 #include <thread>
 #include <vector>
 
+#include "dsd_lut.hpp"
+
 namespace audio {
 
 // ── Audio buffer returned by all decoders ──────────────────────────────────
@@ -785,8 +787,6 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
 // per-bit FIR convolution with precomputed byte lookup tables, achieving
 // ~8× speedup while producing identical output.
 // ════════════════════════════════════════════════════════════════════════════
-
-#include "dsd_lut.hpp"
 
 // ════════════════════════════════════════════════════════════════════════════
 // DSF (DSD Stream File) Decoder
