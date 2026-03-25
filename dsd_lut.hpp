@@ -140,7 +140,7 @@ inline double bessel_i0(double x) {
 // beta:        Kaiser parameter (4.5 ≈ 40 dB, 5.0 ≈ 44 dB, 7.86 ≈ 80 dB)
 
 inline std::vector<double> design_prototype_fir(
-        double cutoff_hz, double fs, int num_taps, double beta = 4.5) {
+        double cutoff_hz, double fs, int num_taps, double beta = 5.0) {
 
     constexpr double PI = 3.14159265358979323846;
     double f_cut = cutoff_hz / fs;
@@ -181,19 +181,19 @@ inline std::vector<double> design_prototype_fir(
 // Same signature. Called once per channel; callers spawn one thread
 // per channel for parallelism.
 //
-// Filter parameters (tuned to reduce peak overshoot vs foobar reference):
+// Filter parameters tuned against foobar2000 SACD Multistage reference:
 //
 //   160 taps at DSD rate → 20 byte-LUT tables per output sample
-//   50 kHz cutoff — well above audible band (20 kHz), wide transition
-//     band to Nyquist (176.4 kHz). This avoids the steep brick-wall
-//     rolloff that causes excessive Gibbs ringing on DSD transients.
-//   Kaiser β=4.5 — moderate sidelobe rejection (~40 dB), smooth
-//     passband-to-stopband transition. Lower β = less overshoot.
+//   130 kHz cutoff — above the audio band, with a 46 kHz transition
+//     band to Nyquist (176.4 kHz). Lets most ultrasonic peak energy
+//     through while the short filter + low β keep ringing controlled.
+//   Kaiser β=4.5 — ~40 dB sidelobe rejection.
 //
-// The combination of fewer taps + lower cutoff + lower β gives a gentle
-// rolloff that lets DSD noise shaping energy through gradually (like
-// foobar's 80-tap fir1_8) rather than brick-walling it (like the old
-// 640-tap/140 kHz design that caused 0.5-1.2 dB excess peak overshoot).
+// Empirical tuning log (Thriller DSD64, peak on Billie Jean, target +2.51):
+//   640 taps / 140 kHz / β=5.0 → +3.31 dBFS (+0.80 excess)
+//   160 taps /  50 kHz / β=4.5 → -1.04 dBFS (-3.55 deficit)
+//   160 taps / 100 kHz / β=4.5 → +0.67 dBFS (-1.84 deficit)
+//   160 taps / 130 kHz / β=4.5 → TBD
 
 inline std::vector<double> decimate_channel(
         const std::vector<uint8_t>& ch_dsd,
@@ -203,7 +203,7 @@ inline std::vector<double> decimate_channel(
 
     // ── Filter parameters ────────────────────────────────────────────
     static constexpr int    PROTO_TAPS  = 160;
-    static constexpr double CUTOFF_HZ   = 50000.0;
+    static constexpr double CUTOFF_HZ   = 130000.0;
     static constexpr double KAISER_BETA = 4.5;
 
     double fs_dsd = 352800.0 * decimation;
