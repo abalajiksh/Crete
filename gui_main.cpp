@@ -159,6 +159,55 @@ static std::string format_duration(double secs) {
     return buf;
 }
 
+// ── Font loading ───────────────────────────────────────────────────────────
+// Loads Sora font relative to the executable path. Falls back to ImGui default.
+// Glyph range covers Basic Latin + Latin-1 Supplement + Latin Extended-A
+// for Nordic (åäöøæ), French (éèêëç), German (üß), and Eastern European.
+
+static void load_fonts() {
+    ImGuiIO& io = ImGui::GetIO();
+
+    static const ImWchar glyph_ranges[] = {
+        0x0020, 0x00FF,  // Basic Latin + Latin-1 Supplement
+        0x0100, 0x017F,  // Latin Extended-A (Ő, ő, Ű, ű, Ł, ł, etc.)
+        0,
+    };
+
+    // Resolve font path relative to executable
+    std::string base_path;
+    char* sdl_base = SDL_GetBasePath();
+    if (sdl_base) {
+        base_path = sdl_base;
+        SDL_free(sdl_base);
+    }
+
+    // Candidate paths: variable font preferred, then static weights
+    const char* candidates[] = {
+        "fonts/Sora/Sora-VariableFont_wght.ttf",
+        "fonts/Sora/static/Sora-Regular.ttf",
+        "fonts/Sora/Sora-Regular.ttf",
+    };
+
+    ImFont* font = nullptr;
+    for (const auto& rel : candidates) {
+        std::string full = base_path + rel;
+        std::ifstream test(full, std::ios::binary);
+        if (test.good()) {
+            test.close();
+            font = io.Fonts->AddFontFromFileTTF(
+                full.c_str(), 18.0f, nullptr, glyph_ranges);
+            if (font) break;
+        }
+    }
+
+    if (!font) {
+        // Fallback: default font at a reasonable size
+        ImFontConfig cfg;
+        cfg.SizePixels = 16.0f;
+        io.Fonts->AddFontDefault(&cfg);
+    }
+}
+
 // ── Log generation (same format as CLI) ────────────────────────────────────
 static std::string generate_log(const std::vector<dr::TrackResult>& tracks,
                                  const std::string& folder_path, int format_idx) {
@@ -454,6 +503,7 @@ static void render_settings(bool* open) {
             ImGui::Separator();
             ImGui::Spacing();
             ImGui::TextDisabled("MIT License - Ashwin Balaji 2026");
+            ImGui::TextDisabled("Sora typeface: SIL Open Font License 1.1");
             ImGui::EndTabItem();
         }
 
@@ -843,8 +893,8 @@ int main(int, char**) {
 
     setup_style();
 
-    // Scale font for readability
-    io.FontGlobalScale = 1.15f;
+    // Load Sora font (falls back to default if not found)
+    load_fonts();
 
     ImGui_ImplSDL2_InitForOpenGL(window, gl_ctx);
     ImGui_ImplOpenGL3_Init(glsl_version);
