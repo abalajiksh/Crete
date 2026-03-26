@@ -64,8 +64,8 @@ struct ChannelMetrics {
     double rms_dbfs            = SILENCE_FLOOR_DB;
     double dr_raw              = 0.0;
     int    dr_score            = 0;
-    double max_momentary_lufs  = LUFS_FLOOR;   // non-ITU (single channel)
-    double max_short_term_lufs = LUFS_FLOOR;   // non-ITU (single channel)
+    double max_momentary_lufs  = LUFS_FLOOR;
+    double max_short_term_lufs = LUFS_FLOOR;
 };
 
 // ── Per-track analysis result ──────────────────────────────────────────────
@@ -159,25 +159,66 @@ inline double vec_mean(const std::vector<double>& v) {
     return std::accumulate(v.begin(), v.end(), 0.0) / static_cast<double>(v.size());
 }
 
-// ── True peak via 4x oversampling (linear interpolation) ───────────────────
-// Note: BS.1770 specifies a proper polyphase FIR for 4x oversampling.
-// Linear interpolation is an approximation that catches most inter-sample
-// peaks. Sufficient for DR measurement purposes.
+// ════════════════════════════════════════════════════════════════════════════
+// FIX 2: True peak via 4× polyphase FIR (ITU-R BS.1770-4)
+//
+// 48-tap filter split into 4 phases of 12 taps each. Phase 0 and 3
+// reconstruct near original sample positions; phases 1 and 2 interpolate
+// at 1/4 and 1/2 sample offsets respectively. Coefficients from the
+// ITU-R BS.1770-4 reference implementation (Annex 2).
+// ════════════════════════════════════════════════════════════════════════════
+
+static constexpr int TP_PHASES = 4;
+static constexpr int TP_TAPS   = 12;  // taps per phase
+
+// Polyphase filter bank: TP_FIR[phase][tap]
+// Phase p, tap k corresponds to prototype filter h[k * 4 + p].
+static constexpr double TP_FIR[TP_PHASES][TP_TAPS] = {
+    // Phase 0 (≈ original sample position)
+    {  0.0017089843750,  0.0109863281250, -0.0196533203125,  0.0332031250000,
+      -0.0594482421875,  0.1373291015625,  0.9721679687500, -0.1022949218750,
+       0.0476074218750, -0.0266113281250,  0.0148925781250, -0.0083007812500 },
+    // Phase 1 (1/4 sample offset)
+    { -0.0291748046875,  0.0292968750000, -0.0517578125000,  0.0891113281250,
+      -0.1665039062500,  0.4650878906250,  0.7797851562500, -0.2003173828125,
+       0.1015625000000, -0.0582275390625,  0.0330810546875, -0.0189208984375 },
+    // Phase 2 (1/2 sample offset)
+    { -0.0189208984375,  0.0330810546875, -0.0582275390625,  0.1015625000000,
+      -0.2003173828125,  0.7797851562500,  0.4650878906250, -0.1665039062500,
+       0.0891113281250, -0.0517578125000,  0.0292968750000, -0.0291748046875 },
+    // Phase 3 (3/4 sample offset)
+    { -0.0083007812500,  0.0148925781250, -0.0266113281250,  0.0476074218750,
+      -0.1022949218750,  0.9721679687500,  0.1373291015625, -0.0594482421875,
+       0.0332031250000, -0.0196533203125,  0.0109863281250,  0.0017089843750 },
+};
 
 inline double compute_true_peak(const double* samples, size_t n) {
     if (n == 0) return 0.0;
-    double peak = 0.0;
-    for (size_t i = 0; i < n; ++i)
-        peak = std::max(peak, std::abs(samples[i]));
 
-    for (size_t i = 0; i + 1 < n; ++i) {
-        double s0 = samples[i], s1 = samples[i+1];
-        for (int k = 1; k <= 3; ++k) {
-            double t = k / 4.0;
-            double interp = s0 + t * (s1 - s0);
-            peak = std::max(peak, std::abs(interp));
+    // Ring buffer for the last TP_TAPS input samples
+    double buf[TP_TAPS] = {};
+    int buf_idx = 0;  // next write position
+    double peak = 0.0;
+
+    for (size_t i = 0; i < n; ++i) {
+        // Insert new sample into ring buffer
+        buf[buf_idx] = samples[i];
+        buf_idx = (buf_idx + 1) % TP_TAPS;
+
+        // Evaluate all 4 phases (= 4 interpolated values per input sample)
+        for (int p = 0; p < TP_PHASES; ++p) {
+            double acc = 0.0;
+            // Convolve: tap k reads buf[(buf_idx - 1 - k) mod TP_TAPS]
+            // which is the sample delayed by k positions
+            for (int k = 0; k < TP_TAPS; ++k) {
+                int idx = (buf_idx - 1 - k + TP_TAPS) % TP_TAPS;
+                acc += TP_FIR[p][k] * buf[idx];
+            }
+            double a = std::abs(acc);
+            if (a > peak) peak = a;
         }
     }
+
     return peak;
 }
 
@@ -264,19 +305,20 @@ inline std::vector<std::vector<double>> k_weight_channels(
     return kw;
 }
 
-// ── Max block loudness (single channel, K-weighted input) ──────────────────
-// Returns maximum loudness across all overlapping blocks of given window/hop.
-// Input must already be K-weighted.
+// ── Max block loudness (single channel, scaled to multi-channel convention)
+// Returns maximum loudness across all overlapping blocks.
+// power_scale: multiply single-channel power by this (= nch for MAAT compat)
 
 inline double max_block_loudness_single(const double* kw, size_t n,
-                                         size_t window, size_t hop) {
+                                         size_t window, size_t hop,
+                                         double power_scale = 1.0) {
     if (n < window) {
-        double ms = mean_square(kw, n);
+        double ms = mean_square(kw, n) * power_scale;
         return to_lufs_from_power(ms);
     }
     double max_lufs = LUFS_FLOOR;
     for (size_t start = 0; start + window <= n; start += hop) {
-        double ms = mean_square(&kw[start], window);
+        double ms = mean_square(&kw[start], window) * power_scale;
         double lufs = to_lufs_from_power(ms);
         if (lufs > max_lufs) max_lufs = lufs;
     }
@@ -284,10 +326,6 @@ inline double max_block_loudness_single(const double* kw, size_t n,
 }
 
 // ── Max block loudness (multi-channel, ITU power-summed) ───────────────────
-// Per EBU R128: power-sum K-weighted channels, then compute loudness.
-// Channel weights: 1.0 for L/R/C, 1.41 for Ls/Rs (surround).
-// For stereo (nch <= 2), all weights are 1.0.
-
 inline double max_block_loudness_multi(
         const std::vector<std::vector<double>>& kw_channels,
         size_t window, size_t hop) {
@@ -314,8 +352,6 @@ inline double max_block_loudness_multi(
 }
 
 // ── EBU R128 integrated loudness (multi-channel, proper gating) ────────────
-// K-weighted input, power-summed across channels, dual gated.
-
 inline double compute_integrated_loudness_multi(
         const std::vector<std::vector<double>>& kw_channels,
         double sample_rate) {
@@ -333,7 +369,6 @@ inline double compute_integrated_loudness_multi(
         return to_lufs_from_power(total_power);
     }
 
-    // Compute block powers (multi-channel sum)
     std::vector<double> block_powers;
     for (size_t start = 0; start + block_samples <= n; start += hop) {
         double total = 0.0;
@@ -370,8 +405,13 @@ inline double compute_integrated_loudness(const double* samples, size_t n,
     return compute_integrated_loudness_multi(single, sample_rate);
 }
 
-// ── Loudness Range (LRA) — EBU R128 / BS.1770-4 ───────────────────────────
-// 3s blocks, 1s hop, dual gate (abs -70, rel -20), then 10th-95th percentile.
+// ════════════════════════════════════════════════════════════════════════════
+// FIX 3: LRA — relative gate computed in the power domain
+//
+// EBU R128 / BS.1770-4 §4: the relative gate threshold is −20 dB below
+// the *mean power* of blocks above the absolute gate, NOT −20 dB below
+// the mean of their LUFS values.
+// ════════════════════════════════════════════════════════════════════════════
 
 inline double compute_lra(const std::vector<std::vector<double>>& kw_channels,
                            double sample_rate) {
@@ -383,48 +423,51 @@ inline double compute_lra(const std::vector<std::vector<double>>& kw_channels,
     size_t hop = static_cast<size_t>(1.0 * sample_rate);
     if (n < window) return 0.0;
 
-    // Compute short-term block loudnesses (multi-channel)
-    std::vector<double> st_lufs;
+    // Compute short-term block loudness (multi-channel) — store both
+    // the LUFS value (for percentile) and linear power (for gating).
+    struct Block { double power; double lufs; };
+    std::vector<Block> blocks;
+
     for (size_t start = 0; start + window <= n; start += hop) {
         double total = 0.0;
         for (size_t c = 0; c < nch; ++c)
             total += mean_square(&kw_channels[c][start], window);
         double lufs = to_lufs_from_power(total);
-        st_lufs.push_back(lufs);
+        blocks.push_back({total, lufs});
     }
 
-    if (st_lufs.empty()) return 0.0;
+    if (blocks.empty()) return 0.0;
 
-    // Absolute gate: -70 LUFS
-    std::vector<double> above_abs;
-    for (double l : st_lufs)
-        if (l > -70.0) above_abs.push_back(l);
+    // Absolute gate: −70 LUFS (in power domain)
+    double abs_gate_power = std::pow(10.0, (-70.0 + 0.691) / 10.0);
+    std::vector<Block> above_abs;
+    for (const auto& b : blocks)
+        if (b.power > abs_gate_power) above_abs.push_back(b);
 
     if (above_abs.size() < 2) return 0.0;
 
-    // Relative gate: mean - 20 dB (note: -20 for LRA, not -10)
-    double mean_abs = vec_mean(above_abs);
-    double rel_threshold = mean_abs - 20.0;
+    // Relative gate: mean_power − 20 dB (in power domain, per BS.1770-4)
+    double sum_power = 0.0;
+    for (const auto& b : above_abs) sum_power += b.power;
+    double mean_power = sum_power / static_cast<double>(above_abs.size());
+    double rel_gate_power = mean_power * std::pow(10.0, -20.0 / 10.0);
 
-    std::vector<double> above_rel;
-    for (double l : above_abs)
-        if (l > rel_threshold) above_rel.push_back(l);
+    std::vector<double> above_rel_lufs;
+    for (const auto& b : above_abs)
+        if (b.power > rel_gate_power) above_rel_lufs.push_back(b.lufs);
 
-    if (above_rel.size() < 2) return 0.0;
+    if (above_rel_lufs.size() < 2) return 0.0;
 
     // 10th and 95th percentile
-    std::sort(above_rel.begin(), above_rel.end());
-    size_t idx_10 = static_cast<size_t>(above_rel.size() * 0.10);
-    size_t idx_95 = static_cast<size_t>(above_rel.size() * 0.95);
-    if (idx_95 >= above_rel.size()) idx_95 = above_rel.size() - 1;
+    std::sort(above_rel_lufs.begin(), above_rel_lufs.end());
+    size_t idx_10 = static_cast<size_t>(above_rel_lufs.size() * 0.10);
+    size_t idx_95 = static_cast<size_t>(above_rel_lufs.size() * 0.95);
+    if (idx_95 >= above_rel_lufs.size()) idx_95 = above_rel_lufs.size() - 1;
 
-    return above_rel[idx_95] - above_rel[idx_10];
+    return above_rel_lufs[idx_95] - above_rel_lufs[idx_10];
 }
 
-// ── Min PSR (SPPM-to-Short-Term Loudness Ratio) — AES ──────────────────────
-// For each 3s segment: PSR = sample_peak_dBFS - short_term_LUFS
-// Returns the minimum PSR across the track.
-
+// ── Min PSR (SPPM-to-Short-Term Loudness Ratio) ───────────────────────────
 inline double compute_min_psr(
         const std::vector<std::vector<double>>& channels,
         const std::vector<std::vector<double>>& kw_channels,
@@ -441,12 +484,10 @@ inline double compute_min_psr(
     bool any_valid = false;
 
     for (size_t start = 0; start + window <= n; start += hop) {
-        // Sample peak across all channels in this segment
         double seg_peak = 0.0;
         for (size_t c = 0; c < nch; ++c)
             seg_peak = std::max(seg_peak, peak_of(&channels[c][start], window));
 
-        // Short-term loudness (multi-channel K-weighted)
         double total_power = 0.0;
         for (size_t c = 0; c < nch; ++c)
             total_power += mean_square(&kw_channels[c][start], window);
@@ -462,27 +503,23 @@ inline double compute_min_psr(
     return any_valid ? min_psr : 0.0;
 }
 
-// ── TT Dynamic Range Meter ──────────────────────────────────────────────────
-// Pleasurize Music Foundation algorithm.
-// Validated against foobar2000 DR Meter v1.0.6 and MaatDROffline MkII.
+// ════════════════════════════════════════════════════════════════════════════
+// FIX 1: TT Dynamic Range Meter — joint + per-channel from same blocks
 //
-// Multi-channel block algorithm:
-//   1. Split audio into 3-second non-overlapping blocks
-//   2. Per block, across ALL channels simultaneously:
-//      a. Peak = max |sample| across all channels in the block
-//      b. RMS  = sqrt( sum_of_squares_all_channels / block_size )
-//   3. Discard near-silent blocks (RMS < 1e-3 linear ≈ -60 dBFS)
-//   4. Sort remaining blocks by RMS descending, select top 20%
-//   5. From ALL non-silent blocks, take the 2nd highest peak value
-//   6. DR = 20·log10( 2nd_highest_peak / mean_rms_of_top20 )
-//   7. Round to nearest integer
+// Per-channel metrics are extracted from the JOINT multi-channel block
+// analysis. In the TT DR convention, block RMS sums power across ALL
+// channels and divides by block_size (samples per channel), so the
+// effective RMS is sqrt(nch) higher than an isolated single-channel RMS.
+// Per-channel DR uses per-channel peaks but the JOINT block RMS, which
+// matches MAAT DROffline's per-channel columns.
+// ════════════════════════════════════════════════════════════════════════════
 
 struct TTDRResult {
-    double dr;
-    std::vector<double> dr_per_ch;
+    double dr;                      // joint DR
+    std::vector<double> dr_per_ch;  // per-channel DR from joint blocks
     size_t blocks;
-    double overall_rms_dbfs;
-    double overall_peak_dbfs;
+    double overall_rms_dbfs;        // joint multi-channel RMS
+    double overall_peak_dbfs;       // joint peak (max across all channels)
     bool   is_clipping;
 };
 
@@ -497,6 +534,7 @@ inline TTDRResult compute_tt_dr(
 
     TTDRResult result;
     result.blocks = (n >= block_size) ? (n / block_size) : 1;
+    result.dr_per_ch.resize(nch, 0.0);
 
     // ── Overall track peak and RMS (for display) ─────────────────────
     double track_peak = 0.0;
@@ -510,6 +548,7 @@ inline TTDRResult compute_tt_dr(
         }
     }
 
+    // Joint RMS: sqrt((Σ_all_ch²) / block_size_per_channel)
     result.overall_rms_dbfs  = to_dbfs(std::sqrt(total_sum_sq / static_cast<double>(n)));
     result.overall_peak_dbfs = to_dbfs(track_peak);
     result.is_clipping       = (track_peak >= 0.9999);
@@ -519,70 +558,95 @@ inline TTDRResult compute_tt_dr(
         double rms = std::sqrt(total_sum_sq / static_cast<double>(n));
         if (rms <= 0.0) { result.dr = 0.0; return result; }
         result.dr = to_dbfs(track_peak) - to_dbfs(rms);
-        result.dr_per_ch = {result.dr};
+        for (size_t ch = 0; ch < nch; ++ch)
+            result.dr_per_ch[ch] = result.dr;
         return result;
     }
 
     size_t n_blocks = n / block_size;
 
-    std::vector<double> block_rms_vals, block_peak_vals;
-    block_rms_vals.reserve(n_blocks);
-    block_peak_vals.reserve(n_blocks);
+    // Per-block data: joint RMS, joint peak, per-channel peaks
+    struct BlockData {
+        double joint_rms;
+        double joint_peak;
+        std::vector<double> ch_peaks;
+    };
+    std::vector<BlockData> block_data;
+    block_data.reserve(n_blocks);
 
     for (size_t b = 0; b < n_blocks; ++b) {
         size_t start = b * block_size;
+        BlockData bd;
+        bd.ch_peaks.resize(nch, 0.0);
 
-        double pk = 0.0;
-        for (size_t ch = 0; ch < nch; ++ch) {
-            for (size_t i = start; i < start + block_size; ++i)
-                pk = std::max(pk, std::abs(channels[ch][i]));
-        }
-
+        double joint_pk = 0.0;
         double sum_sq = 0.0;
-        for (size_t ch = 0; ch < nch; ++ch) {
-            for (size_t i = start; i < start + block_size; ++i)
-                sum_sq += channels[ch][i] * channels[ch][i];
-        }
-        double rms = std::sqrt(sum_sq / static_cast<double>(block_size));
 
-        if (rms > 1e-3) {
-            block_rms_vals.push_back(rms);
-            block_peak_vals.push_back(pk);
+        for (size_t ch = 0; ch < nch; ++ch) {
+            double ch_pk = 0.0;
+            for (size_t i = start; i < start + block_size; ++i) {
+                double s = channels[ch][i];
+                double a = std::abs(s);
+                if (a > ch_pk) ch_pk = a;
+                sum_sq += s * s;
+            }
+            bd.ch_peaks[ch] = ch_pk;
+            if (ch_pk > joint_pk) joint_pk = ch_pk;
         }
+
+        bd.joint_peak = joint_pk;
+        bd.joint_rms = std::sqrt(sum_sq / static_cast<double>(block_size));
+
+        // Discard near-silent blocks
+        if (bd.joint_rms > 1e-3)
+            block_data.push_back(std::move(bd));
     }
 
-    if (block_rms_vals.empty()) { result.dr = 0.0; return result; }
+    if (block_data.empty()) { result.dr = 0.0; return result; }
 
-    // ── 2nd highest peak from ALL non-silent blocks ──────────────────
-    std::vector<double> sorted_peaks = block_peak_vals;
+    size_t nb = block_data.size();
+
+    // ── Joint DR ─────────────────────────────────────────────────────
+
+    // 2nd highest joint peak
+    std::vector<double> sorted_peaks(nb);
+    for (size_t i = 0; i < nb; ++i) sorted_peaks[i] = block_data[i].joint_peak;
     std::sort(sorted_peaks.begin(), sorted_peaks.end(), std::greater<double>());
+    double dr_peak = (nb >= 2) ? sorted_peaks[1] : sorted_peaks[0];
 
-    double dr_peak = (sorted_peaks.size() >= 2)
-                     ? sorted_peaks[1]
-                     : sorted_peaks[0];
-
-    // ── Mean RMS of top 20% loudest blocks ───────────────────────────
-    std::vector<size_t> indices(block_rms_vals.size());
+    // Top 20% loudest blocks by joint RMS → mean RMS
+    std::vector<size_t> indices(nb);
     std::iota(indices.begin(), indices.end(), 0);
     std::sort(indices.begin(), indices.end(),
               [&](size_t a, size_t b) {
-                  return block_rms_vals[a] > block_rms_vals[b];
+                  return block_data[a].joint_rms > block_data[b].joint_rms;
               });
 
     size_t n_top = std::max<size_t>(1,
-        std::min<size_t>(block_rms_vals.size(),
-            static_cast<size_t>(std::ceil(block_rms_vals.size() * 0.2))));
+        std::min<size_t>(nb,
+            static_cast<size_t>(std::ceil(nb * 0.2))));
 
     double sum_rms = 0.0;
-    for (size_t i = 0; i < n_top; ++i) {
-        sum_rms += block_rms_vals[indices[i]];
-    }
+    for (size_t i = 0; i < n_top; ++i)
+        sum_rms += block_data[indices[i]].joint_rms;
     double avg_rms = sum_rms / static_cast<double>(n_top);
 
     if (avg_rms <= 0.0) { result.dr = 0.0; return result; }
 
     result.dr = to_dbfs(dr_peak) - to_dbfs(avg_rms);
-    result.dr_per_ch = {result.dr};
+
+    // ── Per-channel DR (from joint block framework) ──────────────────
+    // Uses per-channel 2nd-highest peak but the SAME joint avg RMS.
+
+    for (size_t ch = 0; ch < nch; ++ch) {
+        std::vector<double> ch_peaks(nb);
+        for (size_t i = 0; i < nb; ++i) ch_peaks[i] = block_data[i].ch_peaks[ch];
+
+        std::sort(ch_peaks.begin(), ch_peaks.end(), std::greater<double>());
+        double ch_peak2 = (nb >= 2) ? ch_peaks[1] : ch_peaks[0];
+
+        result.dr_per_ch[ch] = to_dbfs(ch_peak2) - to_dbfs(avg_rms);
+    }
 
     return result;
 }
@@ -609,7 +673,7 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     size_t n = channels[0].size();
     double sr = static_cast<double>(sample_rate);
 
-    // ── TT DR (multi-channel blocks, joint) ──────────────────────────
+    // ── TT DR (multi-channel blocks, joint + per-channel) ────────────
     auto tt = compute_tt_dr(channels, sample_rate);
     r.dr_score_raw   = tt.dr;
     r.dr_score       = static_cast<int>(std::round(tt.dr));
@@ -619,17 +683,21 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     r.rms_dbfs       = tt.overall_rms_dbfs;
     r.is_clipping    = tt.is_clipping;
 
-    // DSD peaks above 0 dBFS are normal (sigma-delta reconstruction)
     if (codec == "DSD") r.is_clipping = false;
 
     // ── K-weight all channels once (reused for all loudness metrics) ─
     auto kw = k_weight_channels(channels, sr);
 
     // Window/hop sizes
-    size_t momentary_window = static_cast<size_t>(0.4 * sr);
-    size_t momentary_hop    = static_cast<size_t>(0.1 * sr);
+    size_t momentary_window  = static_cast<size_t>(0.4 * sr);
+    size_t momentary_hop     = static_cast<size_t>(0.1 * sr);
     size_t short_term_window = static_cast<size_t>(3.0 * sr);
     size_t short_term_hop    = static_cast<size_t>(1.0 * sr);
+
+    // Power scaling factor for per-channel loudness: multiply single-
+    // channel power by nch so per-channel LUFS values are on the same
+    // scale as the multi-channel sum (matches MAAT convention).
+    double ch_power_scale = static_cast<double>(nch);
 
     // ── Per-channel metrics ──────────────────────────────────────────
     r.ch_metrics.resize(nch);
@@ -639,31 +707,32 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
         auto& cm = r.ch_metrics[c];
         const auto& samp = channels[c];
 
-        // Sample peak
+        // Sample peak (truly per-channel — matches MAAT SPPM)
         double sp = peak_of(samp.data(), n);
         cm.sample_peak_dbfs = to_dbfs(sp);
 
-        // True peak (4x oversampled)
+        // True peak (FIX 2: proper BS.1770-4 polyphase FIR)
         double tp = compute_true_peak(samp.data(), n);
         cm.true_peak_dbfs = to_dbfs(tp);
         if (tp > joint_tp) joint_tp = tp;
 
-        // RMS
-        cm.rms_dbfs = to_dbfs(rms_of(samp.data(), n));
+        // Per-channel RMS (FIX 1: scale by sqrt(nch) to match the
+        // TT DR multi-channel convention where block RMS sums power
+        // across all channels but divides by samples-per-channel)
+        double ch_rms = rms_of(samp.data(), n) * std::sqrt(ch_power_scale);
+        cm.rms_dbfs = to_dbfs(ch_rms);
 
-        // Per-channel DR (run TT DR on single channel)
-        std::vector<std::vector<double>> single = {samp};
-        auto ch_dr = compute_tt_dr(single, sample_rate);
-        cm.dr_raw = ch_dr.dr;
-        cm.dr_score = static_cast<int>(std::round(ch_dr.dr));
+        // Per-channel DR from joint block analysis (FIX 1)
+        cm.dr_raw   = tt.dr_per_ch[c];
+        cm.dr_score = static_cast<int>(std::round(tt.dr_per_ch[c]));
 
-        // Per-channel momentary max (non-ITU, single channel K-weighted)
+        // Per-channel momentary max (FIX 1: scaled to multi-channel convention)
         cm.max_momentary_lufs = max_block_loudness_single(
-            kw[c].data(), n, momentary_window, momentary_hop);
+            kw[c].data(), n, momentary_window, momentary_hop, ch_power_scale);
 
-        // Per-channel short-term max (non-ITU)
+        // Per-channel short-term max (FIX 1: scaled)
         cm.max_short_term_lufs = max_block_loudness_single(
-            kw[c].data(), n, short_term_window, short_term_hop);
+            kw[c].data(), n, short_term_window, short_term_hop, ch_power_scale);
     }
 
     r.true_peak_dbfs = to_dbfs(joint_tp);
@@ -687,7 +756,7 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     }
     r.crest_factor_db = sum_crest / static_cast<double>(nch);
 
-    // ── LRA ──────────────────────────────────────────────────────────
+    // ── LRA (FIX 3: relative gate now in power domain) ───────────────
     r.lra_lu = compute_lra(kw, sr);
 
     // ── Min PSR ──────────────────────────────────────────────────────
