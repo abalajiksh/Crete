@@ -42,11 +42,12 @@ namespace fs = std::filesystem;
 enum class OutputFormat {
     Standard,   // dr.loudness-war.info compatible
     Foobar,     // foobar2000 DR Meter style
-    Extended,   // all metrics
-    Detail,     // per-track per-channel (MAAT DROffline style)
+    Extended,   // MAAT DROffline–style pipe-delimited table
+    Detail,     // per-track per-channel block view
 };
 
-// ── Duration formatting ────────────────────────────────────────────────────
+// ── Formatting helpers ─────────────────────────────────────────────────────
+
 std::string format_duration(double secs) {
     int m = static_cast<int>(secs) / 60;
     int s = static_cast<int>(secs) % 60;
@@ -55,7 +56,6 @@ std::string format_duration(double secs) {
     return buf;
 }
 
-// ── Peak display ───────────────────────────────────────────────────────────
 std::string format_peak(double peak_dbfs, bool is_clipping, OutputFormat fmt) {
     if (fmt == OutputFormat::Foobar) {
         if (is_clipping) return "   0.00 dB";
@@ -68,6 +68,47 @@ std::string format_peak(double peak_dbfs, bool is_clipping, OutputFormat fmt) {
         std::snprintf(buf, sizeof(buf), "%.2f dB", peak_dbfs);
         return buf;
     }
+}
+
+// Format sample rate: 44100 → "44.1k", 96000 → "96k", 352800 → "352.8k"
+std::string format_sr(uint32_t sr) {
+    double k = sr / 1000.0;
+    if (k == std::floor(k))
+        return std::to_string(static_cast<int>(k)) + "k";
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%.1fk", k);
+    return buf;
+}
+
+// Format dB with explicit +/- sign: +0.39, -1.76
+std::string format_signed(double db) {
+    char buf[16];
+    if (db >= 0.0)
+        std::snprintf(buf, sizeof(buf), "+%.2f", db);
+    else
+        std::snprintf(buf, sizeof(buf), "%.2f", db);
+    return buf;
+}
+
+// Format dB with natural sign, 2 decimal places
+std::string format_db(double db) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%.2f", db);
+    return buf;
+}
+
+// Strip file extension
+std::string strip_ext(const std::string& filename) {
+    auto dot = filename.rfind('.');
+    if (dot != std::string::npos) return filename.substr(0, dot);
+    return filename;
+}
+
+// Get file extension (including dot)
+std::string get_ext(const std::string& filename) {
+    auto dot = filename.rfind('.');
+    if (dot != std::string::npos) return filename.substr(dot);
+    return "";
 }
 
 // ── Collect audio files from a path ────────────────────────────────────────
@@ -168,10 +209,7 @@ void print_foobar(const std::vector<dr::TrackResult>& tracks,
         std::snprintf(rms_str, sizeof(rms_str), "%7.2f dB", t.rms_dbfs);
 
         std::string dur = format_duration(t.duration_secs);
-
-        auto name = t.filename;
-        auto dot = name.rfind('.');
-        if (dot != std::string::npos) name = name.substr(0, dot);
+        auto name = strip_ext(t.filename);
 
         std::printf("%-10s %s  %s %8s %s\n",
                     dr_str, peak_str, rms_str, dur.c_str(), name.c_str());
@@ -192,86 +230,202 @@ void print_foobar(const std::vector<dr::TrackResult>& tracks,
     std::cout << sep2 << "\n";
 }
 
-// ── Extended output with all metrics ───────────────────────────────────────
+// ── Extended output (MAAT DROffline–style pipe-delimited table) ────────────
+//
+// Columns (matching MAAT DROffline MkII log format):
+//   File Name | Format | SR | Word Length | Max. TPL |
+//   Max. SPPM LEFT | Max. SPPM RIGHT | Max. SPPM (JOINT) |
+//   RMS LEFT | RMS RIGHT | Max. M LEFT | Max. M RIGHT |
+//   Max. S LEFT | Max. S RIGHT | LUFSi | DR (PMF) | Bits Used |
+//   PLR | LRA | Max. M | Max. S | DR LEFT |
+//   Max. TPL LEFT | Max. TPL RIGHT | DR RIGHT | Min. PSR |
+
 void print_extended(const std::vector<dr::TrackResult>& tracks,
-                    const std::string& folder_name) {
-    const std::string sep(120, '-');
-    const std::string sep2(120, '=');
+                    const std::string& folder_path) {
+    if (tracks.empty()) return;
 
-    auto now = std::chrono::system_clock::now();
-    auto t_now = std::chrono::system_clock::to_time_t(now);
-    char date_buf[32];
-    std::strftime(date_buf, sizeof(date_buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t_now));
+    // ── Pre-format all values & compute dynamic column widths ────────
 
-    std::cout << PROGRAM_NAME << " " << PROGRAM_VERSION
-              << " — Extended Dynamic Range Analysis\n";
-    std::cout << "log date: " << date_buf << "\n\n";
-    std::cout << sep << "\n";
-    std::cout << "Analyzed: " << folder_name << "\n";
-    std::cout << sep << "\n\n";
+    struct Row {
+        std::string name, ext, sr, wl;
+        std::string tpl, sppm_l, sppm_r, sppm_j;
+        std::string rms_l, rms_r;
+        std::string mom_l, mom_r, st_l, st_r;
+        std::string lufs_i, dr_pmf, bits_used;
+        std::string plr, lra;
+        std::string mom_j, st_j;
+        std::string dr_l, tpl_l, tpl_r, dr_r, min_psr;
+    };
 
-    std::printf("%-6s %-10s %-10s %-10s %-10s %-8s %-8s  %s\n",
-                "DR", "Peak", "RMS", "LUFS", "PLR", "Crest", "Dur", "Filename");
-    std::cout << sep << "\n";
+    std::vector<Row> rows;
+    rows.reserve(tracks.size());
 
-    double sum_lufs = 0.0;
+    size_t fname_w = 9;  // min = strlen("File Name")
+    size_t sr_w    = 2;  // min = strlen("SR")
 
     for (const auto& t : tracks) {
-        char dr_str[8];
-        std::snprintf(dr_str, sizeof(dr_str), "DR%-3d", t.dr_score);
+        Row r;
+        r.name = strip_ext(t.filename);
+        r.ext  = get_ext(t.filename);
+        r.sr   = format_sr(t.sample_rate);
+        r.wl   = std::to_string(t.bit_depth);
 
-        char peak_str[16];
-        if (t.is_clipping)
-            std::snprintf(peak_str, sizeof(peak_str), "over");
-        else
-            std::snprintf(peak_str, sizeof(peak_str), "%.2f dB", t.peak_dbfs);
+        size_t nch = t.ch_metrics.size();
 
-        char rms_str[16], lufs_str[16], plr_str[16], crest_str[16];
-        std::snprintf(rms_str,   sizeof(rms_str),   "%.2f dB", t.rms_dbfs);
-        std::snprintf(lufs_str,  sizeof(lufs_str),  "%.1f",    t.integrated_lufs);
-        std::snprintf(plr_str,   sizeof(plr_str),   "%.1f dB", t.plr_db);
-        std::snprintf(crest_str, sizeof(crest_str),  "%.1f dB", t.crest_factor_db);
+        // Joint true peak (explicit sign)
+        r.tpl = format_signed(t.true_peak_dbfs);
 
-        std::string dur = format_duration(t.duration_secs);
+        // Per-channel sample peaks
+        double sp_l = (nch > 0) ? t.ch_metrics[0].sample_peak_dbfs : t.peak_dbfs;
+        double sp_r = (nch > 1) ? t.ch_metrics[1].sample_peak_dbfs : sp_l;
+        r.sppm_l = format_db(sp_l);
+        r.sppm_r = format_db(sp_r);
+        r.sppm_j = format_db(std::max(sp_l, sp_r));
 
-        auto name = t.filename;
-        auto dot = name.rfind('.');
-        if (dot != std::string::npos) name = name.substr(0, dot);
+        // Per-channel RMS
+        r.rms_l = format_db((nch > 0) ? t.ch_metrics[0].rms_dbfs : t.rms_dbfs);
+        r.rms_r = format_db((nch > 1) ? t.ch_metrics[1].rms_dbfs
+                                       : ((nch > 0) ? t.ch_metrics[0].rms_dbfs : t.rms_dbfs));
 
-        std::printf("%-6s %-10s %-10s %-10s %-10s %-8s %-8s  %s\n",
-                    dr_str, peak_str, rms_str, lufs_str, plr_str,
-                    crest_str, dur.c_str(), name.c_str());
+        // Per-channel max momentary
+        r.mom_l = format_db((nch > 0) ? t.ch_metrics[0].max_momentary_lufs : t.max_momentary_lufs);
+        r.mom_r = format_db((nch > 1) ? t.ch_metrics[1].max_momentary_lufs
+                                       : ((nch > 0) ? t.ch_metrics[0].max_momentary_lufs : t.max_momentary_lufs));
 
-        sum_lufs += t.integrated_lufs;
+        // Per-channel max short-term
+        r.st_l = format_db((nch > 0) ? t.ch_metrics[0].max_short_term_lufs : t.max_short_term_lufs);
+        r.st_r = format_db((nch > 1) ? t.ch_metrics[1].max_short_term_lufs
+                                      : ((nch > 0) ? t.ch_metrics[0].max_short_term_lufs : t.max_short_term_lufs));
+
+        // Joint metrics
+        r.lufs_i    = format_db(t.integrated_lufs);
+        r.dr_pmf    = std::to_string(t.dr_score);
+        r.bits_used = std::to_string(t.bit_depth);
+        r.plr       = format_db(t.plr_db);
+        r.lra       = format_db(t.lra_lu);
+        r.mom_j     = format_db(t.max_momentary_lufs);
+        r.st_j      = format_db(t.max_short_term_lufs);
+
+        // Per-channel DR (raw, 2 decimal places)
+        r.dr_l = format_db((nch > 0) ? t.ch_metrics[0].dr_raw : t.dr_score_raw);
+        r.dr_r = format_db((nch > 1) ? t.ch_metrics[1].dr_raw
+                                      : ((nch > 0) ? t.ch_metrics[0].dr_raw : t.dr_score_raw));
+
+        // Per-channel true peak (explicit sign)
+        r.tpl_l = format_signed((nch > 0) ? t.ch_metrics[0].true_peak_dbfs : t.true_peak_dbfs);
+        r.tpl_r = format_signed((nch > 1) ? t.ch_metrics[1].true_peak_dbfs
+                                           : ((nch > 0) ? t.ch_metrics[0].true_peak_dbfs : t.true_peak_dbfs));
+
+        r.min_psr = format_db(t.psr_db);
+
+        fname_w = std::max(fname_w, r.name.length());
+        sr_w    = std::max(sr_w,    r.sr.length());
+
+        rows.push_back(std::move(r));
     }
 
-    std::cout << sep << "\n\n";
-    std::cout << "Number of tracks:  " << tracks.size() << "\n";
-    std::cout << "Official DR value: DR" << dr::album_dr(tracks) << "\n";
+    // ── Column alignment widths (right-align in N chars, then " | ") ─
+    // Fixed widths match MAAT DROffline MkII output exactly.
 
-    if (!tracks.empty()) {
-        double avg_lufs = sum_lufs / tracks.size();
-        std::printf("Avg. loudness:     %.1f LUFS\n", avg_lufs);
+    int aFN  = static_cast<int>(fname_w);
+    int aFmt = 6;               // "Format"
+    int aSR  = static_cast<int>(sr_w);
+    int aWL  = 11;              // "Word Length"
+    int aTPL = 8;               // "Max. TPL"
+    int aSPL = 14;              // "Max. SPPM LEFT"
+    int aSPR = 15;              // "Max. SPPM RIGHT"
+    int aSPJ = 17;              // "Max. SPPM (JOINT)"
+    int aRL  = 8;               // "RMS LEFT"
+    int aRR  = 9;               // "RMS RIGHT"
+    int aML  = 11;              // "Max. M LEFT"
+    int aMR  = 12;              // "Max. M RIGHT"
+    int aSL  = 11;              // "Max. S LEFT"
+    int aSRt = 12;              // "Max. S RIGHT"
+    int aLU  = 6;               // "LUFSi"
+    int aDR  = 8;               // "DR (PMF)"
+    int aBU  = 9;               // "Bits Used"
+    int aPL  = 5;               // "PLR"
+    int aLA  = 5;               // "LRA"
+    int aMJ  = 6;               // "Max. M" (joint)
+    int aSJ  = 6;               // "Max. S" (joint)
+    int aDL  = 7;               // "DR LEFT"
+    int aTL  = 13;              // "Max. TPL LEFT"
+    int aTR  = 14;              // "Max. TPL RIGHT"
+    int aDRR = 8;               // "DR RIGHT"
+    int aPS  = 8;               // "Min. PSR"
 
-        const auto& first = tracks[0];
-        std::cout << "\nSamplerate:        " << first.sample_rate << " Hz\n";
-        std::cout << "Channels:          " << first.channels << "\n";
-        std::cout << "Bits per sample:   " << first.bit_depth << "\n";
-        std::cout << "Codec:             " << first.codec << "\n";
+    // Macro to print one right-aligned column + separator
+    // We use a lambda-like approach: print "%*s | " for each field.
 
-        auto album_verdict = dr::classify_dr(
-            static_cast<double>(dr::album_dr(tracks)));
-        std::cout << "Verdict:           " << dr::verdict_string(album_verdict) << "\n";
+    auto print_row = [&](
+            const char* fn, const char* fmt, const char* sr, const char* wl,
+            const char* tpl,
+            const char* spl, const char* spr, const char* spj,
+            const char* rl,  const char* rr,
+            const char* ml,  const char* mr,  const char* sl,  const char* srt,
+            const char* lu,  const char* dr,  const char* bu,
+            const char* pl,  const char* la,
+            const char* mj,  const char* sj,
+            const char* dl,  const char* tl,  const char* tr,
+            const char* drr, const char* ps)
+    {
+        std::printf("%*s | %*s | %*s | %*s | %*s | %*s | %*s | %*s | "
+                    "%*s | %*s | %*s | %*s | %*s | %*s | %*s | %*s | "
+                    "%*s | %*s | %*s | %*s | %*s | %*s | %*s | %*s | "
+                    "%*s | %*s | \n",
+            aFN, fn,   aFmt, fmt, aSR, sr,   aWL, wl,
+            aTPL, tpl,
+            aSPL, spl,  aSPR, spr,  aSPJ, spj,
+            aRL, rl,    aRR, rr,
+            aML, ml,    aMR, mr,    aSL, sl,    aSRt, srt,
+            aLU, lu,    aDR, dr,    aBU, bu,
+            aPL, pl,    aLA, la,
+            aMJ, mj,    aSJ, sj,
+            aDL, dl,    aTL, tl,    aTR, tr,
+            aDRR, drr,  aPS, ps);
+    };
+
+    // ── Output ───────────────────────────────────────────────────────
+    std::cout << "Folder Path:   " << folder_path << "\n\n";
+
+    // Header
+    print_row("File Name", "Format", "SR", "Word Length",
+              "Max. TPL",
+              "Max. SPPM LEFT", "Max. SPPM RIGHT", "Max. SPPM (JOINT)",
+              "RMS LEFT", "RMS RIGHT",
+              "Max. M LEFT", "Max. M RIGHT", "Max. S LEFT", "Max. S RIGHT",
+              "LUFSi", "DR (PMF)", "Bits Used",
+              "PLR", "LRA",
+              "Max. M", "Max. S",
+              "DR LEFT", "Max. TPL LEFT", "Max. TPL RIGHT",
+              "DR RIGHT", "Min. PSR");
+
+    // Blank line after header
+    std::cout << "\n";
+
+    // Data rows
+    for (const auto& r : rows) {
+        print_row(r.name.c_str(), r.ext.c_str(), r.sr.c_str(), r.wl.c_str(),
+                  r.tpl.c_str(),
+                  r.sppm_l.c_str(), r.sppm_r.c_str(), r.sppm_j.c_str(),
+                  r.rms_l.c_str(), r.rms_r.c_str(),
+                  r.mom_l.c_str(), r.mom_r.c_str(), r.st_l.c_str(), r.st_r.c_str(),
+                  r.lufs_i.c_str(), r.dr_pmf.c_str(), r.bits_used.c_str(),
+                  r.plr.c_str(), r.lra.c_str(),
+                  r.mom_j.c_str(), r.st_j.c_str(),
+                  r.dr_l.c_str(), r.tpl_l.c_str(), r.tpl_r.c_str(),
+                  r.dr_r.c_str(), r.min_psr.c_str());
     }
 
-    std::cout << sep2 << "\n";
+    // Summary
+    std::printf("\nNumber of EP/Album Files: %zu\n", tracks.size());
+    std::printf("Official EP/Album DR: %d\n", dr::album_dr(tracks));
 }
 
-// ── Detail output (per-track per-channel, MAAT DROffline style) ────────────
+// ── Detail output (per-track per-channel block view) ───────────────────────
 void print_detail(const std::vector<dr::TrackResult>& tracks,
                   const std::string& folder_name) {
     const std::string sep(80, '=');
-    const std::string sep2(80, '-');
 
     auto now = std::chrono::system_clock::now();
     auto t_now = std::chrono::system_clock::to_time_t(now);
@@ -288,10 +442,7 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
     for (size_t idx = 0; idx < tracks.size(); ++idx) {
         const auto& t = tracks[idx];
         size_t nch = t.ch_metrics.size();
-
-        auto name = t.filename;
-        auto dot = name.rfind('.');
-        if (dot != std::string::npos) name = name.substr(0, dot);
+        auto name = strip_ext(t.filename);
 
         std::cout << "\n" << sep << "\n";
         std::printf("Track %zu/%zu: %s\n", idx + 1, tracks.size(), name.c_str());
@@ -299,91 +450,70 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
 
         std::printf("  Format:              %s %u-bit / %u Hz\n",
                     t.codec.c_str(), t.bit_depth, t.sample_rate);
-        std::printf("  Duration:            %s\n\n", format_duration(t.duration_secs).c_str());
+        std::printf("  Duration:            %s\n\n",
+                    format_duration(t.duration_secs).c_str());
 
-        // Channel labels
         auto ch_label = [&](size_t c) -> std::string {
             if (nch == 1) return "Mono";
             if (nch == 2) return (c == 0) ? "Left" : "Right";
             return "Ch" + std::to_string(c + 1);
         };
 
-        // Header
         std::printf("  %-22s", "");
         for (size_t c = 0; c < nch; ++c)
             std::printf("%-12s", ch_label(c).c_str());
         std::printf("%-12s\n", "Joint");
         std::cout << "  " << std::string(22 + 12 * (nch + 1), '-') << "\n";
 
-        // True Peak
         std::printf("  %-22s", "Max True Peak");
         for (size_t c = 0; c < nch; ++c)
             std::printf("%-12.2f", t.ch_metrics[c].true_peak_dbfs);
         std::printf("%.2f dB\n", t.true_peak_dbfs);
 
-        // Sample Peak
         std::printf("  %-22s", "Max Sample Peak");
         for (size_t c = 0; c < nch; ++c)
             std::printf("%-12.2f", t.ch_metrics[c].sample_peak_dbfs);
-        if (t.is_clipping)
-            std::printf("over\n");
-        else
-            std::printf("%.2f dBFS\n", t.peak_dbfs);
+        if (t.is_clipping) std::printf("over\n");
+        else std::printf("%.2f dBFS\n", t.peak_dbfs);
 
-        // RMS
         std::printf("  %-22s", "RMS");
         for (size_t c = 0; c < nch; ++c)
             std::printf("%-12.2f", t.ch_metrics[c].rms_dbfs);
         std::printf("%.2f dB\n", t.rms_dbfs);
 
-        // Max Momentary
         std::printf("  %-22s", "Max Momentary");
         for (size_t c = 0; c < nch; ++c)
             std::printf("%-12.2f", t.ch_metrics[c].max_momentary_lufs);
         std::printf("%.2f LUFS\n", t.max_momentary_lufs);
 
-        // Max Short-Term
         std::printf("  %-22s", "Max Short-Term");
         for (size_t c = 0; c < nch; ++c)
             std::printf("%-12.2f", t.ch_metrics[c].max_short_term_lufs);
         std::printf("%.2f LUFS\n", t.max_short_term_lufs);
 
-        // Integrated (joint only)
         std::printf("  %-22s", "Integrated");
-        for (size_t c = 0; c < nch; ++c)
-            std::printf("%-12s", "—");
+        for (size_t c = 0; c < nch; ++c) std::printf("%-12s", "—");
         std::printf("%.2f LUFS\n", t.integrated_lufs);
 
-        // DR (PMF)
         std::printf("  %-22s", "DR (PMF)");
         for (size_t c = 0; c < nch; ++c)
             std::printf("%-12.2f", t.ch_metrics[c].dr_raw);
         std::printf("DR%d\n", t.dr_score);
 
-        // Min PSR
         std::printf("  %-22s", "Min PSR");
-        for (size_t c = 0; c < nch; ++c)
-            std::printf("%-12s", "—");
+        for (size_t c = 0; c < nch; ++c) std::printf("%-12s", "—");
         std::printf("%.2f dB\n", t.psr_db);
 
-        // PLR
         std::printf("  %-22s", "PLR");
-        for (size_t c = 0; c < nch; ++c)
-            std::printf("%-12s", "—");
+        for (size_t c = 0; c < nch; ++c) std::printf("%-12s", "—");
         std::printf("%.2f dB\n", t.plr_db);
 
-        // LRA
         std::printf("  %-22s", "LRA");
-        for (size_t c = 0; c < nch; ++c)
-            std::printf("%-12s", "—");
+        for (size_t c = 0; c < nch; ++c) std::printf("%-12s", "—");
         std::printf("%.2f LU\n", t.lra_lu);
     }
 
-    // ── Summary ────────────────────────────────────────────────────────
-    std::cout << "\n" << sep << "\n";
-    std::cout << "Summary\n";
-    std::cout << sep << "\n\n";
-
+    std::cout << "\n" << sep << "\nSummary\n" << sep << "\n\n";
     std::cout << "Number of tracks:  " << tracks.size() << "\n";
     std::cout << "Official DR value: DR" << dr::album_dr(tracks) << "\n";
 
@@ -398,11 +528,9 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
         std::cout << "Bits per sample:   " << first.bit_depth << "\n";
         std::cout << "Codec:             " << first.codec << "\n";
 
-        auto album_verdict = dr::classify_dr(
-            static_cast<double>(dr::album_dr(tracks)));
-        std::cout << "Verdict:           " << dr::verdict_string(album_verdict) << "\n";
+        auto v = dr::classify_dr(static_cast<double>(dr::album_dr(tracks)));
+        std::cout << "Verdict:           " << dr::verdict_string(v) << "\n";
     }
-
     std::cout << sep << "\n";
 }
 
@@ -414,8 +542,8 @@ void print_usage(const char* argv0) {
               << "  -f, --format <std|foobar|ext|detail>\n"
               << "      std    — dr.loudness-war.info compatible (default)\n"
               << "      foobar — foobar2000 DR Meter style\n"
-              << "      ext    — extended with LUFS, PLR, crest factor\n"
-              << "      detail — per-track per-channel (MAAT DROffline style)\n"
+              << "      ext    — MAAT DROffline–style pipe-delimited table\n"
+              << "      detail — per-track per-channel block view\n"
               << "  -o, --output <file>            Write output to file\n"
               << "  -q, --quiet                    Suppress progress output\n"
               << "  -v, --version                  Show version\n"
@@ -454,10 +582,11 @@ int main(int argc, char* argv[]) {
             quiet = true;
         } else if ((arg == "-f" || arg == "--format") && i+1 < argc) {
             std::string fmt = argv[++i];
-            if (fmt == "std")         format = OutputFormat::Standard;
-            else if (fmt == "foobar") format = OutputFormat::Foobar;
-            else if (fmt == "ext")    format = OutputFormat::Extended;
-            else if (fmt == "detail") format = OutputFormat::Detail;
+            if (fmt == "std")              format = OutputFormat::Standard;
+            else if (fmt == "foobar")      format = OutputFormat::Foobar;
+            else if (fmt == "ext" ||
+                     fmt == "maat")        format = OutputFormat::Extended;
+            else if (fmt == "detail")      format = OutputFormat::Detail;
             else {
                 std::cerr << "Unknown format: " << fmt << "\n";
                 return 1;
@@ -536,7 +665,7 @@ int main(int argc, char* argv[]) {
                 print_foobar(results, folder_name);
                 break;
             case OutputFormat::Extended:
-                print_extended(results, folder_name);
+                print_extended(results, display_name);
                 break;
             case OutputFormat::Detail:
                 print_detail(results, folder_name);
