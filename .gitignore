@@ -5,3 +5,4 @@ third_party/
 *.o
 run_tests.sh
 test_results/
+run_tests.py
