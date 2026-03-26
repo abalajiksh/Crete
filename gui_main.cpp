@@ -42,11 +42,11 @@ static constexpr const char* PROGRAM_VERSION = CRETE_VERSION;
 
 // ── DR color coding ────────────────────────────────────────────────────────
 static ImVec4 dr_color(int dr) {
-    if (dr > 20) return ImVec4(0.2f, 0.9f, 0.3f, 1.0f);  // green
-    if (dr >= 14) return ImVec4(0.4f, 0.85f, 0.4f, 1.0f); // light green
-    if (dr >= 8)  return ImVec4(0.9f, 0.85f, 0.3f, 1.0f); // yellow
-    if (dr >= 5)  return ImVec4(0.95f, 0.55f, 0.2f, 1.0f); // orange
-    return ImVec4(0.95f, 0.25f, 0.2f, 1.0f);               // red
+    if (dr > 20) return ImVec4(0.2f, 0.9f, 0.3f, 1.0f);
+    if (dr >= 14) return ImVec4(0.4f, 0.85f, 0.4f, 1.0f);
+    if (dr >= 8)  return ImVec4(0.9f, 0.85f, 0.3f, 1.0f);
+    if (dr >= 5)  return ImVec4(0.95f, 0.55f, 0.2f, 1.0f);
+    return ImVec4(0.95f, 0.25f, 0.2f, 1.0f);
 }
 
 static const char* verdict_short(dr::Verdict v) {
@@ -66,9 +66,9 @@ struct AppState {
     char path_buf[4096] = "";
 
     // Output
-    int  output_mode = 0;   // 0 = analysis folder, 1 = custom
+    int  output_mode = 0;
     char output_path[4096] = "";
-    int  format_idx = 0;    // 0=std, 1=foobar, 2=ext
+    int  format_idx = 0;
 
     // Analysis state
     std::atomic<bool>  is_analyzing{false};
@@ -87,13 +87,14 @@ struct AppState {
 
     // UI state
     bool show_settings = false;
+    int  selected_track = 0;
+    bool show_detail = true;
 
     // Collect files from path
     std::vector<std::string> collect_files_from_path() {
         std::vector<std::string> files;
         std::string p = path_buf;
 
-        // Trim trailing whitespace and slashes
         while (!p.empty() && (p.back() == ' ' || p.back() == '\n' || p.back() == '\r'))
             p.pop_back();
         while (p.size() > 1 && (p.back() == '/' || p.back() == '\\'))
@@ -131,11 +132,9 @@ struct AppState {
         return files;
     }
 
-    // Determine output file path
     std::string get_output_filepath() {
         std::string dir;
         if (output_mode == 0) {
-            // Analysis folder
             std::string p = path_buf;
             if (fs::is_directory(p))
                 dir = p;
@@ -160,20 +159,15 @@ static std::string format_duration(double secs) {
 }
 
 // ── Font loading ───────────────────────────────────────────────────────────
-// Loads Sora font relative to the executable path. Falls back to ImGui default.
-// Glyph range covers Basic Latin + Latin-1 Supplement + Latin Extended-A
-// for Nordic (åäöøæ), French (éèêëç), German (üß), and Eastern European.
-
 static void load_fonts() {
     ImGuiIO& io = ImGui::GetIO();
 
     static const ImWchar glyph_ranges[] = {
-        0x0020, 0x00FF,  // Basic Latin + Latin-1 Supplement
-        0x0100, 0x017F,  // Latin Extended-A (Ő, ő, Ű, ű, Ł, ł, etc.)
+        0x0020, 0x00FF,
+        0x0100, 0x017F,
         0,
     };
 
-    // Resolve font path relative to executable
     std::string base_path;
     char* sdl_base = SDL_GetBasePath();
     if (sdl_base) {
@@ -181,7 +175,6 @@ static void load_fonts() {
         SDL_free(sdl_base);
     }
 
-    // Candidate paths: variable font preferred, then static weights
     const char* candidates[] = {
         "fonts/Sora/Sora-VariableFont_wght.ttf",
         "fonts/Sora/static/Sora-Regular.ttf",
@@ -201,7 +194,6 @@ static void load_fonts() {
     }
 
     if (!font) {
-        // Fallback: default font at a reasonable size
         ImFontConfig cfg;
         cfg.SizePixels = 16.0f;
         io.Fonts->AddFontDefault(&cfg);
@@ -215,7 +207,6 @@ static std::string generate_log(const std::vector<dr::TrackResult>& tracks,
     char line[512];
 
     if (format_idx == 0) {
-        // Standard format
         std::string sep(94, '-');
         std::string sep2(94, '=');
         out += sep + "\n";
@@ -242,7 +233,6 @@ static std::string generate_log(const std::vector<dr::TrackResult>& tracks,
         out += "\n" + sep2 + "\n";
 
     } else if (format_idx == 1) {
-        // Foobar style
         std::string sep(80, '-');
         std::string sep2(80, '=');
 
@@ -291,7 +281,6 @@ static std::string generate_log(const std::vector<dr::TrackResult>& tracks,
         out += sep2 + "\n";
 
     } else {
-        // Extended
         std::string sep(120, '-');
         std::string sep2(120, '=');
 
@@ -425,7 +414,6 @@ static void analysis_worker(AppState* app) {
 static void start_analysis(AppState* app) {
     if (app->is_analyzing.load()) return;
 
-    // Reset state
     {
         std::lock_guard<std::mutex> lock(app->mtx);
         app->results.clear();
@@ -436,8 +424,8 @@ static void start_analysis(AppState* app) {
     app->current_file.store(0);
     app->cancel_requested.store(false);
     app->is_analyzing.store(true);
+    app->selected_track = 0;
 
-    // Detach old thread if any
     if (app->worker.joinable()) app->worker.join();
     app->worker = std::thread(analysis_worker, app);
 }
@@ -458,18 +446,179 @@ static void setup_style() {
     style.FramePadding = ImVec2(8, 4);
     style.ItemSpacing = ImVec2(8, 6);
 
-    // Slightly tweaked dark theme
     ImGui::StyleColorsDark();
     auto& c = style.Colors;
-    c[ImGuiCol_WindowBg]   = ImVec4(0.10f, 0.10f, 0.12f, 1.0f);
-    c[ImGuiCol_Header]     = ImVec4(0.20f, 0.22f, 0.27f, 1.0f);
+    c[ImGuiCol_WindowBg]      = ImVec4(0.10f, 0.10f, 0.12f, 1.0f);
+    c[ImGuiCol_Header]        = ImVec4(0.20f, 0.22f, 0.27f, 1.0f);
     c[ImGuiCol_HeaderHovered] = ImVec4(0.28f, 0.30f, 0.38f, 1.0f);
-    c[ImGuiCol_Button]     = ImVec4(0.22f, 0.24f, 0.32f, 1.0f);
+    c[ImGuiCol_Button]        = ImVec4(0.22f, 0.24f, 0.32f, 1.0f);
     c[ImGuiCol_ButtonHovered] = ImVec4(0.30f, 0.35f, 0.48f, 1.0f);
-    c[ImGuiCol_FrameBg]    = ImVec4(0.15f, 0.16f, 0.19f, 1.0f);
-    c[ImGuiCol_Tab]        = ImVec4(0.18f, 0.20f, 0.25f, 1.0f);
+    c[ImGuiCol_FrameBg]       = ImVec4(0.15f, 0.16f, 0.19f, 1.0f);
+    c[ImGuiCol_Tab]           = ImVec4(0.18f, 0.20f, 0.25f, 1.0f);
     c[ImGuiCol_TabSelected]   = ImVec4(0.28f, 0.32f, 0.42f, 1.0f);
     c[ImGuiCol_TableHeaderBg] = ImVec4(0.18f, 0.20f, 0.25f, 1.0f);
+}
+
+// ── Render detail panel for selected track ─────────────────────────────────
+static void render_detail_panel(AppState& app) {
+    if (app.results.empty()) return;
+
+    int n = static_cast<int>(app.results.size());
+    if (app.selected_track < 0) app.selected_track = 0;
+    if (app.selected_track >= n) app.selected_track = n - 1;
+
+    const auto& t = app.results[app.selected_track];
+    size_t nch = t.ch_metrics.size();
+
+    // ── Navigation bar ─────────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    bool at_start = (app.selected_track == 0);
+    bool at_end   = (app.selected_track == n - 1);
+
+    if (at_start) ImGui::BeginDisabled();
+    if (ImGui::ArrowButton("##prev", ImGuiDir_Left))
+        app.selected_track--;
+    if (at_start) ImGui::EndDisabled();
+
+    ImGui::SameLine();
+
+    // Track counter + filename
+    auto name = t.filename;
+    auto dot = name.rfind('.');
+    if (dot != std::string::npos) name = name.substr(0, dot);
+
+    ImGui::Text("%d/%d", app.selected_track + 1, n);
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.0f, 1.0f), "%s", name.c_str());
+
+    ImGui::SameLine();
+    if (at_end) ImGui::BeginDisabled();
+    if (ImGui::ArrowButton("##next", ImGuiDir_Right))
+        app.selected_track++;
+    if (at_end) ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    ImGui::TextDisabled("  %s %u-bit / %u Hz  |  %s",
+        t.codec.c_str(), t.bit_depth, t.sample_rate,
+        format_duration(t.duration_secs).c_str());
+
+    ImGui::Spacing();
+
+    // ── Channel labels ─────────────────────────────────────────────────
+    auto ch_label = [&](size_t c) -> const char* {
+        if (nch == 1) return "Mono";
+        if (nch == 2) return (c == 0) ? "Left" : "Right";
+        static char buf[8];
+        std::snprintf(buf, sizeof(buf), "Ch%zu", c + 1);
+        return buf;
+    };
+
+    // ── Metrics table ──────────────────────────────────────────────────
+    int col_count = static_cast<int>(nch) + 2; // metric label + per-channel + joint
+    ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                            ImGuiTableFlags_SizingFixedFit;
+
+    if (ImGui::BeginTable("Detail", col_count, flags)) {
+        // Column setup
+        ImGui::TableSetupColumn("Metric", ImGuiTableColumnFlags_WidthFixed, 160);
+        for (size_t c = 0; c < nch; ++c)
+            ImGui::TableSetupColumn(ch_label(c), ImGuiTableColumnFlags_WidthFixed, 95);
+        ImGui::TableSetupColumn("Joint", ImGuiTableColumnFlags_WidthFixed, 110);
+        ImGui::TableHeadersRow();
+
+        char buf[32];
+
+        // Helper: row with per-channel values and a joint value
+        auto metric_row = [&](const char* label, auto ch_fn, const char* joint_str,
+                              ImVec4 joint_color = ImVec4(1,1,1,1)) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextDisabled("%s", label);
+            for (size_t c = 0; c < nch; ++c) {
+                ImGui::TableSetColumnIndex(static_cast<int>(c) + 1);
+                ch_fn(c);
+            }
+            ImGui::TableSetColumnIndex(static_cast<int>(nch) + 1);
+            ImGui::TextColored(joint_color, "%s", joint_str);
+        };
+
+        // True Peak
+        std::snprintf(buf, sizeof(buf), "%.2f dB", t.true_peak_dbfs);
+        metric_row("Max True Peak", [&](size_t c) {
+            char b[32]; std::snprintf(b, sizeof(b), "%.2f dB", t.ch_metrics[c].true_peak_dbfs);
+            ImGui::Text("%s", b);
+        }, buf);
+
+        // Sample Peak
+        {
+            char jp[32];
+            if (t.is_clipping) std::snprintf(jp, sizeof(jp), "over");
+            else std::snprintf(jp, sizeof(jp), "%.2f dB", t.peak_dbfs);
+            ImVec4 col = t.is_clipping ? ImVec4(0.95f, 0.3f, 0.2f, 1.0f) : ImVec4(1,1,1,1);
+            metric_row("Max Sample Peak", [&](size_t c) {
+                char b[32]; std::snprintf(b, sizeof(b), "%.2f dB", t.ch_metrics[c].sample_peak_dbfs);
+                ImGui::Text("%s", b);
+            }, jp, col);
+        }
+
+        // RMS
+        std::snprintf(buf, sizeof(buf), "%.2f dB", t.rms_dbfs);
+        metric_row("RMS", [&](size_t c) {
+            char b[32]; std::snprintf(b, sizeof(b), "%.2f dB", t.ch_metrics[c].rms_dbfs);
+            ImGui::Text("%s", b);
+        }, buf);
+
+        // Max Momentary Loudness
+        std::snprintf(buf, sizeof(buf), "%.2f LUFS", t.max_momentary_lufs);
+        metric_row("Max Momentary", [&](size_t c) {
+            char b[32]; std::snprintf(b, sizeof(b), "%.2f", t.ch_metrics[c].max_momentary_lufs);
+            ImGui::TextDisabled("%s", b);
+        }, buf);
+
+        // Max Short-Term Loudness
+        std::snprintf(buf, sizeof(buf), "%.2f LUFS", t.max_short_term_lufs);
+        metric_row("Max Short-Term", [&](size_t c) {
+            char b[32]; std::snprintf(b, sizeof(b), "%.2f", t.ch_metrics[c].max_short_term_lufs);
+            ImGui::TextDisabled("%s", b);
+        }, buf);
+
+        // Integrated Loudness (joint only)
+        std::snprintf(buf, sizeof(buf), "%.2f LUFS", t.integrated_lufs);
+        metric_row("Integrated", [&](size_t) {
+            ImGui::TextDisabled("—");
+        }, buf);
+
+        // DR (PMF)
+        std::snprintf(buf, sizeof(buf), "DR%d", t.dr_score);
+        ImVec4 dr_col = dr_color(t.dr_score);
+        metric_row("DR (PMF)", [&](size_t c) {
+            char b[32]; std::snprintf(b, sizeof(b), "%.2f", t.ch_metrics[c].dr_raw);
+            ImGui::Text("%s", b);
+        }, buf, dr_col);
+
+        // Min PSR (joint only)
+        std::snprintf(buf, sizeof(buf), "%.2f dB", t.psr_db);
+        metric_row("Min PSR", [&](size_t) {
+            ImGui::TextDisabled("—");
+        }, buf);
+
+        // PLR (joint only)
+        std::snprintf(buf, sizeof(buf), "%.2f dB", t.plr_db);
+        metric_row("PLR", [&](size_t) {
+            ImGui::TextDisabled("—");
+        }, buf);
+
+        // LRA (joint only)
+        std::snprintf(buf, sizeof(buf), "%.2f LU", t.lra_lu);
+        metric_row("LRA", [&](size_t) {
+            ImGui::TextDisabled("—");
+        }, buf);
+
+        ImGui::EndTable();
+    }
 }
 
 // ── Render settings modal ──────────────────────────────────────────────────
@@ -479,7 +628,6 @@ static void render_settings(bool* open) {
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar)) return;
 
     if (ImGui::BeginTabBar("SettingsTabs")) {
-        // ── About tab ──
         if (ImGui::BeginTabItem("About")) {
             ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f),
@@ -507,7 +655,6 @@ static void render_settings(bool* open) {
             ImGui::EndTabItem();
         }
 
-        // ── DR Guide tab ──
         if (ImGui::BeginTabItem("DR Guide")) {
             ImGui::Spacing();
             ImGui::TextWrapped(
@@ -578,7 +725,6 @@ static void render_settings(bool* open) {
 
 // ── Main render function ───────────────────────────────────────────────────
 static void render_ui(AppState& app) {
-    // Fullscreen window
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
@@ -697,19 +843,24 @@ static void render_ui(AppState& app) {
     ImGui::Separator();
     ImGui::Spacing();
 
-    // ── Results table ──────────────────────────────────────────────────
+    // ── Results table + detail panel ───────────────────────────────────
     {
         std::lock_guard<std::mutex> lock(app.mtx);
 
         if (!app.results.empty()) {
+            // Compute available height: split between table and detail panel
+            float total_avail = ImGui::GetContentRegionAvail().y -
+                                (app.error_log.empty() ? 10 : 50);
+            float detail_h = app.show_detail ? 310.0f : 0.0f;
+            float table_h = total_avail - detail_h;
+            if (table_h < 80) table_h = 80;
+
             ImGuiTableFlags tbl_flags =
                 ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                 ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY |
                 ImGuiTableFlags_Sortable | ImGuiTableFlags_Reorderable;
 
             int n_cols = (app.format_idx == 2) ? 8 : 5;
-            float table_h = ImGui::GetContentRegionAvail().y -
-                            (app.error_log.empty() ? 10 : 80);
 
             if (ImGui::BeginTable("Results", n_cols, tbl_flags, ImVec2(0, table_h))) {
                 ImGui::TableSetupColumn("DR", ImGuiTableColumnFlags_WidthFixed |
@@ -748,12 +899,25 @@ static void render_ui(AppState& app) {
                     }
                 }
 
-                for (const auto& t : app.results) {
+                for (int row_idx = 0; row_idx < static_cast<int>(app.results.size()); ++row_idx) {
+                    const auto& t = app.results[row_idx];
                     ImGui::TableNextRow();
                     char buf[64];
 
-                    // DR (color-coded)
+                    // Make entire row selectable
                     ImGui::TableSetColumnIndex(0);
+                    bool is_sel = (row_idx == app.selected_track);
+                    char sel_id[32];
+                    std::snprintf(sel_id, sizeof(sel_id), "##row%d", row_idx);
+                    if (ImGui::Selectable(sel_id, is_sel,
+                            ImGuiSelectableFlags_SpanAllColumns |
+                            ImGuiSelectableFlags_AllowOverlap, ImVec2(0, 0))) {
+                        app.selected_track = row_idx;
+                        app.show_detail = true;
+                    }
+                    ImGui::SameLine();
+
+                    // DR (color-coded)
                     ImGui::TextColored(dr_color(t.dr_score), "DR%d", t.dr_score);
 
                     // Peak
@@ -772,17 +936,14 @@ static void render_ui(AppState& app) {
 
                     int col_offset = 3;
                     if (app.format_idx == 2) {
-                        // LUFS
                         ImGui::TableSetColumnIndex(3);
                         std::snprintf(buf, sizeof(buf), "%.1f", t.integrated_lufs);
                         ImGui::Text("%s", buf);
 
-                        // PLR
                         ImGui::TableSetColumnIndex(4);
                         std::snprintf(buf, sizeof(buf), "%.1f dB", t.plr_db);
                         ImGui::Text("%s", buf);
 
-                        // Crest
                         ImGui::TableSetColumnIndex(5);
                         std::snprintf(buf, sizeof(buf), "%.1f dB", t.crest_factor_db);
                         ImGui::Text("%s", buf);
@@ -790,11 +951,9 @@ static void render_ui(AppState& app) {
                         col_offset = 6;
                     }
 
-                    // Duration
                     ImGui::TableSetColumnIndex(col_offset);
                     ImGui::Text("%s", format_duration(t.duration_secs).c_str());
 
-                    // Filename (strip extension)
                     ImGui::TableSetColumnIndex(col_offset + 1);
                     auto name = t.filename;
                     auto dot = name.rfind('.');
@@ -805,17 +964,9 @@ static void render_ui(AppState& app) {
                 ImGui::EndTable();
             }
 
-            // ── Summary bar ──
-            if (!app.results.empty()) {
-                ImGui::Spacing();
-                const auto& f = app.results[0];
-                int adr = dr::album_dr(app.results);
-                ImGui::TextColored(dr_color(adr), "DR%d", adr);
-                ImGui::SameLine();
-                ImGui::Text("| %zu files | %s %u-bit / %u Hz | %s",
-                    app.results.size(), f.codec.c_str(),
-                    f.bit_depth, f.sample_rate,
-                    verdict_short(dr::classify_dr(static_cast<double>(adr))));
+            // ── Detail panel ───────────────────────────────────────────
+            if (app.show_detail && !app.results.empty()) {
+                render_detail_panel(app);
             }
         }
 
@@ -837,13 +988,11 @@ static void render_ui(AppState& app) {
 
 // ── Main ───────────────────────────────────────────────────────────────────
 int main(int, char**) {
-    // ── SDL init ───────────────────────────────────────────────────────
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         fprintf(stderr, "SDL_Init error: %s\n", SDL_GetError());
         return 1;
     }
 
-    // GL context — platform-appropriate version
 #if defined(IMGUI_IMPL_OPENGL_ES2)
     const char* glsl_version = "#version 100";
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
@@ -851,14 +1000,12 @@ int main(int, char**) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 #elif defined(__APPLE__)
-    // macOS requires OpenGL 3.2 Core with forward compatibility
     const char* glsl_version = "#version 150";
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
 #else
-    // Linux / Windows: OpenGL 3.0 Core
     const char* glsl_version = "#version 130";
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
@@ -873,7 +1020,7 @@ int main(int, char**) {
     SDL_Window* window = SDL_CreateWindow(
         "crête — Dynamic Range Meter",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        1100, 700,
+        1100, 750,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) {
         fprintf(stderr, "SDL_CreateWindow error: %s\n", SDL_GetError());
@@ -882,27 +1029,22 @@ int main(int, char**) {
 
     SDL_GLContext gl_ctx = SDL_GL_CreateContext(window);
     SDL_GL_MakeCurrent(window, gl_ctx);
-    SDL_GL_SetSwapInterval(1);  // vsync
+    SDL_GL_SetSwapInterval(1);
 
-    // ── ImGui init ─────────────────────────────────────────────────────
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.IniFilename = nullptr;  // no imgui.ini
+    io.IniFilename = nullptr;
 
     setup_style();
-
-    // Load Sora font (falls back to default if not found)
     load_fonts();
 
     ImGui_ImplSDL2_InitForOpenGL(window, gl_ctx);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
-    // ── App state ──────────────────────────────────────────────────────
     AppState app;
 
-    // ── Main loop ──────────────────────────────────────────────────────
     bool running = true;
     while (running) {
         SDL_Event event;
@@ -914,7 +1056,6 @@ int main(int, char**) {
                 event.window.windowID == SDL_GetWindowID(window))
                 running = false;
 
-            // Handle file/folder drop
             if (event.type == SDL_DROPFILE) {
                 char* dropped = event.drop.file;
                 if (dropped) {
@@ -924,7 +1065,6 @@ int main(int, char**) {
             }
         }
 
-        // If minimized, throttle
         if (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) {
             SDL_Delay(100);
             continue;
@@ -946,7 +1086,6 @@ int main(int, char**) {
         SDL_GL_SwapWindow(window);
     }
 
-    // ── Cleanup ────────────────────────────────────────────────────────
     if (app.is_analyzing.load()) {
         app.cancel_requested.store(true);
         if (app.worker.joinable()) app.worker.join();

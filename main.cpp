@@ -43,6 +43,7 @@ enum class OutputFormat {
     Standard,   // dr.loudness-war.info compatible
     Foobar,     // foobar2000 DR Meter style
     Extended,   // all metrics
+    Detail,     // per-track per-channel (MAAT DROffline style)
 };
 
 // ── Duration formatting ────────────────────────────────────────────────────
@@ -77,7 +78,6 @@ std::vector<std::string> collect_files(const std::string& path) {
         if (audio::is_supported_format(path))
             files.push_back(path);
     } else if (fs::is_directory(path)) {
-        // Collect all supported files, then sort by name
         for (const auto& entry : fs::directory_iterator(path)) {
             if (entry.is_regular_file() && audio::is_supported_format(entry.path().string()))
                 files.push_back(entry.path().string());
@@ -140,7 +140,6 @@ void print_foobar(const std::vector<dr::TrackResult>& tracks,
     const std::string sep(80, '-');
     const std::string sep2(80, '=');
 
-    // Header
     auto now = std::chrono::system_clock::now();
     auto t = std::chrono::system_clock::to_time_t(now);
     char date_buf[32];
@@ -170,7 +169,6 @@ void print_foobar(const std::vector<dr::TrackResult>& tracks,
 
         std::string dur = format_duration(t.duration_secs);
 
-        // Strip extension from filename for display
         auto name = t.filename;
         auto dot = name.rfind('.');
         if (dot != std::string::npos) name = name.substr(0, dot);
@@ -183,7 +181,6 @@ void print_foobar(const std::vector<dr::TrackResult>& tracks,
     std::cout << "Number of tracks:  " << tracks.size() << "\n";
     std::cout << "Official DR value: DR" << dr::album_dr(tracks) << "\n\n";
 
-    // Technical info from first track
     if (!tracks.empty()) {
         const auto& first = tracks[0];
         std::cout << "Samplerate:        " << first.sample_rate << " Hz\n";
@@ -213,7 +210,6 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
     std::cout << "Analyzed: " << folder_name << "\n";
     std::cout << sep << "\n\n";
 
-    // Column headers
     std::printf("%-6s %-10s %-10s %-10s %-10s %-8s %-8s  %s\n",
                 "DR", "Peak", "RMS", "LUFS", "PLR", "Crest", "Dur", "Filename");
     std::cout << sep << "\n";
@@ -238,7 +234,6 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
 
         std::string dur = format_duration(t.duration_secs);
 
-        // Strip extension
         auto name = t.filename;
         auto dot = name.rfind('.');
         if (dot != std::string::npos) name = name.substr(0, dot);
@@ -264,7 +259,6 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
         std::cout << "Bits per sample:   " << first.bit_depth << "\n";
         std::cout << "Codec:             " << first.codec << "\n";
 
-        // Verdict
         auto album_verdict = dr::classify_dr(
             static_cast<double>(dr::album_dr(tracks)));
         std::cout << "Verdict:           " << dr::verdict_string(album_verdict) << "\n";
@@ -273,15 +267,155 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
     std::cout << sep2 << "\n";
 }
 
+// ── Detail output (per-track per-channel, MAAT DROffline style) ────────────
+void print_detail(const std::vector<dr::TrackResult>& tracks,
+                  const std::string& folder_name) {
+    const std::string sep(80, '=');
+    const std::string sep2(80, '-');
+
+    auto now = std::chrono::system_clock::now();
+    auto t_now = std::chrono::system_clock::to_time_t(now);
+    char date_buf[32];
+    std::strftime(date_buf, sizeof(date_buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t_now));
+
+    std::cout << PROGRAM_NAME << " " << PROGRAM_VERSION
+              << " — Detailed Track Analysis\n";
+    std::cout << "log date: " << date_buf << "\n\n";
+    std::cout << sep << "\n";
+    std::cout << "Analyzed: " << folder_name << "\n";
+    std::cout << sep << "\n";
+
+    for (size_t idx = 0; idx < tracks.size(); ++idx) {
+        const auto& t = tracks[idx];
+        size_t nch = t.ch_metrics.size();
+
+        auto name = t.filename;
+        auto dot = name.rfind('.');
+        if (dot != std::string::npos) name = name.substr(0, dot);
+
+        std::cout << "\n" << sep << "\n";
+        std::printf("Track %zu/%zu: %s\n", idx + 1, tracks.size(), name.c_str());
+        std::cout << sep << "\n\n";
+
+        std::printf("  Format:              %s %u-bit / %u Hz\n",
+                    t.codec.c_str(), t.bit_depth, t.sample_rate);
+        std::printf("  Duration:            %s\n\n", format_duration(t.duration_secs).c_str());
+
+        // Channel labels
+        auto ch_label = [&](size_t c) -> std::string {
+            if (nch == 1) return "Mono";
+            if (nch == 2) return (c == 0) ? "Left" : "Right";
+            return "Ch" + std::to_string(c + 1);
+        };
+
+        // Header
+        std::printf("  %-22s", "");
+        for (size_t c = 0; c < nch; ++c)
+            std::printf("%-12s", ch_label(c).c_str());
+        std::printf("%-12s\n", "Joint");
+        std::cout << "  " << std::string(22 + 12 * (nch + 1), '-') << "\n";
+
+        // True Peak
+        std::printf("  %-22s", "Max True Peak");
+        for (size_t c = 0; c < nch; ++c)
+            std::printf("%-12.2f", t.ch_metrics[c].true_peak_dbfs);
+        std::printf("%.2f dB\n", t.true_peak_dbfs);
+
+        // Sample Peak
+        std::printf("  %-22s", "Max Sample Peak");
+        for (size_t c = 0; c < nch; ++c)
+            std::printf("%-12.2f", t.ch_metrics[c].sample_peak_dbfs);
+        if (t.is_clipping)
+            std::printf("over\n");
+        else
+            std::printf("%.2f dBFS\n", t.peak_dbfs);
+
+        // RMS
+        std::printf("  %-22s", "RMS");
+        for (size_t c = 0; c < nch; ++c)
+            std::printf("%-12.2f", t.ch_metrics[c].rms_dbfs);
+        std::printf("%.2f dB\n", t.rms_dbfs);
+
+        // Max Momentary
+        std::printf("  %-22s", "Max Momentary");
+        for (size_t c = 0; c < nch; ++c)
+            std::printf("%-12.2f", t.ch_metrics[c].max_momentary_lufs);
+        std::printf("%.2f LUFS\n", t.max_momentary_lufs);
+
+        // Max Short-Term
+        std::printf("  %-22s", "Max Short-Term");
+        for (size_t c = 0; c < nch; ++c)
+            std::printf("%-12.2f", t.ch_metrics[c].max_short_term_lufs);
+        std::printf("%.2f LUFS\n", t.max_short_term_lufs);
+
+        // Integrated (joint only)
+        std::printf("  %-22s", "Integrated");
+        for (size_t c = 0; c < nch; ++c)
+            std::printf("%-12s", "—");
+        std::printf("%.2f LUFS\n", t.integrated_lufs);
+
+        // DR (PMF)
+        std::printf("  %-22s", "DR (PMF)");
+        for (size_t c = 0; c < nch; ++c)
+            std::printf("%-12.2f", t.ch_metrics[c].dr_raw);
+        std::printf("DR%d\n", t.dr_score);
+
+        // Min PSR
+        std::printf("  %-22s", "Min PSR");
+        for (size_t c = 0; c < nch; ++c)
+            std::printf("%-12s", "—");
+        std::printf("%.2f dB\n", t.psr_db);
+
+        // PLR
+        std::printf("  %-22s", "PLR");
+        for (size_t c = 0; c < nch; ++c)
+            std::printf("%-12s", "—");
+        std::printf("%.2f dB\n", t.plr_db);
+
+        // LRA
+        std::printf("  %-22s", "LRA");
+        for (size_t c = 0; c < nch; ++c)
+            std::printf("%-12s", "—");
+        std::printf("%.2f LU\n", t.lra_lu);
+    }
+
+    // ── Summary ────────────────────────────────────────────────────────
+    std::cout << "\n" << sep << "\n";
+    std::cout << "Summary\n";
+    std::cout << sep << "\n\n";
+
+    std::cout << "Number of tracks:  " << tracks.size() << "\n";
+    std::cout << "Official DR value: DR" << dr::album_dr(tracks) << "\n";
+
+    if (!tracks.empty()) {
+        double sum_lufs = 0.0;
+        for (const auto& t : tracks) sum_lufs += t.integrated_lufs;
+        std::printf("Avg. loudness:     %.1f LUFS\n", sum_lufs / tracks.size());
+
+        const auto& first = tracks[0];
+        std::cout << "\nSamplerate:        " << first.sample_rate << " Hz\n";
+        std::cout << "Channels:          " << first.channels << "\n";
+        std::cout << "Bits per sample:   " << first.bit_depth << "\n";
+        std::cout << "Codec:             " << first.codec << "\n";
+
+        auto album_verdict = dr::classify_dr(
+            static_cast<double>(dr::album_dr(tracks)));
+        std::cout << "Verdict:           " << dr::verdict_string(album_verdict) << "\n";
+    }
+
+    std::cout << sep << "\n";
+}
+
 // ── Usage ──────────────────────────────────────────────────────────────────
 void print_usage(const char* argv0) {
     std::cerr << PROGRAM_NAME << " — Zero-dependency Dynamic Range Meter\n\n"
               << "Usage: " << argv0 << " [options] <file_or_folder...>\n\n"
               << "Options:\n"
-              << "  -f, --format <std|foobar|ext>  Output format (default: std)\n"
-              << "      std    — dr.loudness-war.info compatible\n"
+              << "  -f, --format <std|foobar|ext|detail>\n"
+              << "      std    — dr.loudness-war.info compatible (default)\n"
               << "      foobar — foobar2000 DR Meter style\n"
               << "      ext    — extended with LUFS, PLR, crest factor\n"
+              << "      detail — per-track per-channel (MAAT DROffline style)\n"
               << "  -o, --output <file>            Write output to file\n"
               << "  -q, --quiet                    Suppress progress output\n"
               << "  -v, --version                  Show version\n"
@@ -308,7 +442,6 @@ int main(int argc, char* argv[]) {
     bool quiet = false;
     std::vector<std::string> paths;
 
-    // Parse arguments
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
@@ -324,6 +457,7 @@ int main(int argc, char* argv[]) {
             if (fmt == "std")         format = OutputFormat::Standard;
             else if (fmt == "foobar") format = OutputFormat::Foobar;
             else if (fmt == "ext")    format = OutputFormat::Extended;
+            else if (fmt == "detail") format = OutputFormat::Detail;
             else {
                 std::cerr << "Unknown format: " << fmt << "\n";
                 return 1;
@@ -340,7 +474,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Redirect stdout to file if requested
     FILE* out_fp = nullptr;
     if (!output_file.empty()) {
         out_fp = std::freopen(output_file.c_str(), "w", stdout);
@@ -350,7 +483,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Process each path
     for (const auto& path : paths) {
         auto files = collect_files(path);
         if (files.empty()) {
@@ -377,14 +509,12 @@ int main(int argc, char* argv[]) {
 
         if (results.empty()) continue;
 
-        // Determine display name
         std::string display_name;
         if (fs::is_directory(path))
             display_name = fs::absolute(path).string();
         else
             display_name = fs::path(path).parent_path().string();
 
-        // Folder name for foobar style (try to extract "Artist / Album")
         std::string folder_name;
         if (fs::is_directory(path)) {
             auto abs = fs::absolute(path).lexically_normal();
@@ -407,6 +537,9 @@ int main(int argc, char* argv[]) {
                 break;
             case OutputFormat::Extended:
                 print_extended(results, folder_name);
+                break;
+            case OutputFormat::Detail:
+                print_detail(results, folder_name);
                 break;
         }
     }
