@@ -4,7 +4,7 @@ Zero-dependency C++17 dynamic range meter. The name is French for *peak* / *cres
 
 Measures **TT Dynamic Range** (Pleasurize Music Foundation algorithm), **EBU R128 integrated loudness**, and **crest factor** for lossless audio files. Output is compatible with [dr.loudness-war.info](http://dr.loudness-war.info/) submission format.
 
-**NOTE:** --DSD support is flaky and is being actively worked on--. Adding more UI features.
+**NOTE:** ~~DSD support is flaky and is being actively worked on~~. Adding more UI features.
 
 ## Build
 
