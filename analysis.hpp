@@ -747,7 +747,7 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     r.integrated_lufs = compute_integrated_loudness_multi(kw, sr);
 
     // ── PLR (True Peak to Integrated Loudness) ───────────────────────
-    r.plr_db = r.true_peak_dbfs - r.integrated_lufs;
+    r.plr_db = std::min(r.true_peak_dbfs, 0.0) - r.integrated_lufs;
 
     // ── Crest factor (per-channel average) ───────────────────────────
     double sum_crest = 0.0;
