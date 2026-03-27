@@ -444,7 +444,7 @@ inline double compute_lra(const std::vector<std::vector<double>>& kw_channels,
     for (const auto& b : blocks)
         if (b.power > abs_gate_power) above_abs.push_back(b);
 
-    if (above_abs.size() < 2) return 0.0;
+    if (above_abs.size() < 6) return 0.0;
 
     // Relative gate: mean_power − 20 dB (in power domain, per BS.1770-4)
     double sum_power = 0.0;
@@ -456,13 +456,14 @@ inline double compute_lra(const std::vector<std::vector<double>>& kw_channels,
     for (const auto& b : above_abs)
         if (b.power > rel_gate_power) above_rel_lufs.push_back(b.lufs);
 
-    if (above_rel_lufs.size() < 2) return 0.0;
+    if (above_rel_lufs.size() < 6) return 0.0;
 
-    // 10th and 95th percentile
+    // 10th and 95th percentile (EBU Tech 3342: ceil for 95th)
     std::sort(above_rel_lufs.begin(), above_rel_lufs.end());
-    size_t idx_10 = static_cast<size_t>(above_rel_lufs.size() * 0.10);
-    size_t idx_95 = static_cast<size_t>(above_rel_lufs.size() * 0.95);
-    if (idx_95 >= above_rel_lufs.size()) idx_95 = above_rel_lufs.size() - 1;
+    size_t sz = above_rel_lufs.size();
+    size_t idx_10 = static_cast<size_t>(sz * 0.10);
+    size_t idx_95 = static_cast<size_t>(std::ceil(sz * 0.95));
+    if (idx_95 >= sz) idx_95 = sz - 1;
 
     return above_rel_lufs[idx_95] - above_rel_lufs[idx_10];
 }
@@ -493,7 +494,9 @@ inline double compute_min_psr(
             total_power += mean_square(&kw_channels[c][start], window);
         double st_lufs = to_lufs_from_power(total_power);
 
-        if (st_lufs > LUFS_FLOOR && seg_peak > 0.0) {
+        // Only consider segments above −40 LUFS to avoid near-silence
+        // windows blowing up PSR (segments with speech/silence gaps).
+        if (st_lufs > -40.0 && seg_peak > 0.0) {
             double psr = to_dbfs(seg_peak) - st_lufs;
             if (psr < min_psr) min_psr = psr;
             any_valid = true;
@@ -624,7 +627,7 @@ inline TTDRResult compute_tt_dr(
 
     size_t n_top = std::max<size_t>(1,
         std::min<size_t>(nb,
-            static_cast<size_t>(std::ceil(nb * 0.2))));
+            static_cast<size_t>(std::floor(nb * 0.2))));
 
     double sum_rms = 0.0;
     for (size_t i = 0; i < n_top; ++i)
