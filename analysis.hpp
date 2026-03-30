@@ -242,12 +242,46 @@ inline std::vector<double> biquad_filter(const double* input, size_t n,
     return output;
 }
 
-// ── K-weighting filter coefficients (ITU-R BS.1770-4) ──────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+// K-weighting filter coefficients (ITU-R BS.1770-4)
+//
+// FIX 5: Hardcoded biquad coefficients for all standard sample rates
+// (44.1k, 48k, 88.2k, 96k, 176.4k, 192k). Eliminates platform-dependent
+// floating-point rounding in the bilinear transform that caused ~1 dB
+// LUFSi errors at 88.2 kHz. Non-standard rates still fall back to
+// runtime computation from the analog prototype.
+// ════════════════════════════════════════════════════════════════════════════
+
 inline BiquadCoeffs k_weight_prefilter(double fs) {
+    // ── Hardcoded coefficients for standard sample rates ─────────────
+    // 48 kHz: ITU-R BS.1770-4 reference values (Annex).
+    // Others: bilinear transform of high shelf (fc≈1682 Hz, +4 dB, Q≈0.7072),
+    // pre-computed to 17 significant digits.
+    if (std::abs(fs - 44100.0) < 1.0) {
+        return {{1.52454975074248211e+00, -2.59100675425938576e+00, 1.12681907389383196e+00},
+                {1.0, -1.62370638345209350e+00, 6.84068453829021927e-01}};
+    }
     if (std::abs(fs - 48000.0) < 1.0) {
         return {{1.53512485958697, -2.69169618940638, 1.19839281085285},
                 {1.0, -1.69065929318241, 0.73248077421585}};
     }
+    if (std::abs(fs - 88200.0) < 1.0) {
+        return {{1.55424792858678718e+00, -2.87412726056546619e+00, 1.33635428784077082e+00},
+                {1.0, -1.81044441740036355e+00, 8.26919373262454682e-01}};
+    }
+    if (std::abs(fs - 96000.0) < 1.0) {
+        return {{1.55670441987263186e+00, -2.89769635467325060e+00, 1.35500100097460785e+00},
+                {1.0, -1.82577077302439839e+00, 8.39779839198386835e-01}};
+    }
+    if (std::abs(fs - 176400.0) < 1.0) {
+        return {{1.56945738722285011e+00, -3.02045804356041803e+00, 1.45531205096558836e+00},
+                {1.0, -1.90501892694110020e+00, 9.09330321569121192e-01}};
+    }
+    if (std::abs(fs - 192000.0) < 1.0) {
+        return {{1.57070239775946896e+00, -3.03248000057161482e+00, 1.46543059511779461e+00},
+                {1.0, -1.91272589091173484e+00, 9.16378883217383144e-01}};
+    }
+    // ── Fallback: compute from analog prototype via bilinear transform
     double fc = 1681.974450955533;
     double g_db = 3.999843853973347;
     double q = 0.7071752369554196;
@@ -268,10 +302,33 @@ inline BiquadCoeffs k_weight_prefilter(double fs) {
 }
 
 inline BiquadCoeffs k_weight_highpass(double fs) {
+    // ── Hardcoded coefficients for standard sample rates ─────────────
+    // High-pass at ~38.1 Hz, Q = 1/√2.
+    if (std::abs(fs - 44100.0) < 1.0) {
+        return {{9.96165388340084723e-01, -1.99233077668016945e+00, 9.96165388340084723e-01},
+                {1.0, -1.99231607237953301e+00, 9.92345480980805883e-01}};
+    }
     if (std::abs(fs - 48000.0) < 1.0) {
         return {{1.0, -2.0, 1.0},
                 {1.0, -1.99004745483398, 0.99007225036621}};
     }
+    if (std::abs(fs - 88200.0) < 1.0) {
+        return {{9.98080852618537406e-01, -1.99616170523707481e+00, 9.98080852618537406e-01},
+                {1.0, -1.99615802210701165e+00, 9.96165388367137639e-01}};
+    }
+    if (std::abs(fs - 96000.0) < 1.0) {
+        return {{9.98236645778623366e-01, -1.99647329155724673e+00, 9.98236645778623366e-01},
+                {1.0, -1.99647018213671945e+00, 9.96476400977773791e-01}};
+    }
+    if (std::abs(fs - 176400.0) < 1.0) {
+        return {{9.99039965476868019e-01, -1.99807993095373604e+00, 9.99039965476868019e-01},
+                {1.0, -1.99807900928723803e+00, 9.98080852620233827e-01}};
+    }
+    if (std::abs(fs - 192000.0) < 1.0) {
+        return {{9.99117933869511199e-01, -1.99823586773902240e+00, 9.99117933869511199e-01},
+                {1.0, -1.99823508969821240e+00, 9.98236645779832399e-01}};
+    }
+    // ── Fallback: compute from analog prototype via bilinear transform
     double fc = 38.13547087602444;
     double w0 = 2.0 * PI * fc / fs;
     double cosw = std::cos(w0), sinw = std::sin(w0);
@@ -411,6 +468,9 @@ inline double compute_integrated_loudness(const double* samples, size_t n,
 // EBU R128 / BS.1770-4 §4: the relative gate threshold is −20 dB below
 // the *mean power* of blocks above the absolute gate, NOT −20 dB below
 // the mean of their LUFS values.
+//
+// FIX 6: Linear interpolation for 10th/95th percentile (matches EBU Tech
+// 3342 more precisely than nearest-index rounding).
 // ════════════════════════════════════════════════════════════════════════════
 
 inline double compute_lra(const std::vector<std::vector<double>>& kw_channels,
@@ -458,14 +518,20 @@ inline double compute_lra(const std::vector<std::vector<double>>& kw_channels,
 
     if (above_rel_lufs.size() < 6) return 0.0;
 
-    // 10th and 95th percentile (EBU Tech 3342: ceil for 95th)
+    // 10th and 95th percentile with linear interpolation
+    // (matches EBU Tech 3342 more precisely than nearest-index)
     std::sort(above_rel_lufs.begin(), above_rel_lufs.end());
     size_t sz = above_rel_lufs.size();
-    size_t idx_10 = static_cast<size_t>(sz * 0.10);
-    size_t idx_95 = static_cast<size_t>(std::ceil(sz * 0.95));
-    if (idx_95 >= sz) idx_95 = sz - 1;
 
-    return above_rel_lufs[idx_95] - above_rel_lufs[idx_10];
+    auto lerp_percentile = [&](double p) -> double {
+        double pos = p * (sz - 1);
+        size_t lo = static_cast<size_t>(pos);
+        if (lo >= sz - 1) return above_rel_lufs[sz - 1];
+        double frac = pos - static_cast<double>(lo);
+        return above_rel_lufs[lo] + frac * (above_rel_lufs[lo + 1] - above_rel_lufs[lo]);
+    };
+
+    return lerp_percentile(0.95) - lerp_percentile(0.10);
 }
 
 // ── Min PSR (SPPM-to-Short-Term Loudness Ratio) ───────────────────────────
@@ -494,9 +560,9 @@ inline double compute_min_psr(
             total_power += mean_square(&kw_channels[c][start], window);
         double st_lufs = to_lufs_from_power(total_power);
 
-        // Only consider segments above −40 LUFS to avoid near-silence
+        // Only consider segments above −50 LUFS to avoid near-silence
         // windows blowing up PSR (segments with speech/silence gaps).
-        if (st_lufs > -40.0 && seg_peak > 0.0) {
+        if (st_lufs > -50.0 && seg_peak > 0.0) {
             double psr = to_dbfs(seg_peak) - st_lufs;
             if (psr < min_psr) min_psr = psr;
             any_valid = true;
