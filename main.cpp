@@ -15,6 +15,10 @@
 #include "analysis.hpp"
 #include "audio.hpp"
 
+#ifdef CRETE_HAS_JSON
+#include <nlohmann/json.hpp>
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -38,12 +42,17 @@ static constexpr const char* PROGRAM_DESC    = "TT Dynamic Range Meter (zero-dep
 
 namespace fs = std::filesystem;
 
+#ifdef CRETE_HAS_JSON
+using json = nlohmann::json;
+#endif
+
 // ── Output format modes ────────────────────────────────────────────────────
 enum class OutputFormat {
     Standard,   // dr.loudness-war.info compatible
     Foobar,     // foobar2000 DR Meter style
     Extended,   // MAAT DROffline–style pipe-delimited table
     Detail,     // per-track per-channel block view
+    Json,       // machine-readable JSON (requires CRETE_HAS_JSON)
 };
 
 // ── Formatting helpers ─────────────────────────────────────────────────────
@@ -324,38 +333,34 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
         rows.push_back(std::move(r));
     }
 
-    // ── Column alignment widths (right-align in N chars, then " | ") ─
-    // Fixed widths match MAAT DROffline MkII output exactly.
+    // ── Column alignment widths ──────────────────────────────────────
 
     int aFN  = static_cast<int>(fname_w);
-    int aFmt = 6;               // "Format"
+    int aFmt = 6;
     int aSR  = static_cast<int>(sr_w);
-    int aWL  = 11;              // "Word Length"
-    int aTPL = 8;               // "Max. TPL"
-    int aSPL = 14;              // "Max. SPPM LEFT"
-    int aSPR = 15;              // "Max. SPPM RIGHT"
-    int aSPJ = 17;              // "Max. SPPM (JOINT)"
-    int aRL  = 8;               // "RMS LEFT"
-    int aRR  = 9;               // "RMS RIGHT"
-    int aML  = 11;              // "Max. M LEFT"
-    int aMR  = 12;              // "Max. M RIGHT"
-    int aSL  = 11;              // "Max. S LEFT"
-    int aSRt = 12;              // "Max. S RIGHT"
-    int aLU  = 6;               // "LUFSi"
-    int aDR  = 8;               // "DR (PMF)"
-    int aBU  = 9;               // "Bits Used"
-    int aPL  = 5;               // "PLR"
-    int aLA  = 5;               // "LRA"
-    int aMJ  = 6;               // "Max. M" (joint)
-    int aSJ  = 6;               // "Max. S" (joint)
-    int aDL  = 7;               // "DR LEFT"
-    int aTL  = 13;              // "Max. TPL LEFT"
-    int aTR  = 14;              // "Max. TPL RIGHT"
-    int aDRR = 8;               // "DR RIGHT"
-    int aPS  = 8;               // "Min. PSR"
-
-    // Macro to print one right-aligned column + separator
-    // We use a lambda-like approach: print "%*s | " for each field.
+    int aWL  = 11;
+    int aTPL = 8;
+    int aSPL = 14;
+    int aSPR = 15;
+    int aSPJ = 17;
+    int aRL  = 8;
+    int aRR  = 9;
+    int aML  = 11;
+    int aMR  = 12;
+    int aSL  = 11;
+    int aSRt = 12;
+    int aLU  = 6;
+    int aDR  = 8;
+    int aBU  = 9;
+    int aPL  = 5;
+    int aLA  = 5;
+    int aMJ  = 6;
+    int aSJ  = 6;
+    int aDL  = 7;
+    int aTL  = 13;
+    int aTR  = 14;
+    int aDRR = 8;
+    int aPS  = 8;
 
     auto print_row = [&](
             const char* fn, const char* fmt, const char* sr, const char* wl,
@@ -388,7 +393,6 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
     // ── Output ───────────────────────────────────────────────────────
     std::cout << "Folder Path:   " << folder_path << "\n\n";
 
-    // Header
     print_row("File Name", "Format", "SR", "Word Length",
               "Max. TPL",
               "Max. SPPM LEFT", "Max. SPPM RIGHT", "Max. SPPM (JOINT)",
@@ -400,10 +404,8 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
               "DR LEFT", "Max. TPL LEFT", "Max. TPL RIGHT",
               "DR RIGHT", "Min. PSR");
 
-    // Blank line after header
     std::cout << "\n";
 
-    // Data rows
     for (const auto& r : rows) {
         print_row(r.name.c_str(), r.ext.c_str(), r.sr.c_str(), r.wl.c_str(),
                   r.tpl.c_str(),
@@ -417,7 +419,6 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
                   r.dr_r.c_str(), r.min_psr.c_str());
     }
 
-    // Summary
     std::printf("\nNumber of EP/Album Files: %zu\n", tracks.size());
     std::printf("Official EP/Album DR: %d\n", dr::album_dr(tracks));
 }
@@ -534,16 +535,114 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
     std::cout << sep << "\n";
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// JSON output (machine-readable, for testing and integration)
+//
+// Conditionally compiled: only available when built with -DCRETE_HAS_JSON.
+// Build:  make cli-json    (auto-fetches nlohmann/json header)
+// ════════════════════════════════════════════════════════════════════════════
+
+#ifdef CRETE_HAS_JSON
+
+void print_json(const std::vector<dr::TrackResult>& tracks,
+                const std::string& folder_path) {
+    json j;
+    j["version"] = std::string(PROGRAM_NAME) + " " + PROGRAM_VERSION;
+    j["folder_path"] = folder_path;
+    j["album_dr"] = dr::album_dr(tracks);
+    j["num_tracks"] = tracks.size();
+
+    if (!tracks.empty()) {
+        const auto& first = tracks[0];
+        j["sample_rate"] = first.sample_rate;
+        j["channels"] = first.channels;
+        j["bit_depth"] = first.bit_depth;
+        j["codec"] = first.codec;
+    }
+
+    json jtracks = json::array();
+
+    for (const auto& t : tracks) {
+        json jt;
+        jt["filename"] = t.filename;
+        jt["codec"] = t.codec;
+        jt["sample_rate"] = t.sample_rate;
+        jt["bit_depth"] = t.bit_depth;
+        jt["channels"] = t.channels;
+        jt["duration_secs"] = t.duration_secs;
+
+        // TT DR
+        jt["dr_score"] = t.dr_score;
+        jt["dr_raw"] = t.dr_score_raw;
+
+        // Peak / RMS (joint)
+        jt["peak_dbfs"] = t.peak_dbfs;
+        jt["rms_dbfs"] = t.rms_dbfs;
+        jt["true_peak_dbfs"] = t.true_peak_dbfs;
+        jt["is_clipping"] = t.is_clipping;
+
+        // EBU R128
+        jt["integrated_lufs"] = t.integrated_lufs;
+        jt["max_momentary_lufs"] = t.max_momentary_lufs;
+        jt["max_short_term_lufs"] = t.max_short_term_lufs;
+        jt["lra_lu"] = t.lra_lu;
+
+        // Derived metrics
+        jt["plr_db"] = t.plr_db;
+        jt["psr_db"] = t.psr_db;
+        jt["crest_factor_db"] = t.crest_factor_db;
+
+        // Verdict
+        jt["verdict"] = dr::verdict_string(t.verdict);
+
+        // Per-channel detail
+        json jch = json::array();
+        size_t nch = t.ch_metrics.size();
+        for (size_t c = 0; c < nch; ++c) {
+            const auto& cm = t.ch_metrics[c];
+            json jc;
+            if (nch == 1)      jc["label"] = "Mono";
+            else if (nch == 2) jc["label"] = (c == 0) ? "Left" : "Right";
+            else               jc["label"] = "Ch" + std::to_string(c + 1);
+
+            jc["sample_peak_dbfs"] = cm.sample_peak_dbfs;
+            jc["true_peak_dbfs"] = cm.true_peak_dbfs;
+            jc["rms_dbfs"] = cm.rms_dbfs;
+            jc["dr_score"] = cm.dr_score;
+            jc["dr_raw"] = cm.dr_raw;
+            jc["max_momentary_lufs"] = cm.max_momentary_lufs;
+            jc["max_short_term_lufs"] = cm.max_short_term_lufs;
+            jch.push_back(std::move(jc));
+        }
+        jt["channel_metrics"] = std::move(jch);
+
+        jtracks.push_back(std::move(jt));
+    }
+
+    j["tracks"] = std::move(jtracks);
+
+    std::cout << j.dump(2) << "\n";
+}
+
+#endif // CRETE_HAS_JSON
+
 // ── Usage ──────────────────────────────────────────────────────────────────
 void print_usage(const char* argv0) {
     std::cerr << PROGRAM_NAME << " — Zero-dependency Dynamic Range Meter\n\n"
               << "Usage: " << argv0 << " [options] <file_or_folder...>\n\n"
               << "Options:\n"
-              << "  -f, --format <std|foobar|ext|detail>\n"
+              << "  -f, --format <std|foobar|ext|detail"
+#ifdef CRETE_HAS_JSON
+              << "|json"
+#endif
+              << ">\n"
               << "      std    — dr.loudness-war.info compatible (default)\n"
               << "      foobar — foobar2000 DR Meter style\n"
               << "      ext    — MAAT DROffline–style pipe-delimited table\n"
               << "      detail — per-track per-channel block view\n"
+#ifdef CRETE_HAS_JSON
+              << "      json   — machine-readable JSON (all metrics)\n"
+#endif
               << "  -o, --output <file>            Write output to file\n"
               << "  -q, --quiet                    Suppress progress output\n"
               << "  -v, --version                  Show version\n"
@@ -554,7 +653,11 @@ void print_usage(const char* argv0) {
 
 void print_version() {
     std::cout << PROGRAM_NAME << " " << PROGRAM_VERSION
-              << " — " << PROGRAM_DESC << "\n"
+              << " — " << PROGRAM_DESC
+#ifdef CRETE_HAS_JSON
+              << " [+json]"
+#endif
+              << "\n"
               << "Built: " << __DATE__ << " " << __TIME__ << "\n";
 }
 
@@ -587,6 +690,15 @@ int main(int argc, char* argv[]) {
             else if (fmt == "ext" ||
                      fmt == "maat")        format = OutputFormat::Extended;
             else if (fmt == "detail")      format = OutputFormat::Detail;
+            else if (fmt == "json") {
+#ifdef CRETE_HAS_JSON
+                format = OutputFormat::Json;
+#else
+                std::cerr << "Error: JSON output not available.\n"
+                          << "Rebuild with: make cli-json\n";
+                return 1;
+#endif
+            }
             else {
                 std::cerr << "Unknown format: " << fmt << "\n";
                 return 1;
@@ -669,6 +781,11 @@ int main(int argc, char* argv[]) {
                 break;
             case OutputFormat::Detail:
                 print_detail(results, folder_name);
+                break;
+            case OutputFormat::Json:
+#ifdef CRETE_HAS_JSON
+                print_json(results, display_name);
+#endif
                 break;
         }
     }
