@@ -546,9 +546,9 @@ static void render_detail_panel(AppState& app) {
         };
 
         // True Peak
-        std::snprintf(buf, sizeof(buf), "%.2f dB", t.true_peak_dbfs);
+        std::snprintf(buf, sizeof(buf), "%.2f dB", t.max_true_peak_dbtp);
         metric_row("Max True Peak", [&](size_t c) {
-            char b[32]; std::snprintf(b, sizeof(b), "%.2f dB", t.ch_metrics[c].true_peak_dbfs);
+            char b[32]; std::snprintf(b, sizeof(b), "%.2f dB", t.ch_metrics[c].true_peak_dbtp);
             ImGui::Text("%s", b);
         }, buf);
 

@@ -282,7 +282,7 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
         size_t nch = t.ch_metrics.size();
 
         // Joint true peak (explicit sign)
-        r.tpl = format_signed(t.true_peak_dbfs);
+        r.tpl = format_signed(t.max_true_peak_dbtp);
 
         // Per-channel sample peaks
         double sp_l = (nch > 0) ? t.ch_metrics[0].sample_peak_dbfs : t.peak_dbfs;
@@ -321,9 +321,9 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
                                       : ((nch > 0) ? t.ch_metrics[0].dr_raw : t.dr_score_raw));
 
         // Per-channel true peak (explicit sign)
-        r.tpl_l = format_signed((nch > 0) ? t.ch_metrics[0].true_peak_dbfs : t.true_peak_dbfs);
-        r.tpl_r = format_signed((nch > 1) ? t.ch_metrics[1].true_peak_dbfs
-                                           : ((nch > 0) ? t.ch_metrics[0].true_peak_dbfs : t.true_peak_dbfs));
+        r.tpl_l = format_signed((nch > 0) ? t.ch_metrics[0].true_peak_dbtp : t.max_true_peak_dbtp);
+        r.tpl_r = format_signed((nch > 1) ? t.ch_metrics[1].true_peak_dbtp
+                                           : ((nch > 0) ? t.ch_metrics[0].true_peak_dbtp : t.max_true_peak_dbtp));
 
         r.min_psr = format_db(t.psr_db);
 
@@ -468,8 +468,8 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
 
         std::printf("  %-22s", "Max True Peak");
         for (size_t c = 0; c < nch; ++c)
-            std::printf("%-12.2f", t.ch_metrics[c].true_peak_dbfs);
-        std::printf("%.2f dB\n", t.true_peak_dbfs);
+            std::printf("%-12.2f", t.ch_metrics[c].true_peak_dbtp);
+        std::printf("%.2f dB\n", t.max_true_peak_dbtp);
 
         std::printf("  %-22s", "Max Sample Peak");
         for (size_t c = 0; c < nch; ++c)
@@ -578,7 +578,7 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         // Peak / RMS (joint)
         jt["peak_dbfs"] = t.peak_dbfs;
         jt["rms_dbfs"] = t.rms_dbfs;
-        jt["true_peak_dbfs"] = t.true_peak_dbfs;
+        jt["max_true_peak_dbtp"] = t.max_true_peak_dbtp;
         jt["is_clipping"] = t.is_clipping;
 
         // EBU R128
@@ -606,7 +606,7 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
             else               jc["label"] = "Ch" + std::to_string(c + 1);
 
             jc["sample_peak_dbfs"] = cm.sample_peak_dbfs;
-            jc["true_peak_dbfs"] = cm.true_peak_dbfs;
+            jc["true_peak_dbtp"] = cm.true_peak_dbtp;
             jc["rms_dbfs"] = cm.rms_dbfs;
             jc["dr_score"] = cm.dr_score;
             jc["dr_raw"] = cm.dr_raw;
