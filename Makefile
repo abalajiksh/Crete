@@ -87,6 +87,7 @@ NLOHMANN_URL     = https://github.com/nlohmann/json/releases/download/$(NLOHMANN
 # ── CLI target (zero dependencies) ─────────────────────────────────────────
 CLI_SRC    = main.cpp
 CLI_TARGET = crete$(EXE_EXT)
+CLI_HEADERS = analysis.hpp audio.hpp dsd_lut.hpp cue.hpp
 
 # ── GUI target ──────────────────────────────────────────────────────────────
 IMGUI_DIR  = third_party/imgui
@@ -124,7 +125,7 @@ debug: CXXFLAGS += -O0 -g -fsanitize=address,undefined
 debug: LDFLAGS  += -fsanitize=address,undefined
 debug: $(CLI_TARGET)
 
-$(CLI_TARGET): $(CLI_SRC) analysis.hpp audio.hpp dsd_lut.hpp
+$(CLI_TARGET): $(CLI_SRC) $(CLI_HEADERS)
 	$(CXX) $(CXXFLAGS) -o $@ $(CLI_SRC) $(LDFLAGS) $(CLI_LDFLAGS)
 
 # ── CLI builds with JSON (auto-fetches nlohmann/json) ───────────────────────
@@ -138,7 +139,7 @@ debug-json: $(CLI_TARGET)-json
 # Alias: "make cli-json" → "make release-json"
 cli-json: release-json
 
-$(CLI_TARGET)-json: $(CLI_SRC) analysis.hpp audio.hpp dsd_lut.hpp $(NLOHMANN_HEADER)
+$(CLI_TARGET)-json: $(CLI_SRC) $(CLI_HEADERS) $(NLOHMANN_HEADER)
 	$(CXX) $(CXXFLAGS) -o $(CLI_TARGET) $(CLI_SRC) $(LDFLAGS) $(CLI_LDFLAGS)
 
 # ── Fetch nlohmann/json header ──────────────────────────────────────────────

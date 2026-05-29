@@ -5,6 +5,8 @@
 // EBU R128 integrated loudness, and crest factor for audio files.
 //
 // Supported formats: WAV, AIFF, FLAC, DSF, DFF (DSD)
+// Cue sheets: parsed automatically when present alongside a monolithic
+//             audio file; each TRACK becomes its own analysed entry.
 // Output compatible with dr.loudness-war.info submission format.
 //
 // Usage: crete [options] <path...>
@@ -14,6 +16,7 @@
 
 #include "analysis.hpp"
 #include "audio.hpp"
+#include "cue.hpp"
 
 #ifdef CRETE_HAS_JSON
 #include <nlohmann/json.hpp>
@@ -26,6 +29,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -120,30 +124,90 @@ std::string get_ext(const std::string& filename) {
     return "";
 }
 
-// ── Collect audio files from a path ────────────────────────────────────────
-std::vector<std::string> collect_files(const std::string& path) {
-    std::vector<std::string> files;
+// ════════════════════════════════════════════════════════════════════════════
+// Analysis grouping
+//
+// An AnalysisGroup represents one decode operation. Two cases:
+//   1. sheet.tracks.empty()  — a single-track file, analysed as-is
+//   2. sheet.tracks non-empty — a monolithic file paired with a cue sheet;
+//      the decoded PCM is sliced per TRACK and each slice analysed separately
+//
+// collect_groups() scans a directory for cue files first, parses them, and
+// "claims" the audio files they reference. Audio files not claimed by any
+// cue fall through to single-track groups. A folder with no cue files
+// behaves exactly as before this refactor.
+// ════════════════════════════════════════════════════════════════════════════
+
+struct AnalysisGroup {
+    std::string audio_path;
+    cue::Sheet  sheet;   // empty tracks = analyse audio_path as one file
+};
+
+std::vector<AnalysisGroup> collect_groups(const std::string& path) {
+    std::vector<AnalysisGroup> groups;
 
     if (fs::is_regular_file(path)) {
-        if (audio::is_supported_format(path))
-            files.push_back(path);
-    } else if (fs::is_directory(path)) {
-        for (const auto& entry : fs::directory_iterator(path)) {
-            if (entry.is_regular_file() && audio::is_supported_format(entry.path().string()))
-                files.push_back(entry.path().string());
+        // A bare file argument is never cue-sliced: there's no directory
+        // context to find a companion .cue, and the user named the file
+        // explicitly.
+        if (audio::is_supported_format(path)) {
+            AnalysisGroup g;
+            g.audio_path = path;
+            groups.push_back(std::move(g));
         }
-        std::sort(files.begin(), files.end());
+        return groups;
+    }
+    if (!fs::is_directory(path)) return groups;
+
+    // Pass 1: enumerate cue and audio files separately.
+    std::vector<std::string> cue_paths;
+    std::vector<std::string> audio_paths;
+    for (const auto& e : fs::directory_iterator(path)) {
+        if (!e.is_regular_file()) continue;
+        std::string fp = e.path().string();
+        std::string ext = audio::get_extension(fp);
+        if (ext == ".cue")                       cue_paths.push_back(fp);
+        else if (audio::is_supported_format(fp)) audio_paths.push_back(fp);
+    }
+    std::sort(cue_paths.begin(), cue_paths.end());
+    std::sort(audio_paths.begin(), audio_paths.end());
+
+    // Pass 2: parse each cue, resolve its referenced audio file, claim it.
+    std::set<std::string> claimed;
+    for (const auto& cp : cue_paths) {
+        cue::Sheet sheet;
+        if (!cue::parse(cp, sheet)) {
+            std::cerr << "Warning: failed to parse cue file: " << cp << "\n";
+            continue;
+        }
+        std::string ref = cue::resolve_referenced_file(sheet);
+        if (ref.empty()) {
+            std::cerr << "Warning: cue " << fs::path(cp).filename().string()
+                      << " references missing file: "
+                      << sheet.referenced_file << "\n";
+            continue;
+        }
+        if (!audio::is_supported_format(ref)) {
+            std::cerr << "Warning: cue " << fs::path(cp).filename().string()
+                      << " references unsupported file: " << ref << "\n";
+            continue;
+        }
+        AnalysisGroup g;
+        g.audio_path = ref;
+        g.sheet = std::move(sheet);
+        groups.push_back(std::move(g));
+        claimed.insert(ref);
     }
 
-    return files;
-}
+    // Pass 3: audio files not claimed by any cue → single-track groups.
+    for (const auto& ap : audio_paths) {
+        if (claimed.count(ap)) continue;
+        AnalysisGroup g;
+        g.audio_path = ap;
+        groups.push_back(std::move(g));
+    }
 
-// ── Analyze a single file ──────────────────────────────────────────────────
-dr::TrackResult analyze_file(const std::string& path) {
-    auto ad = audio::decode_file(path);
-    auto filename = fs::path(path).filename().string();
-    return dr::analyze_track(ad.channels, ad.sample_rate, ad.bit_depth,
-                              ad.codec, filename);
+    return groups;
 }
 
 // ── Standard output (dr.loudness-war.info compatible) ──────────────────────
@@ -648,6 +712,9 @@ void print_usage(const char* argv0) {
               << "  -v, --version                  Show version\n"
               << "  -h, --help                     Show this help\n\n"
               << "Supported formats: WAV, AIFF, FLAC, DSF, DFF (DSD)\n"
+              << "Cue sheets: any .cue file in the input folder is parsed\n"
+              << "  automatically; each TRACK becomes its own analysed entry,\n"
+              << "  sliced from the referenced monolithic audio file.\n"
               << "Algorithm: TT Dynamic Range (3s blocks, top-20% percentile)\n";
 }
 
@@ -725,24 +792,95 @@ int main(int argc, char* argv[]) {
     }
 
     for (const auto& path : paths) {
-        auto files = collect_files(path);
-        if (files.empty()) {
+        auto groups = collect_groups(path);
+        if (groups.empty()) {
             std::cerr << "Warning: no supported audio files in " << path << "\n";
             continue;
         }
 
-        std::vector<dr::TrackResult> results;
-        results.reserve(files.size());
+        // Total expected track results — used for the progress display.
+        size_t total_tracks = 0;
+        for (const auto& g : groups)
+            total_tracks += g.sheet.tracks.empty() ? 1 : g.sheet.tracks.size();
 
-        for (size_t i = 0; i < files.size(); ++i) {
-            auto fname = fs::path(files[i]).filename().string();
-            if (!quiet)
-                std::cerr << "\rAnalyzing [" << (i+1) << "/" << files.size()
-                          << "] " << fname << "...          " << std::flush;
+        std::vector<dr::TrackResult> results;
+        results.reserve(total_tracks);
+
+        size_t done = 0;
+        for (const auto& g : groups) {
+            std::string basename = fs::path(g.audio_path).filename().string();
+            std::string ext_str  = fs::path(g.audio_path).extension().string();
+
             try {
-                results.push_back(analyze_file(files[i]));
+                auto ad = audio::decode_file(g.audio_path);
+
+                if (g.sheet.tracks.empty()) {
+                    // ── Plain single-track file ────────────────────────────
+                    ++done;
+                    if (!quiet)
+                        std::cerr << "\rAnalyzing [" << done << "/" << total_tracks
+                                  << "] " << basename << "...          " << std::flush;
+                    results.push_back(dr::analyze_track(
+                        ad.channels, ad.sample_rate, ad.bit_depth,
+                        ad.codec, basename));
+                } else {
+                    // ── Cue-sliced ─────────────────────────────────────────
+                    size_t total_samples = ad.channels.empty()
+                                           ? 0 : ad.channels[0].size();
+                    const auto& tracks_cue = g.sheet.tracks;
+
+                    for (size_t i = 0; i < tracks_cue.size(); ++i) {
+                        ++done;
+                        const auto& trk = tracks_cue[i];
+
+                        uint64_t start = cue::frames_to_samples(
+                            trk.start_frame, ad.sample_rate);
+                        uint64_t end = (i + 1 < tracks_cue.size())
+                            ? cue::frames_to_samples(
+                                  tracks_cue[i + 1].start_frame, ad.sample_rate)
+                            : total_samples;
+                        if (end > total_samples) end = total_samples;
+
+                        // Track name: NN - Title.ext   (matches sacd_extract
+                        // and most per-track DSD/FLAC naming conventions, so
+                        // it pairs cleanly against per-file siblings).
+                        char track_name[512];
+                        std::snprintf(track_name, sizeof(track_name),
+                                      "%02d - %s%s",
+                                      trk.number, trk.title.c_str(),
+                                      ext_str.c_str());
+
+                        if (!quiet)
+                            std::cerr << "\rAnalyzing [" << done << "/" << total_tracks
+                                      << "] " << track_name
+                                      << "...          " << std::flush;
+
+                        if (start >= end) {
+                            std::cerr << "\nWarning: empty cue range for "
+                                      << track_name << "\n";
+                            continue;
+                        }
+
+                        // Slice each channel into a fresh per-track buffer.
+                        // Slice drops at end-of-scope, so peak RAM is
+                        //   (full album) + (one track) + (analyser working set).
+                        // For a 63-min DSD64 album → 352.8 kHz PCM float64
+                        // this is ~24 GB. Monitor before running on
+                        // memory-constrained hosts.
+                        std::vector<std::vector<double>> slice(ad.channels.size());
+                        for (size_t c = 0; c < ad.channels.size(); ++c) {
+                            slice[c].assign(
+                                ad.channels[c].begin() + static_cast<std::ptrdiff_t>(start),
+                                ad.channels[c].begin() + static_cast<std::ptrdiff_t>(end));
+                        }
+
+                        results.push_back(dr::analyze_track(
+                            slice, ad.sample_rate, ad.bit_depth,
+                            ad.codec, track_name));
+                    }
+                }
             } catch (const std::exception& e) {
-                std::cerr << "\nError: " << fname << ": " << e.what() << "\n";
+                std::cerr << "\nError: " << basename << ": " << e.what() << "\n";
             }
         }
 
