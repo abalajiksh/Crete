@@ -29,9 +29,9 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
-#include <set>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <vector>
 
 // ── Version info ───────────────────────────────────────────────────────────
@@ -83,7 +83,6 @@ std::string format_peak(double peak_dbfs, bool is_clipping, OutputFormat fmt) {
     }
 }
 
-// Format sample rate: 44100 → "44.1k", 96000 → "96k", 352800 → "352.8k"
 std::string format_sr(uint32_t sr) {
     double k = sr / 1000.0;
     if (k == std::floor(k))
@@ -93,7 +92,6 @@ std::string format_sr(uint32_t sr) {
     return buf;
 }
 
-// Format dB with explicit +/- sign: +0.39, -1.76
 std::string format_signed(double db) {
     char buf[16];
     if (db >= 0.0)
@@ -103,21 +101,18 @@ std::string format_signed(double db) {
     return buf;
 }
 
-// Format dB with natural sign, 2 decimal places
 std::string format_db(double db) {
     char buf[16];
     std::snprintf(buf, sizeof(buf), "%.2f", db);
     return buf;
 }
 
-// Strip file extension
 std::string strip_ext(const std::string& filename) {
     auto dot = filename.rfind('.');
     if (dot != std::string::npos) return filename.substr(0, dot);
     return filename;
 }
 
-// Get file extension (including dot)
 std::string get_ext(const std::string& filename) {
     auto dot = filename.rfind('.');
     if (dot != std::string::npos) return filename.substr(dot);
@@ -128,20 +123,34 @@ std::string get_ext(const std::string& filename) {
 // Analysis grouping
 //
 // An AnalysisGroup represents one decode operation. Two cases:
-//   1. sheet.tracks.empty()  — a single-track file, analysed as-is
+//   1. sheet.tracks.empty()   — a single-track file, analysed as-is
 //   2. sheet.tracks non-empty — a monolithic file paired with a cue sheet;
 //      the decoded PCM is sliced per TRACK and each slice analysed separately
 //
 // collect_groups() scans a directory for cue files first, parses them, and
-// "claims" the audio files they reference. Audio files not claimed by any
-// cue fall through to single-track groups. A folder with no cue files
-// behaves exactly as before this refactor.
+// claims the audio files they reference. Audio files not claimed by any cue
+// fall through to single-track groups. A folder with no cue files behaves
+// exactly as it did before cue support was added.
 // ════════════════════════════════════════════════════════════════════════════
 
 struct AnalysisGroup {
     std::string audio_path;
-    cue::Sheet  sheet;   // empty tracks = analyse audio_path as one file
+    cue::Sheet  sheet;   // empty tracks => analyse audio_path as one file
 };
+
+// Inode-level dedup. We can't compare claimed paths to directory entries as
+// byte-equal strings, because UTF-8 normalization differs between filesystems
+// — notably, a cue file generated on Linux/Windows usually carries NFC
+// codepoints (`é` = U+00E9), while macOS APFS may report the same filename
+// from a directory listing in NFD (`é` = U+0065 U+0301). The two strings name
+// the same file but compare unequal; without this dedup the referenced audio
+// file would be analysed twice — once via the cue (sliced into N tracks) and
+// once standalone (yielding N+1 total). fs::equivalent goes to stat(2) for
+// device + inode identity and sidesteps the whole question.
+static bool is_same_file(const fs::path& a, const fs::path& b) {
+    std::error_code ec;
+    return fs::equivalent(a, b, ec);   // false on any error; cheap and safe
+}
 
 std::vector<AnalysisGroup> collect_groups(const std::string& path) {
     std::vector<AnalysisGroup> groups;
@@ -173,7 +182,8 @@ std::vector<AnalysisGroup> collect_groups(const std::string& path) {
     std::sort(audio_paths.begin(), audio_paths.end());
 
     // Pass 2: parse each cue, resolve its referenced audio file, claim it.
-    std::set<std::string> claimed;
+    std::vector<fs::path> claimed_paths;
+    claimed_paths.reserve(cue_paths.size());
     for (const auto& cp : cue_paths) {
         cue::Sheet sheet;
         if (!cue::parse(cp, sheet)) {
@@ -196,12 +206,18 @@ std::vector<AnalysisGroup> collect_groups(const std::string& path) {
         g.audio_path = ref;
         g.sheet = std::move(sheet);
         groups.push_back(std::move(g));
-        claimed.insert(ref);
+        claimed_paths.emplace_back(ref);
     }
 
     // Pass 3: audio files not claimed by any cue → single-track groups.
+    // is_same_file uses fs::equivalent — see comment above.
     for (const auto& ap : audio_paths) {
-        if (claimed.count(ap)) continue;
+        bool is_claimed = false;
+        fs::path ap_path(ap);
+        for (const auto& cp : claimed_paths) {
+            if (is_same_file(ap_path, cp)) { is_claimed = true; break; }
+        }
+        if (is_claimed) continue;
         AnalysisGroup g;
         g.audio_path = ap;
         groups.push_back(std::move(g));
@@ -304,20 +320,9 @@ void print_foobar(const std::vector<dr::TrackResult>& tracks,
 }
 
 // ── Extended output (MAAT DROffline–style pipe-delimited table) ────────────
-//
-// Columns (matching MAAT DROffline MkII log format):
-//   File Name | Format | SR | Word Length | Max. TPL |
-//   Max. SPPM LEFT | Max. SPPM RIGHT | Max. SPPM (JOINT) |
-//   RMS LEFT | RMS RIGHT | Max. M LEFT | Max. M RIGHT |
-//   Max. S LEFT | Max. S RIGHT | LUFSi | DR (PMF) | Bits Used |
-//   PLR | LRA | Max. M | Max. S | DR LEFT |
-//   Max. TPL LEFT | Max. TPL RIGHT | DR RIGHT | Min. PSR |
-
 void print_extended(const std::vector<dr::TrackResult>& tracks,
                     const std::string& folder_path) {
     if (tracks.empty()) return;
-
-    // ── Pre-format all values & compute dynamic column widths ────────
 
     struct Row {
         std::string name, ext, sr, wl;
@@ -333,8 +338,8 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
     std::vector<Row> rows;
     rows.reserve(tracks.size());
 
-    size_t fname_w = 9;  // min = strlen("File Name")
-    size_t sr_w    = 2;  // min = strlen("SR")
+    size_t fname_w = 9;
+    size_t sr_w    = 2;
 
     for (const auto& t : tracks) {
         Row r;
@@ -345,32 +350,26 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
 
         size_t nch = t.ch_metrics.size();
 
-        // Joint true peak (explicit sign)
         r.tpl = format_signed(t.max_true_peak_dbtp);
 
-        // Per-channel sample peaks
         double sp_l = (nch > 0) ? t.ch_metrics[0].sample_peak_dbfs : t.peak_dbfs;
         double sp_r = (nch > 1) ? t.ch_metrics[1].sample_peak_dbfs : sp_l;
         r.sppm_l = format_db(sp_l);
         r.sppm_r = format_db(sp_r);
         r.sppm_j = format_db(std::max(sp_l, sp_r));
 
-        // Per-channel RMS
         r.rms_l = format_db((nch > 0) ? t.ch_metrics[0].rms_dbfs : t.rms_dbfs);
         r.rms_r = format_db((nch > 1) ? t.ch_metrics[1].rms_dbfs
                                        : ((nch > 0) ? t.ch_metrics[0].rms_dbfs : t.rms_dbfs));
 
-        // Per-channel max momentary
         r.mom_l = format_db((nch > 0) ? t.ch_metrics[0].max_momentary_lufs : t.max_momentary_lufs);
         r.mom_r = format_db((nch > 1) ? t.ch_metrics[1].max_momentary_lufs
                                        : ((nch > 0) ? t.ch_metrics[0].max_momentary_lufs : t.max_momentary_lufs));
 
-        // Per-channel max short-term
         r.st_l = format_db((nch > 0) ? t.ch_metrics[0].max_short_term_lufs : t.max_short_term_lufs);
         r.st_r = format_db((nch > 1) ? t.ch_metrics[1].max_short_term_lufs
                                       : ((nch > 0) ? t.ch_metrics[0].max_short_term_lufs : t.max_short_term_lufs));
 
-        // Joint metrics
         r.lufs_i    = format_db(t.integrated_lufs);
         r.dr_pmf    = std::to_string(t.dr_score);
         r.bits_used = std::to_string(t.bit_depth);
@@ -379,12 +378,10 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
         r.mom_j     = format_db(t.max_momentary_lufs);
         r.st_j      = format_db(t.max_short_term_lufs);
 
-        // Per-channel DR (raw, 2 decimal places)
         r.dr_l = format_db((nch > 0) ? t.ch_metrics[0].dr_raw : t.dr_score_raw);
         r.dr_r = format_db((nch > 1) ? t.ch_metrics[1].dr_raw
                                       : ((nch > 0) ? t.ch_metrics[0].dr_raw : t.dr_score_raw));
 
-        // Per-channel true peak (explicit sign)
         r.tpl_l = format_signed((nch > 0) ? t.ch_metrics[0].true_peak_dbtp : t.max_true_peak_dbtp);
         r.tpl_r = format_signed((nch > 1) ? t.ch_metrics[1].true_peak_dbtp
                                            : ((nch > 0) ? t.ch_metrics[0].true_peak_dbtp : t.max_true_peak_dbtp));
@@ -396,8 +393,6 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
 
         rows.push_back(std::move(r));
     }
-
-    // ── Column alignment widths ──────────────────────────────────────
 
     int aFN  = static_cast<int>(fname_w);
     int aFmt = 6;
@@ -454,7 +449,6 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
             aDRR, drr,  aPS, ps);
     };
 
-    // ── Output ───────────────────────────────────────────────────────
     std::cout << "Folder Path:   " << folder_path << "\n\n";
 
     print_row("File Name", "Format", "SR", "Word Length",
@@ -600,10 +594,7 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// JSON output (machine-readable, for testing and integration)
-//
-// Conditionally compiled: only available when built with -DCRETE_HAS_JSON.
-// Build:  make cli-json    (auto-fetches nlohmann/json header)
+// JSON output
 // ════════════════════════════════════════════════════════════════════════════
 
 #ifdef CRETE_HAS_JSON
@@ -635,31 +626,25 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         jt["channels"] = t.channels;
         jt["duration_secs"] = t.duration_secs;
 
-        // TT DR
         jt["dr_score"] = t.dr_score;
         jt["dr_raw"] = t.dr_score_raw;
 
-        // Peak / RMS (joint)
         jt["peak_dbfs"] = t.peak_dbfs;
         jt["rms_dbfs"] = t.rms_dbfs;
         jt["max_true_peak_dbtp"] = t.max_true_peak_dbtp;
         jt["is_clipping"] = t.is_clipping;
 
-        // EBU R128
         jt["integrated_lufs"] = t.integrated_lufs;
         jt["max_momentary_lufs"] = t.max_momentary_lufs;
         jt["max_short_term_lufs"] = t.max_short_term_lufs;
         jt["lra_lu"] = t.lra_lu;
 
-        // Derived metrics
         jt["plr_db"] = t.plr_db;
         jt["psr_db"] = t.psr_db;
         jt["crest_factor_db"] = t.crest_factor_db;
 
-        // Verdict
         jt["verdict"] = dr::verdict_string(t.verdict);
 
-        // Per-channel detail
         json jch = json::array();
         size_t nch = t.ch_metrics.size();
         for (size_t c = 0; c < nch; ++c) {
@@ -798,7 +783,6 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
-        // Total expected track results — used for the progress display.
         size_t total_tracks = 0;
         for (const auto& g : groups)
             total_tracks += g.sheet.tracks.empty() ? 1 : g.sheet.tracks.size();
@@ -815,7 +799,6 @@ int main(int argc, char* argv[]) {
                 auto ad = audio::decode_file(g.audio_path);
 
                 if (g.sheet.tracks.empty()) {
-                    // ── Plain single-track file ────────────────────────────
                     ++done;
                     if (!quiet)
                         std::cerr << "\rAnalyzing [" << done << "/" << total_tracks
@@ -824,7 +807,6 @@ int main(int argc, char* argv[]) {
                         ad.channels, ad.sample_rate, ad.bit_depth,
                         ad.codec, basename));
                 } else {
-                    // ── Cue-sliced ─────────────────────────────────────────
                     size_t total_samples = ad.channels.empty()
                                            ? 0 : ad.channels[0].size();
                     const auto& tracks_cue = g.sheet.tracks;
@@ -841,9 +823,10 @@ int main(int argc, char* argv[]) {
                             : total_samples;
                         if (end > total_samples) end = total_samples;
 
-                        // Track name: NN - Title.ext   (matches sacd_extract
-                        // and most per-track DSD/FLAC naming conventions, so
-                        // it pairs cleanly against per-file siblings).
+                        // NN - Title.ext, mirroring sacd_extract / common
+                        // splitter conventions so cue-derived tracks pair
+                        // cleanly with per-track siblings under helpers.py's
+                        // _base_norm normalization.
                         char track_name[512];
                         std::snprintf(track_name, sizeof(track_name),
                                       "%02d - %s%s",
@@ -861,12 +844,6 @@ int main(int argc, char* argv[]) {
                             continue;
                         }
 
-                        // Slice each channel into a fresh per-track buffer.
-                        // Slice drops at end-of-scope, so peak RAM is
-                        //   (full album) + (one track) + (analyser working set).
-                        // For a 63-min DSD64 album → 352.8 kHz PCM float64
-                        // this is ~24 GB. Monitor before running on
-                        // memory-constrained hosts.
                         std::vector<std::vector<double>> slice(ad.channels.size());
                         for (size_t c = 0; c < ad.channels.size(); ++c) {
                             slice[c].assign(
