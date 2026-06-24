@@ -34,6 +34,12 @@
 #include <system_error>
 #include <vector>
 
+#ifdef CRETE_HAS_FFMPEG
+extern "C" {
+#include <libavutil/avutil.h>
+}
+#endif
+
 // ── Version info ───────────────────────────────────────────────────────────
 #ifndef CRETE_VERSION
 #define CRETE_VERSION "0.1.0"
@@ -708,6 +714,9 @@ void print_version() {
               << " — " << PROGRAM_DESC
 #ifdef CRETE_HAS_JSON
               << " [+json]"
+#endif
+#ifdef CRETE_HAS_FFMPEG
+              << " [+ffmpeg-compact " << av_version_info() << "]"
 #endif
               << "\n"
               << "Built: " << __DATE__ << " " << __TIME__ << "\n";
