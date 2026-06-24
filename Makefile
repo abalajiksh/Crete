@@ -32,7 +32,7 @@ CXX        = $(CROSS)g++
 CXXFLAGS   = -std=c++17 -Wall -Wextra -Wpedantic
 LDFLAGS    =
 
-VERSION   ?= 0.6.4
+VERSION   ?= 0.7.0
 CXXFLAGS  += -DCRETE_VERSION='"$(VERSION)"'
 
 PREFIX    ?= /usr/local
@@ -198,3 +198,29 @@ setup-nlohmann: $(NLOHMANN_HEADER)
         gui debug-gui clean distclean \
         install install-json install-gui \
         setup-imgui setup-nlohmann
+
+
+# ── FFmpeg (optional, compact static build) ─────────────────────────────────
+# Build the bundled compact FFmpeg first:  ./scripts/build_ffmpeg_compact.sh
+# Then:  make cli-ffmpeg
+FFMPEG_PREFIX   ?= third_party/ffmpeg-compact
+FFMPEG_PKGCONFIG = $(FFMPEG_PREFIX)/lib/pkgconfig
+FFMPEG_LIBS      = libavformat libavcodec libswresample libavutil
+FFMPEG_CXXFLAGS  = -DCRETE_HAS_FFMPEG \
+    $(shell PKG_CONFIG_PATH=$(FFMPEG_PKGCONFIG) pkg-config --cflags $(FFMPEG_LIBS) 2>/dev/null)
+FFMPEG_LDFLAGS   = \
+    $(shell PKG_CONFIG_PATH=$(FFMPEG_PKGCONFIG) pkg-config --libs --static $(FFMPEG_LIBS) 2>/dev/null)
+
+# ── CLI build with bundled FFmpeg (single self-contained binary) ────────────
+release-ffmpeg: CXXFLAGS += -O2 -DNDEBUG $(FFMPEG_CXXFLAGS)
+release-ffmpeg: LDFLAGS  += $(FFMPEG_LDFLAGS)
+release-ffmpeg: $(CLI_TARGET)-ffmpeg
+
+debug-ffmpeg: CXXFLAGS += -O0 -g -fsanitize=address,undefined $(FFMPEG_CXXFLAGS)
+debug-ffmpeg: LDFLAGS  += -fsanitize=address,undefined $(FFMPEG_LDFLAGS)
+debug-ffmpeg: $(CLI_TARGET)-ffmpeg
+
+cli-ffmpeg: release-ffmpeg
+
+$(CLI_TARGET)-ffmpeg: $(CLI_SRC) $(CLI_HEADERS) audio_ffmpeg.hpp
+	$(CXX) $(CXXFLAGS) -o $(CLI_TARGET) $(CLI_SRC) $(LDFLAGS) $(CLI_LDFLAGS)
