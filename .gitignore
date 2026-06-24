@@ -6,3 +6,5 @@ third_party/
 run_tests.sh
 test_results/
 run_tests.py
+.DS_Store
+scripts/.DS_Store
