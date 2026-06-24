@@ -2,16 +2,28 @@
 # crête — Zero-dependency Dynamic Range Meter
 #
 # Build tiers:
-#   make            Build zero-dependency CLI (no JSON)
-#   make cli        Same as above
-#   make cli-json   Build CLI with JSON output (auto-fetches nlohmann/json)
-#   make gui        Build GUI app (requires SDL2 + OpenGL + Dear ImGui)
-#   make all        Build cli-json + gui
-#   make debug      Debug CLI with sanitizers (no JSON)
-#   make debug-json Debug CLI with sanitizers + JSON
-#   make debug-gui  Debug GUI with sanitizers
-#   make clean      Remove all build artifacts
-#   make install    Install CLI to $(PREFIX)/bin
+#   make                  Build zero-dependency CLI (no JSON)
+#   make cli              Same as above
+#   make cli-json         Build CLI with JSON output (auto-fetches nlohmann/json)
+#   make cli-ffmpeg       CLI + bundled compact FFmpeg (decodes ALAC/MP3/AAC/...)
+#   make cli-json-ffmpeg  CLI + JSON + compact FFmpeg (the binary the pytest
+#                         harness needs: speaks JSON *and* decodes extra formats)
+#   make gui              Build GUI app (requires SDL2 + OpenGL + Dear ImGui)
+#   make all              Build cli-json + gui
+#   make debug            Debug CLI with sanitizers (no JSON)
+#   make debug-json       Debug CLI with sanitizers + JSON
+#   make debug-ffmpeg     Debug CLI with sanitizers + FFmpeg
+#   make debug-json-ffmpeg  Debug CLI with sanitizers + JSON + FFmpeg
+#   make debug-gui        Debug GUI with sanitizers
+#   make clean            Remove all build artifacts
+#   make install          Install CLI to $(PREFIX)/bin
+#
+# FFmpeg tiers need the bundled compact FFmpeg AND pkg-config:
+#   ./scripts/build_ffmpeg_compact.sh        (or: make setup-ffmpeg)
+#   pkg-config:  macOS:  brew install pkg-config
+#                Ubuntu: sudo apt install pkg-config
+#                Fedora: sudo dnf install pkgconf-pkg-config
+#   See exactly what resolves (or what's missing):  make ffmpeg-info
 #
 # Cross-compilation (from Linux):
 #   make cli CROSS=x86_64-w64-mingw32-         # Windows 64-bit CLI
@@ -194,33 +206,79 @@ setup-imgui:
 setup-nlohmann: $(NLOHMANN_HEADER)
 	@echo "nlohmann/json ready at $(NLOHMANN_HEADER)"
 
-.PHONY: all cli cli-json release release-json debug debug-json \
-        gui debug-gui clean distclean \
-        install install-json install-gui \
-        setup-imgui setup-nlohmann
+setup-ffmpeg:
+	./scripts/build_ffmpeg_compact.sh
 
+# ============================================================================
+# FFmpeg (optional, compact static build → single self-contained binary)
+#
+# Prereq: build the bundled compact FFmpeg and have pkg-config available:
+#   ./scripts/build_ffmpeg_compact.sh        (or: make setup-ffmpeg)
+#
+# Flags come from the compact build's .pc files via `pkg-config --static`, so
+# the exact per-platform deps (macOS frameworks, -lm/-lpthread, ...) resolve
+# automatically — never hardcode them, they differ per machine. If you really
+# must bypass pkg-config, override on the command line, e.g.:
+#   make cli-ffmpeg FFMPEG_CFLAGS="-I/path/include" \
+#                   FFMPEG_LDLIBS="-L/path/lib -lavformat -lavcodec -lswresample -lavutil -framework CoreFoundation ..."
+# ============================================================================
+FFMPEG_PREFIX    ?= third_party/ffmpeg-compact
+FFMPEG_PKGCONFIG  = $(FFMPEG_PREFIX)/lib/pkgconfig
+FFMPEG_LIBS       = libavformat libavcodec libswresample libavutil
+PKG_CONFIG       ?= pkg-config
 
-# ── FFmpeg (optional, compact static build) ─────────────────────────────────
-# Build the bundled compact FFmpeg first:  ./scripts/build_ffmpeg_compact.sh
-# Then:  make cli-ffmpeg
-FFMPEG_PREFIX   ?= third_party/ffmpeg-compact
-FFMPEG_PKGCONFIG = $(FFMPEG_PREFIX)/lib/pkgconfig
-FFMPEG_LIBS      = libavformat libavcodec libswresample libavutil
-FFMPEG_CXXFLAGS  = -DCRETE_HAS_FFMPEG \
-    $(shell PKG_CONFIG_PATH=$(FFMPEG_PKGCONFIG) pkg-config --cflags $(FFMPEG_LIBS) 2>/dev/null)
-FFMPEG_LDFLAGS   = \
-    $(shell PKG_CONFIG_PATH=$(FFMPEG_PKGCONFIG) pkg-config --libs --static $(FFMPEG_LIBS) 2>/dev/null)
+# Recursively-expanded (=) on purpose: pkg-config only runs when an FFmpeg
+# target is actually built, so plain `make` / `make cli-json` never touch it.
+# NOTE: no 2>/dev/null here — a real failure must be visible, not swallowed.
+FFMPEG_CFLAGS  = $(shell PKG_CONFIG_PATH=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --cflags $(FFMPEG_LIBS))
+FFMPEG_LDLIBS  = $(shell PKG_CONFIG_PATH=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --libs --static $(FFMPEG_LIBS))
 
-# ── CLI build with bundled FFmpeg (single self-contained binary) ────────────
-release-ffmpeg: CXXFLAGS += -O2 -DNDEBUG $(FFMPEG_CXXFLAGS)
-release-ffmpeg: LDFLAGS  += $(FFMPEG_LDFLAGS)
+# Loud pre-build guard — fails with an actionable message instead of silently
+# dropping the flags (which is what produced a byte-identical no-FFmpeg binary).
+FFMPEG_PRECHECK = command -v $(PKG_CONFIG) >/dev/null 2>&1 || { echo "ERROR: pkg-config not found — install it (macOS: brew install pkg-config; Ubuntu: apt install pkg-config; Fedora: dnf install pkgconf-pkg-config)"; exit 1; }; PKG_CONFIG_PATH=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --exists $(FFMPEG_LIBS) || { echo "ERROR: compact FFmpeg not found under $(abspath $(FFMPEG_PKGCONFIG)) — run ./scripts/build_ffmpeg_compact.sh (or set FFMPEG_PREFIX=/path)"; exit 1; }
+
+# ── CLI + FFmpeg (no JSON) ──────────────────────────────────────────────────
+release-ffmpeg: CXXFLAGS += -O2 -DNDEBUG -DCRETE_HAS_FFMPEG $(FFMPEG_CFLAGS)
+release-ffmpeg: LDFLAGS  += $(FFMPEG_LDLIBS)
 release-ffmpeg: $(CLI_TARGET)-ffmpeg
 
-debug-ffmpeg: CXXFLAGS += -O0 -g -fsanitize=address,undefined $(FFMPEG_CXXFLAGS)
-debug-ffmpeg: LDFLAGS  += -fsanitize=address,undefined $(FFMPEG_LDFLAGS)
+debug-ffmpeg: CXXFLAGS += -O0 -g -fsanitize=address,undefined -DCRETE_HAS_FFMPEG $(FFMPEG_CFLAGS)
+debug-ffmpeg: LDFLAGS  += -fsanitize=address,undefined $(FFMPEG_LDLIBS)
 debug-ffmpeg: $(CLI_TARGET)-ffmpeg
 
 cli-ffmpeg: release-ffmpeg
 
 $(CLI_TARGET)-ffmpeg: $(CLI_SRC) $(CLI_HEADERS) audio_ffmpeg.hpp
+	@$(FFMPEG_PRECHECK)
 	$(CXX) $(CXXFLAGS) -o $(CLI_TARGET) $(CLI_SRC) $(LDFLAGS) $(CLI_LDFLAGS)
+
+# ── CLI + JSON + FFmpeg (for the pytest harness) ────────────────────────────
+release-json-ffmpeg: CXXFLAGS += -O2 -DNDEBUG -DCRETE_HAS_JSON -I third_party -DCRETE_HAS_FFMPEG $(FFMPEG_CFLAGS)
+release-json-ffmpeg: LDFLAGS  += $(FFMPEG_LDLIBS)
+release-json-ffmpeg: $(CLI_TARGET)-json-ffmpeg
+
+debug-json-ffmpeg: CXXFLAGS += -O0 -g -fsanitize=address,undefined -DCRETE_HAS_JSON -I third_party -DCRETE_HAS_FFMPEG $(FFMPEG_CFLAGS)
+debug-json-ffmpeg: LDFLAGS  += -fsanitize=address,undefined $(FFMPEG_LDLIBS)
+debug-json-ffmpeg: $(CLI_TARGET)-json-ffmpeg
+
+cli-json-ffmpeg: release-json-ffmpeg
+
+$(CLI_TARGET)-json-ffmpeg: $(CLI_SRC) $(CLI_HEADERS) audio_ffmpeg.hpp $(NLOHMANN_HEADER)
+	@$(FFMPEG_PRECHECK)
+	$(CXX) $(CXXFLAGS) -o $(CLI_TARGET) $(CLI_SRC) $(LDFLAGS) $(CLI_LDFLAGS)
+
+# ── Diagnose what the FFmpeg tiers resolve to (run this when a build fails) ──
+ffmpeg-info:
+	@echo "FFMPEG_PREFIX    = $(FFMPEG_PREFIX)"
+	@echo "FFMPEG_PKGCONFIG = $(abspath $(FFMPEG_PKGCONFIG))"
+	@command -v $(PKG_CONFIG) >/dev/null 2>&1 && echo "pkg-config       = $$(command -v $(PKG_CONFIG))" || echo "pkg-config       = NOT FOUND (macOS: brew install pkg-config)"
+	@PKG_CONFIG_PATH=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --exists $(FFMPEG_LIBS) 2>/dev/null && echo ".pc files        = found" || echo ".pc files        = NOT FOUND under the path above"
+	@echo "cflags           = $(FFMPEG_CFLAGS)"
+	@echo "libs (--static)  = $(FFMPEG_LDLIBS)"
+
+.PHONY: all cli cli-json cli-ffmpeg cli-json-ffmpeg \
+        release release-json release-ffmpeg release-json-ffmpeg \
+        debug debug-json debug-ffmpeg debug-json-ffmpeg \
+        gui debug-gui clean distclean \
+        install install-json install-gui \
+        setup-imgui setup-nlohmann setup-ffmpeg ffmpeg-info
