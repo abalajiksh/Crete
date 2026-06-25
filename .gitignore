@@ -1,5 +1,6 @@
 crete
 crete-gui
+crete-ffmpeg
 build/
 third_party/
 *.o
