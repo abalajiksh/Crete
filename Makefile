@@ -44,7 +44,7 @@ CXX        = $(CROSS)g++
 CXXFLAGS   = -std=c++17 -Wall -Wextra -Wpedantic
 LDFLAGS    =
 
-VERSION   ?= 0.7.1
+VERSION   ?= 0.7.2
 CXXFLAGS  += -DCRETE_VERSION='"$(VERSION)"'
 
 PREFIX    ?= /usr/local
@@ -99,6 +99,9 @@ NLOHMANN_URL     = https://github.com/nlohmann/json/releases/download/$(NLOHMANN
 # ── CLI target (zero dependencies) ─────────────────────────────────────────
 CLI_SRC    = main.cpp
 CLI_TARGET = crete$(EXE_EXT)
+# FFmpeg tiers emit a distinctly-named binary so the in-house decoder (crete)
+# and the FFmpeg-enabled decoder (crete-ffmpeg) never overwrite each other.
+FFMPEG_TARGET = crete-ffmpeg$(EXE_EXT)
 CLI_HEADERS = analysis.hpp audio.hpp dsd_lut.hpp cue.hpp
 
 # ── GUI target ──────────────────────────────────────────────────────────────
@@ -189,7 +192,7 @@ install-gui: gui
 
 # ── Clean ───────────────────────────────────────────────────────────────────
 clean:
-	rm -f crete crete.exe crete-gui crete-gui.exe
+	rm -f crete crete.exe crete-gui crete-gui.exe crete-ffmpeg crete-ffmpeg.exe
 	rm -rf $(BUILD_DIR)
 
 distclean: clean
@@ -250,7 +253,7 @@ cli-ffmpeg: release-ffmpeg
 
 $(CLI_TARGET)-ffmpeg: $(CLI_SRC) $(CLI_HEADERS) audio_ffmpeg.hpp
 	@$(FFMPEG_PRECHECK)
-	$(CXX) $(CXXFLAGS) -o $(CLI_TARGET) $(CLI_SRC) $(LDFLAGS) $(CLI_LDFLAGS)
+	$(CXX) $(CXXFLAGS) -o $(FFMPEG_TARGET) $(CLI_SRC) $(LDFLAGS) $(CLI_LDFLAGS)
 
 # ── CLI + JSON + FFmpeg (for the pytest harness) ────────────────────────────
 release-json-ffmpeg: CXXFLAGS += -O2 -DNDEBUG -DCRETE_HAS_JSON -I third_party -DCRETE_HAS_FFMPEG $(FFMPEG_CFLAGS)
@@ -265,7 +268,7 @@ cli-json-ffmpeg: release-json-ffmpeg
 
 $(CLI_TARGET)-json-ffmpeg: $(CLI_SRC) $(CLI_HEADERS) audio_ffmpeg.hpp $(NLOHMANN_HEADER)
 	@$(FFMPEG_PRECHECK)
-	$(CXX) $(CXXFLAGS) -o $(CLI_TARGET) $(CLI_SRC) $(LDFLAGS) $(CLI_LDFLAGS)
+	$(CXX) $(CXXFLAGS) -o $(FFMPEG_TARGET) $(CLI_SRC) $(LDFLAGS) $(CLI_LDFLAGS)
 
 # ── Diagnose what the FFmpeg tiers resolve to (run this when a build fails) ──
 ffmpeg-info:

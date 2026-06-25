@@ -970,14 +970,50 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf) {
 // Unified decoder dispatch
 // ════════════════════════════════════════════════════════════════════════════
 
-inline bool is_supported_format(const std::string& path) {
-    auto ext = get_extension(path);
+#ifdef CRETE_HAS_FFMPEG
+// Defined in audio_ffmpeg.hpp (included at the end of this header).
+inline AudioData decode_with_ffmpeg(const std::string& path);
+#endif
+
+// Formats crête decodes natively. These are the validated paths (bit-exact vs
+// MAAT for PCM, vs foobar Direct for DSD) and must NEVER be routed to FFmpeg.
+inline bool is_native_format(const std::string& ext) {
     return ext == ".wav" || ext == ".flac" || ext == ".aif" || ext == ".aiff"
         || ext == ".dsf" || ext == ".dff";
 }
 
+// Extra container/codec extensions accepted only in FFmpeg builds. Curated so
+// directory scans pick up common lossy/ALAC files without feeding arbitrary
+// non-audio files to the decoder.
+inline bool is_ffmpeg_extra_format(const std::string& ext) {
+#ifdef CRETE_HAS_FFMPEG
+    return ext == ".m4a" || ext == ".mp4" || ext == ".m4b" || ext == ".aac"
+        || ext == ".mp3" || ext == ".opus" || ext == ".ogg" || ext == ".oga"
+        || ext == ".mka" || ext == ".webm" || ext == ".wma"
+        || ext == ".wv"  || ext == ".ape"  || ext == ".mpc" || ext == ".tak";
+#else
+    (void)ext;
+    return false;
+#endif
+}
+
+inline bool is_supported_format(const std::string& path) {
+    auto ext = get_extension(path);
+    return is_native_format(ext) || is_ffmpeg_extra_format(ext);
+}
+
 inline AudioData decode_file(const std::string& path) {
     auto ext = get_extension(path);
+
+#ifdef CRETE_HAS_FFMPEG
+    // Native decoders own their formats; everything else falls back to FFmpeg.
+    // DSD (.dsf/.dff) is intentionally excluded — FFmpeg's DSD decimation
+    // differs from foobar's fir1_8/fir1_16 and would break the bit-exact
+    // DSD parity.
+    if (!is_native_format(ext))
+        return decode_with_ffmpeg(path);
+#endif
+
     auto buf = read_file(path);
 
     if (ext == ".wav")
@@ -995,3 +1031,7 @@ inline AudioData decode_file(const std::string& path) {
 }
 
 } // namespace audio
+
+#ifdef CRETE_HAS_FFMPEG
+#include "audio_ffmpeg.hpp"
+#endif
