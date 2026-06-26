@@ -76,7 +76,7 @@ inline AudioData decode_with_ffmpeg(const std::string& path) {
     // ── Resampler: convert to planar f64, identical rate + layout ───────
     // Copying the input layout (rather than imposing a default) guarantees no
     // channel remapping — this is a pure sample-format conversion.
-    AVChannelLayout out_layout;
+    AVChannelLayout out_layout{};   // zero-init: copy() uninits dst first (frees u.map if order==CUSTOM)
     av_channel_layout_copy(&out_layout, &ctx->ch_layout);
     struct LayoutGuard { AVChannelLayout* p; ~LayoutGuard() { av_channel_layout_uninit(p); } } lg{&out_layout};
 
