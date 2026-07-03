@@ -4,15 +4,26 @@ Zero-dependency C++17 dynamic range meter. The name is French for *peak* / *cres
 
 Measures **TT Dynamic Range** (Pleasurize Music Foundation algorithm), **EBU R128 integrated loudness**, **true peak** (4× polyphase FIR), **PLR**, **PSR**, **LRA**, **crest factor**, and per-channel variants for lossless audio files. PCM output is compatible with [dr.loudness-war.info](http://dr.loudness-war.info/) submission format; DSD output uses the same algorithmic conventions as foobar2000's SACD plugin in Direct mode.
 
+The default build has **zero dependencies**. An optional third build tier statically links a compact, LGPL-only FFmpeg to add lossy/ALAC decode support — see below.
+
 ---
 
 ## Build
+
+Three CLI build tiers, one GUI:
+
+| Target | Binary | Dependencies | Adds |
+|--------|--------|--------------|------|
+| `make` / `make cli` | `crete` | none | core analysis, text output formats |
+| `make cli-json` | `crete` | nlohmann/json header (auto-fetched) | `-f json` machine-readable output |
+| `make cli-json-ffmpeg` | `crete-ffmpeg` | compact static FFmpeg (see below) | ALAC / MP3 / AAC / Opus decode |
+| `make gui` | `crete-gui` | SDL2, OpenGL, Dear ImGui | drag-and-drop GUI |
 
 ### CLI (zero dependencies)
 
 ```bash
 make                    # optimized build, no JSON output
-make VERSION=0.6.3      # custom version stamp
+make VERSION=0.7.1      # custom version stamp
 make debug              # debug build with sanitizers
 make install            # install to /usr/local/bin
 ```
@@ -26,6 +37,26 @@ make cli-json           # auto-fetches nlohmann/json header into third_party/
 ```
 
 Adds the `-f json` output mode for machine-readable analysis. The header is downloaded on first build; subsequent builds are offline. The CLI remains a single binary.
+
+### CLI with FFmpeg decode (opt-in)
+
+```bash
+./build_ffmpeg_compact.sh    # one-time: builds a minimal static FFmpeg (default 7.1)
+make cli-ffmpeg              # FFmpeg decode, no JSON
+make cli-json-ffmpeg         # FFmpeg decode + JSON (binary: crete-ffmpeg)
+```
+
+The compact FFmpeg build is **LGPL-only** (no GPL, no nonfree components), **decode-only**, and statically linked — `crete-ffmpeg` is still a single self-contained binary. Point the build at a non-default FFmpeg install with `make cli-json-ffmpeg FFMPEG_PREFIX=/path/to/ffmpeg`. Requires `pkg-config`.
+
+Decoder routing is strict:
+
+- **Native formats (WAV, AIFF, FLAC, DSF, DFF) always use crête's own decoders**, even in the FFmpeg build. This preserves bit-exact parity against the MAAT/foobar reference data.
+- FFmpeg handles only non-native formats: **ALAC (`.m4a`), MP3, AAC, Opus**.
+- **DSD is never routed through FFmpeg** — the `fir1_8`/`fir1_16` decimation path is authoritative.
+
+`crete-ffmpeg --version` advertises the linked FFmpeg as `[+ffmpeg-compact N.N]`.
+
+The default `make` target stays zero-dependency; nothing about the FFmpeg tier is required for PCM/DSD analysis.
 
 ### GUI (Dear ImGui + SDL2)
 
@@ -61,6 +92,8 @@ crete -f detail /path/to/album/
 crete -f json /path/to/album/    # cli-json builds only
 crete -o dr_log.txt /path/to/album/
 crete -q /path/to/album/         # suppress progress, useful in CI
+
+crete-ffmpeg /path/to/album/     # cli-json-ffmpeg build: same flags, adds ALAC/MP3/AAC/Opus
 ```
 
 ### GUI
@@ -75,6 +108,8 @@ Browse for a file or folder (or drag-and-drop), pick an output format, click Ana
 
 ## Supported Formats
 
+### Native decoders (all builds)
+
 | Format        | Extension          | Notes                                                                  |
 |---------------|--------------------|------------------------------------------------------------------------|
 | WAV           | `.wav`             | PCM 8/16/24/32-bit, IEEE float 32/64-bit, `WAVE_FORMAT_EXTENSIBLE`     |
@@ -83,6 +118,17 @@ Browse for a file or folder (or drag-and-drop), pick an output format, click Ana
 | DSD (DSF)     | `.dsf`             | Sony format. Decimated to 352.8 kHz PCM via foobar's `fir1_8` / `fir1_16` |
 | DSD (DFF)     | `.dff`             | Philips DSDIFF. Same decimation path as DSF, MSB-first deinterleaver    |
 | Cue sheet     | `.cue`             | Splits a monolithic file into per-track results — see below             |
+
+### FFmpeg decoders (`crete-ffmpeg` builds only)
+
+| Format | Extension | Notes |
+|--------|-----------|-------|
+| ALAC   | `.m4a`    | Lossless — metrics agree with the FLAC equivalent to float noise |
+| MP3    | `.mp3`    | Lossy — measured values reflect the decoded lossy signal |
+| AAC    | `.m4a`, `.aac` | Lossy |
+| Opus   | `.opus`, `.ogg` | Lossy |
+
+In zero-dependency builds these formats are rejected with a hint to use `crete-ffmpeg` (or transcode: `ffmpeg -i input.m4a -c:a flac output.flac`).
 
 ### Cue sheet support
 
@@ -99,10 +145,6 @@ This makes SACD rips (one big `.dff` + cue), CD images (one big `.flac` + cue), 
 Track times are stored internally as CDDA frames (1/75 sec) and converted to PCM samples at the actual decoded rate, so the same cue works for 44.1 kHz WAV and 352.8 kHz DSD-decoded PCM without rounding loss (every standard rate is divisible by 75).
 
 > **Memory note.** A monolithic 60-minute DSD64 album decodes to ~21 GB of float64 PCM at 352.8 kHz before slicing. Cue-sliced analysis adds one slice (~1.7 GB) and the analyser's working set (~2× the slice) on top. Plan accordingly on memory-constrained hosts.
-
-### Not yet supported
-
-**ALAC** (`.m4a`): requires MP4/ISO BMFF container parsing. Convert first: `ffmpeg -i input.m4a -c:a flac output.flac`.
 
 ---
 
@@ -139,8 +181,8 @@ DR7        -0.09 dB    -8.09 dB  04. Infinity Repeating (2013 Demo) - Daft Punk.
 Mimics foobar2000 DR Meter 1.1.1 output, with duration and per-album technical info block:
 
 ```
-crête 0.6.3 / TT DR Offline Meter
-log date: 2026-05-29 06:59:00
+crête 0.7.1 / TT DR Offline Meter
+log date: 2026-07-03 06:59:00
 
 --------------------------------------------------------------------------------
 Analyzed: Random Access Memories / Disc 2
@@ -171,13 +213,13 @@ MAAT DROffline MkII–style pipe-delimited table. Twenty-six columns: per-channe
 
 Per-track block view with all per-channel metrics in a vertical table — easier to read for single-track investigation than the wide `ext` format.
 
-### JSON (`-f json`, requires `make cli-json`)
+### JSON (`-f json`, requires `make cli-json` or `make cli-json-ffmpeg`)
 
 Machine-readable output with every metric for every track, including the full per-channel `channel_metrics` array. Used by the pytest CI harness to compare against reference databases without scraping text output.
 
 ```json
 {
-  "version": "crête 0.6.3",
+  "version": "crête 0.7.1",
   "folder_path": "/home/abalaji/Music/Random Access Memories/Disc 2",
   "album_dr": 9,
   "num_tracks": 9,
@@ -238,7 +280,7 @@ PLR uses `min(max_true_peak, 0) − LUFSi` to match MAAT's clamp behavior on ove
 
 ### DSD decimation
 
-DSD bitstreams are decimated to **352.8 kHz** PCM using foobar2000 SACD plugin's `fir1_8` (DSD64, 80 taps) or `fir1_16` (DSD128, 160 taps) coefficients, normalized to unity DC gain. This matches foobar's Direct-mode output exactly — peaks are bit-accurate against foobar references. The Multistage 384 kHz mode is *not* supported (planned for v1.1, see `CRETE_TODO.md`).
+DSD bitstreams are decimated to **352.8 kHz** PCM using foobar2000 SACD plugin's `fir1_8` (DSD64, 80 taps) or `fir1_16` (DSD128, 160 taps) coefficients, normalized to unity DC gain. This matches foobar's Direct-mode output exactly — peaks are bit-accurate against foobar references. Note that foobar's Direct *mode* and its output *sample rate* are independent settings: only Direct with the output rate explicitly set to 352.8 kHz (DSD64) / 705.6 kHz (DSD128) is resampler-free and comparable to crête. The Multistage 384 kHz mode is *not* supported (planned for v1.1, see `CRETE_TODO.md`).
 
 A byte-LUT polyphase engine (`dsd_lut.hpp`) replaces per-bit FIR convolution with precomputed 256-entry lookup tables — roughly 8× faster than the naive implementation, with one thread per channel.
 
@@ -259,18 +301,20 @@ A byte-LUT polyphase engine (`dsd_lut.hpp`) replaces per-bit FIR convolution wit
 ## Project Structure
 
 ```
-main.cpp          CLI entry point, output formatters, cue-aware grouping
-gui_main.cpp      GUI entry point (Dear ImGui + SDL2 + OpenGL)
-analysis.hpp      TT DR, EBU R128, true peak, PLR/PSR/LRA, crest factor
-audio.hpp         WAV, AIFF/AIFF-C, FLAC, DSF, DFF decoders
-dsd_lut.hpp       Byte-LUT polyphase FIR engine for DSD → PCM decimation
-cue.hpp           Zero-dependency cue sheet parser
-file_dialog.hpp   Portable native file/folder dialogs (Linux/macOS/Windows)
-Makefile          Build system (cli / cli-json / gui / all)
-third_party/      Dear ImGui, nlohmann/json (fetched on demand)
+main.cpp                  CLI entry point, output formatters, cue-aware grouping
+gui_main.cpp              GUI entry point (Dear ImGui + SDL2 + OpenGL)
+analysis.hpp              TT DR, EBU R128, true peak, PLR/PSR/LRA, crest factor
+audio.hpp                 WAV, AIFF/AIFF-C, FLAC, DSF, DFF decoders + FFmpeg routing
+audio_ffmpeg.hpp          FFmpeg decode backend (guarded by CRETE_HAS_FFMPEG)
+dsd_lut.hpp               Byte-LUT polyphase FIR engine for DSD → PCM decimation
+cue.hpp                   Zero-dependency cue sheet parser
+file_dialog.hpp           Portable native file/folder dialogs (Linux/macOS/Windows)
+Makefile                  Build system (cli / cli-json / cli-json-ffmpeg / gui / all)
+build_ffmpeg_compact.sh   One-time compact static FFmpeg build (LGPL-only, decode-only)
+third_party/              Dear ImGui, nlohmann/json (fetched on demand)
 ```
 
-The `analysis.hpp` and `audio.hpp` files are deliberately monolithic — single-translation-unit builds keep the CLI dependency-free and the build trivially reproducible across distros.
+The `analysis.hpp` and `audio.hpp` files are deliberately monolithic — single-translation-unit builds keep the CLI dependency-free and the build trivially reproducible across distros. `audio_ffmpeg.hpp` compiles to nothing unless `CRETE_HAS_FFMPEG` is defined by an FFmpeg build tier.
 
 ---
 
@@ -279,3 +323,5 @@ The `analysis.hpp` and `audio.hpp` files are deliberately monolithic — single-
 MIT License — Ashwin Balaji 2026.
 
 DSD decimation coefficients (`fir1_8`, `fir1_16` in `dsd_lut.hpp`) are derived from Maxim V. Anisiutkin's foobar2000 SACD plugin and are used under LGPL 2.1.
+
+`crete-ffmpeg` builds statically link a compact FFmpeg configured LGPL-only (decode-only, no GPL or nonfree components); FFmpeg is used under LGPL 2.1+.
