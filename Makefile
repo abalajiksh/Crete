@@ -92,7 +92,7 @@ else
 endif
 
 # ── nlohmann/json (auto-fetched for cli-json builds) ───────────────────────
-NLOHMANN_VERSION = v3.11.3
+NLOHMANN_VERSION = v3.12.0
 NLOHMANN_HEADER  = third_party/nlohmann/json.hpp
 NLOHMANN_URL     = https://github.com/nlohmann/json/releases/download/$(NLOHMANN_VERSION)/json.hpp
 
