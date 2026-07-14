@@ -518,7 +518,17 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
         const auto& samp = channels[c];
         double sp = peak_of(samp.data(), n);
         cm.sample_peak_dbfs = to_dbfs(sp);
-        double tp = compute_true_peak(samp.data(), n);
+        // FIX 10: true peak is the max of the RECONSTRUCTED continuous waveform,
+        // which passes through every sample — so it is >= sample peak by
+        // definition (BS.1770).  compute_true_peak() 4x-oversamples with an
+        // audio-band interpolation FIR; content near Nyquist is attenuated by
+        // that filter, so the oversampled peak can land BELOW the sample peak.
+        // Harmless for PCM and for DSD Direct (the 641-tap brickwall removes
+        // the offending content), but DSD Multistage's fir1_8 passband leaves
+        // enough ultrasonic energy to trigger it: 5 violations on I Robot, worst
+        // -0.143 dB.  Clamping restores the invariant and is a no-op wherever
+        // TP >= SP already, so the EBU 3341 true-peak battery is unaffected.
+        double tp = std::max(compute_true_peak(samp.data(), n), sp);
         cm.true_peak_dbtp = to_dbfs(tp);
         if (tp > joint_tp) joint_tp = tp;
         double ch_rms = rms_of(samp.data(), n) * std::sqrt(ch_power_scale);
