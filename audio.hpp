@@ -792,7 +792,8 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
 // DSF (DSD Stream File) Decoder
 // ════════════════════════════════════════════════════════════════════════════
 
-inline AudioData decode_dsf(const std::vector<uint8_t>& buf) {
+inline AudioData decode_dsf(const std::vector<uint8_t>& buf,
+                            dsd::Mode mode = dsd::Mode::Direct) {
     if (buf.size() < 28 || std::memcmp(buf.data(), "DSD ", 4) != 0)
         throw std::runtime_error("DSF: invalid header");
 
@@ -868,7 +869,7 @@ inline AudioData decode_dsf(const std::vector<uint8_t>& buf) {
             ch_threads.emplace_back([&, c]() {
                 ad.channels[c] = dsd::decimate_channel(
                     ch_dsd[c], static_cast<size_t>(total_dsd_samples_per_ch),
-                    decimation, true /* LSB first in DSF */);
+                    decimation, true /* LSB first in DSF */, mode);
             });
         }
         for (auto& t : ch_threads) t.join();
@@ -884,7 +885,8 @@ inline AudioData decode_dsf(const std::vector<uint8_t>& buf) {
 // DFF (DSDIFF) Decoder
 // ════════════════════════════════════════════════════════════════════════════
 
-inline AudioData decode_dff(const std::vector<uint8_t>& buf) {
+inline AudioData decode_dff(const std::vector<uint8_t>& buf,
+                            dsd::Mode mode = dsd::Mode::Direct) {
     if (buf.size() < 16 || std::memcmp(buf.data(), "FRM8", 4) != 0)
         throw std::runtime_error("DFF: invalid header");
     if (std::memcmp(buf.data() + 12, "DSD ", 4) != 0)
@@ -954,7 +956,7 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf) {
             ch_threads.emplace_back([&, c]() {
                 ad.channels[c] = dsd::decimate_channel(
                     ch_dsd[c], total_bits_per_ch,
-                    decimation, false /* MSB first in DFF */);
+                    decimation, false /* MSB first in DFF */, mode);
             });
         }
         for (auto& t : ch_threads) t.join();
@@ -975,8 +977,8 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf) {
 inline AudioData decode_with_ffmpeg(const std::string& path);
 #endif
 
-// Formats crête decodes natively. These are the validated paths (bit-exact vs
-// MAAT for PCM, vs foobar Direct for DSD) and must NEVER be routed to FFmpeg.
+// Formats crête decodes natively. These are the validated paths (vs MAAT for
+// PCM; vs foobar's chosen DSD mode for DSD) and must NEVER be routed to FFmpeg.
 inline bool is_native_format(const std::string& ext) {
     return ext == ".wav" || ext == ".flac" || ext == ".aif" || ext == ".aiff"
         || ext == ".dsf" || ext == ".dff";
@@ -1002,14 +1004,14 @@ inline bool is_supported_format(const std::string& path) {
     return is_native_format(ext) || is_ffmpeg_extra_format(ext);
 }
 
-inline AudioData decode_file(const std::string& path) {
+inline AudioData decode_file(const std::string& path,
+                             dsd::Mode dsd_mode = dsd::Mode::Direct) {
     auto ext = get_extension(path);
 
 #ifdef CRETE_HAS_FFMPEG
     // Native decoders own their formats; everything else falls back to FFmpeg.
     // DSD (.dsf/.dff) is intentionally excluded — FFmpeg's DSD decimation
-    // differs from foobar's fir1_8/fir1_16 and would break the bit-exact
-    // DSD parity.
+    // differs from foo_input_sacd's chains and would break DSD parity.
     if (!is_native_format(ext))
         return decode_with_ffmpeg(path);
 #endif
@@ -1023,9 +1025,9 @@ inline AudioData decode_file(const std::string& path) {
     else if (ext == ".flac")
         return decode_flac(buf);
     else if (ext == ".dsf")
-        return decode_dsf(buf);
+        return decode_dsf(buf, dsd_mode);
     else if (ext == ".dff")
-        return decode_dff(buf);
+        return decode_dff(buf, dsd_mode);
     else
         throw std::runtime_error("Unsupported format: " + ext);
 }
