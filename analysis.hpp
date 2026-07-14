@@ -407,14 +407,13 @@ inline TTDRResult compute_tt_dr(
         return result;
     }
     size_t n_blocks = n / block_size;
-    struct BlockData { double joint_rms; double joint_peak; std::vector<double> ch_peaks; };
+    struct BlockData { double joint_rms; std::vector<double> ch_peaks; };
     std::vector<BlockData> block_data;
     block_data.reserve(n_blocks);
     for (size_t b = 0; b < n_blocks; ++b) {
         size_t start = b * block_size;
         BlockData bd;
         bd.ch_peaks.resize(nch, 0.0);
-        double joint_pk = 0.0;
         double sum_sq = 0.0;
         for (size_t ch = 0; ch < nch; ++ch) {
             double ch_pk = 0.0;
@@ -425,18 +424,12 @@ inline TTDRResult compute_tt_dr(
                 sum_sq += s * s;
             }
             bd.ch_peaks[ch] = ch_pk;
-            if (ch_pk > joint_pk) joint_pk = ch_pk;
         }
-        bd.joint_peak = joint_pk;
         bd.joint_rms = std::sqrt(sum_sq / static_cast<double>(block_size));
         if (bd.joint_rms > 1e-3) block_data.push_back(std::move(bd));
     }
     if (block_data.empty()) { result.dr = 0.0; return result; }
     size_t nb = block_data.size();
-    std::vector<double> sorted_peaks(nb);
-    for (size_t i = 0; i < nb; ++i) sorted_peaks[i] = block_data[i].joint_peak;
-    std::sort(sorted_peaks.begin(), sorted_peaks.end(), std::greater<double>());
-    double dr_peak = (nb >= 2) ? sorted_peaks[1] : sorted_peaks[0];
     std::vector<size_t> indices(nb);
     std::iota(indices.begin(), indices.end(), 0);
     std::sort(indices.begin(), indices.end(),
@@ -447,7 +440,11 @@ inline TTDRResult compute_tt_dr(
     for (size_t i = 0; i < n_top; ++i) sum_rms += block_data[indices[i]].joint_rms;
     double avg_rms = sum_rms / static_cast<double>(n_top);
     if (avg_rms <= 0.0) { result.dr = 0.0; return result; }
-    result.dr = to_dbfs(dr_peak) - to_dbfs(avg_rms);
+
+    // Per-channel DR: 2nd-highest block peak of THIS channel, minus the joint
+    // top-20% RMS.  Validated against foobar2000 DR Meter v1.0.8 (I Robot,
+    // DSD64, both decimation modes): max |delta| 0.44 dB, errors anti-correlated
+    // between L and R, mean ~0.  This part was already correct.
     for (size_t ch = 0; ch < nch; ++ch) {
         std::vector<double> ch_peaks(nb);
         for (size_t i = 0; i < nb; ++i) ch_peaks[i] = block_data[i].ch_peaks[ch];
@@ -455,6 +452,30 @@ inline TTDRResult compute_tt_dr(
         double ch_peak2 = (nb >= 2) ? ch_peaks[1] : ch_peaks[0];
         result.dr_per_ch[ch] = to_dbfs(ch_peak2) - to_dbfs(avg_rms);
     }
+
+    // FIX 9: DR (PMF) is the MEAN of the per-channel DR values.
+    //
+    // Previously this was a separate "joint" measurement: the 2nd-highest of
+    // the per-block JOINT peaks, where joint_peak = max(ch_peak) over channels.
+    // Because max() over channels is >= either channel's own peak, and both DR
+    // paths subtract the SAME avg_rms, that construction guaranteed
+    //
+    //     DR (PMF) >= max(DR_LEFT, DR_RIGHT)
+    //
+    // structurally — it could never fall below either channel.  Hence the
+    // long-standing "crete reads +1, never -1" signature.
+    //
+    // foobar2000's Track DR is exactly round(mean(DR_FL, DR_FR)).  On I Robot
+    // the old joint form missed 9 of 20 track/mode pairs (all +1); the mean
+    // matches 20/20 in both Direct and Multistage.
+    //
+    // Suspected to be the same root cause as the rate-independent "Likoo" +2
+    // offset and the Pulp Fiction / Pixies T11 DR mismatches — all show the
+    // identical always-high, never-low signature.  Re-run the PCM qualification
+    // suite against MAAT to confirm.
+    double sum_dr = 0.0;
+    for (size_t ch = 0; ch < nch; ++ch) sum_dr += result.dr_per_ch[ch];
+    result.dr = sum_dr / static_cast<double>(nch);
     return result;
 }
 
