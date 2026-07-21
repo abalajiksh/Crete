@@ -32,9 +32,10 @@
 // ============================================================================
 
 #include "audio.hpp"
-#include "dsd_lut.hpp"
+#include "dsd_decode.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -122,7 +123,7 @@ static bool is_dsd(const fs::path& p) {
 }
 
 int main(int argc, char** argv) {
-    dsd::Mode mode = dsd::Mode::Direct;
+    dsd::Options opt;
     Bits bits = Bits::F32;
     fs::path outdir = "pcm_out";
     bool quiet = false;
@@ -131,8 +132,18 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--dsd-mode" && i + 1 < argc) {
-            try { mode = dsd::mode_from_string(argv[++i]); }
+            try { opt.mode = dsd::mode_from_string(argv[++i]); }
             catch (const std::exception& e) { std::cerr << "Error: " << e.what() << "\n"; return 1; }
+        } else if (a == "--dsd-filter" && i + 1 < argc) {
+            try { opt.filter = dsd::filter_from_string(argv[++i]); }
+            catch (const std::exception& e) { std::cerr << "Error: " << e.what() << "\n"; return 1; }
+        } else if (a == "--dsd-out-rate" && i + 1 < argc) {
+            int r = std::atoi(argv[++i]);
+            if (!dsd::is_valid_out_rate(r)) {
+                std::cerr << "Error: --dsd-out-rate must be 44100, 88200, 176400, or 352800\n";
+                return 1;
+            }
+            opt.out_rate = r;
         } else if ((a == "-o" || a == "--outdir") && i + 1 < argc) {
             outdir = argv[++i];
         } else if (a == "--bits" && i + 1 < argc) {
@@ -144,13 +155,16 @@ int main(int argc, char** argv) {
             quiet = true;
         } else if (a == "-h" || a == "--help") {
             std::cerr <<
-              "dsd2wav — DSD -> 352.8 kHz WAV, via crete's decimation chain\n\n"
+              "dsd2wav — DSD -> WAV, via crete's decimation chain (libdsddpcm)\n\n"
               "Usage: dsd2wav [options] <file_or_folder...>\n"
-              "  --dsd-mode <direct|multistage>  chain (default: direct)\n"
-              "  -o, --outdir <dir>              output dir (default: pcm_out)\n"
-              "  --bits <f32|i24>                format (default: f32)\n"
+              "  --dsd-mode <direct|multistage>              chain (default: multistage)\n"
+              "  --dsd-filter <default|firls|kaiser>         final-stage filter (default: default)\n"
+              "  --dsd-out-rate <44100|88200|176400|352800>  output rate (default: 44100)\n"
+              "  -o, --outdir <dir>                          output dir (default: pcm_out)\n"
+              "  --bits <f32|i24>                            format (default: f32)\n"
               "  -q, --quiet\n\n"
-              "f32 is the default because DSD decimation exceeds +/-1.0; i24 clips it.\n";
+              "f32 is the default because DSD decimation exceeds +/-1.0; i24 clips it.\n"
+              "Match --dsd-* to crete's flags so the exported WAV is the SAME PCM it measures.\n";
             return 0;
         } else {
             inputs.push_back(a);
@@ -177,7 +191,9 @@ int main(int argc, char** argv) {
     fs::create_directories(outdir);
 
     if (!quiet)
-        std::cerr << "dsd2wav  mode=" << dsd::mode_name(mode)
+        std::cerr << "dsd2wav  mode=" << dsd::mode_name(opt.mode)
+                  << "  filter=" << dsd::filter_name(opt.filter)
+                  << "  out=" << opt.out_rate << "Hz"
                   << "  bits=" << (bits == Bits::F32 ? "f32" : "i24")
                   << "  files=" << files.size() << "  ->  " << outdir << "\n";
 
@@ -186,7 +202,7 @@ int main(int argc, char** argv) {
     for (const auto& f : files) {
         fs::path out = outdir / (f.stem().string() + ".wav");
         try {
-            auto ad = audio::decode_file(f.string(), mode);
+            auto ad = audio::decode_file(f.string(), opt);
 
             // Report true peak headroom so a clipped i24 export is never silent.
             double peak = 0.0;

@@ -20,10 +20,11 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <exception>
 #include <thread>
 #include <vector>
 
-#include "dsd_lut.hpp"
+#include "dsd_decode.hpp"
 
 namespace audio {
 
@@ -793,7 +794,7 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
 // ════════════════════════════════════════════════════════════════════════════
 
 inline AudioData decode_dsf(const std::vector<uint8_t>& buf,
-                            dsd::Mode mode = dsd::Mode::Direct) {
+                            const dsd::Options& dsd_opt = {}) {
     if (buf.size() < 28 || std::memcmp(buf.data(), "DSD ", 4) != 0)
         throw std::runtime_error("DSF: invalid header");
 
@@ -833,12 +834,12 @@ inline AudioData decode_dsf(const std::vector<uint8_t>& buf,
     const uint8_t* dsd_data = buf.data() + data_pos + 12;
     size_t dsd_data_size = static_cast<size_t>(data_chunk_size) - 12;
 
-    uint32_t pcm_rate = 352800;
-    int decimation = static_cast<int>(dsd_sample_rate / pcm_rate);
-    if (decimation < 1) decimation = 1;
-
-    ad.sample_rate = pcm_rate;
+    ad.sample_rate = static_cast<uint32_t>(dsd_opt.out_rate);
     ad.bit_depth   = 1;
+
+    // Fail fast (on this thread) before the O(file) deinterleave if the
+    // rate/chain/filter combination is unsupported.
+    dsd::validate(static_cast<int>(dsd_sample_rate), dsd_opt);
 
     // Deinterleave DSD blocks
     size_t total_dsd_blocks = dsd_data_size / (block_size_per_ch * n_channels);
@@ -865,14 +866,21 @@ inline AudioData decode_dsf(const std::vector<uint8_t>& buf,
     ad.channels.resize(n_channels);
     {
         std::vector<std::thread> ch_threads;
+        std::vector<std::exception_ptr> ch_err(n_channels);
         for (uint32_t c = 0; c < n_channels; ++c) {
             ch_threads.emplace_back([&, c]() {
-                ad.channels[c] = dsd::decimate_channel(
-                    ch_dsd[c], static_cast<size_t>(total_dsd_samples_per_ch),
-                    decimation, true /* LSB first in DSF */, mode);
+                try {
+                    ad.channels[c] = dsd::decimate_channel(
+                        ch_dsd[c], static_cast<size_t>(total_dsd_samples_per_ch),
+                        static_cast<int>(dsd_sample_rate),
+                        true /* LSB first in DSF */, dsd_opt);
+                } catch (...) {
+                    ch_err[c] = std::current_exception();
+                }
             });
         }
         for (auto& t : ch_threads) t.join();
+        for (auto& e : ch_err) if (e) std::rethrow_exception(e);
     }
 
     ch_dsd.clear();
@@ -886,7 +894,7 @@ inline AudioData decode_dsf(const std::vector<uint8_t>& buf,
 // ════════════════════════════════════════════════════════════════════════════
 
 inline AudioData decode_dff(const std::vector<uint8_t>& buf,
-                            dsd::Mode mode = dsd::Mode::Direct) {
+                            const dsd::Options& dsd_opt = {}) {
     if (buf.size() < 16 || std::memcmp(buf.data(), "FRM8", 4) != 0)
         throw std::runtime_error("DFF: invalid header");
     if (std::memcmp(buf.data() + 12, "DSD ", 4) != 0)
@@ -930,11 +938,11 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf,
     if (!dsd_data || n_channels == 0 || dsd_sample_rate == 0)
         throw std::runtime_error("DFF: incomplete header");
 
-    uint32_t pcm_rate = 352800;
-    int decimation = static_cast<int>(dsd_sample_rate / pcm_rate);
-    if (decimation < 1) decimation = 1;
+    ad.sample_rate = static_cast<uint32_t>(dsd_opt.out_rate);
 
-    ad.sample_rate = pcm_rate;
+    // Fail fast (on this thread) before the O(file) deinterleave if the
+    // rate/chain/filter combination is unsupported.
+    dsd::validate(static_cast<int>(dsd_sample_rate), dsd_opt);
 
     size_t total_bytes_per_ch = dsd_data_size / n_channels;
     size_t total_bits_per_ch = total_bytes_per_ch * 8;
@@ -952,14 +960,21 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf,
     ad.channels.resize(n_channels);
     {
         std::vector<std::thread> ch_threads;
+        std::vector<std::exception_ptr> ch_err(n_channels);
         for (uint32_t c = 0; c < n_channels; ++c) {
             ch_threads.emplace_back([&, c]() {
-                ad.channels[c] = dsd::decimate_channel(
-                    ch_dsd[c], total_bits_per_ch,
-                    decimation, false /* MSB first in DFF */, mode);
+                try {
+                    ad.channels[c] = dsd::decimate_channel(
+                        ch_dsd[c], total_bits_per_ch,
+                        static_cast<int>(dsd_sample_rate),
+                        false /* MSB first in DFF */, dsd_opt);
+                } catch (...) {
+                    ch_err[c] = std::current_exception();
+                }
             });
         }
         for (auto& t : ch_threads) t.join();
+        for (auto& e : ch_err) if (e) std::rethrow_exception(e);
     }
 
     ch_dsd.clear();
@@ -1005,7 +1020,7 @@ inline bool is_supported_format(const std::string& path) {
 }
 
 inline AudioData decode_file(const std::string& path,
-                             dsd::Mode dsd_mode = dsd::Mode::Direct) {
+                             const dsd::Options& dsd_opt = {}) {
     auto ext = get_extension(path);
 
 #ifdef CRETE_HAS_FFMPEG
@@ -1025,9 +1040,9 @@ inline AudioData decode_file(const std::string& path,
     else if (ext == ".flac")
         return decode_flac(buf);
     else if (ext == ".dsf")
-        return decode_dsf(buf, dsd_mode);
+        return decode_dsf(buf, dsd_opt);
     else if (ext == ".dff")
-        return decode_dff(buf, dsd_mode);
+        return decode_dff(buf, dsd_opt);
     else
         throw std::runtime_error("Unsupported format: " + ext);
 }

@@ -1,11 +1,19 @@
 crete
 crete-gui
 crete-ffmpeg
+dsd2wav
+dsd2wav.exe
 build/
-third_party/
+# Ignore third_party contents (imgui, nlohmann, ffmpeg — all fetched on demand)...
+third_party/*
+# ...except the vendored DSD decode engine, which is core (committed, not fetched).
+!third_party/libdsddpcm/
 *.o
 run_tests.sh
 test_results/
 run_tests.py
 .DS_Store
 scripts/.DS_Store
+CRETE_PENDING.md
+CRETE_FORENSICS.md
+CLAUDE.md

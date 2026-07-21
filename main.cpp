@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iomanip>
@@ -42,17 +43,17 @@ extern "C" {
 
 // ── Version info ───────────────────────────────────────────────────────────
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.1.0"
+#define CRETE_VERSION "0.9.0"
 #endif
 
 static constexpr const char* PROGRAM_NAME    = "crête";
 static constexpr const char* PROGRAM_BIN     = "crete";
 static constexpr const char* PROGRAM_VERSION = CRETE_VERSION;
 
-// DSD decimation chain in effect for this run. Set once from --dsd-mode in
-// main(); read by print_json() so a JSON result always records which chain
-// produced its numbers (direct and multistage disagree by >4 dB on peak).
-static dsd::Mode g_dsd_mode = dsd::Mode::Direct;
+// DSD decode options in effect for this run (chain / final-stage filter /
+// output rate). Set once from --dsd-* flags in main(); read by print_json() so
+// a JSON result always records how its DSD numbers were produced.
+static dsd::Options g_dsd_opt;
 static constexpr const char* PROGRAM_DESC    = "TT Dynamic Range Meter (zero-dependency)";
 
 namespace fs = std::filesystem;
@@ -624,8 +625,11 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         j["channels"] = first.channels;
         j["bit_depth"] = first.bit_depth;
         j["codec"] = first.codec;
-        if (first.codec == "DSD")
-            j["dsd_mode"] = dsd::mode_name(g_dsd_mode);
+        if (first.codec == "DSD") {
+            j["dsd_mode"]     = dsd::mode_name(g_dsd_opt.mode);
+            j["dsd_filter"]   = dsd::filter_name(g_dsd_opt.filter);
+            j["dsd_out_rate"] = g_dsd_opt.out_rate;
+        }
     }
 
     json jtracks = json::array();
@@ -706,11 +710,14 @@ void print_usage(const char* argv0) {
               << "      json   — machine-readable JSON (all metrics)\n"
 #endif
               << "  -o, --output <file>            Write output to file\n"
-              << "  --dsd-mode <direct|multistage> DSD decimation chain (default: direct)\n"
-              << "      direct     — fir1_64 (641-tap). Brickwall; matches analytic\n"
-              << "                   truth. The measurement-grade path.\n"
-              << "      multistage — fir1_8/fir1_16 + 2:1 PCM stages. Wide passband\n"
-              << "                   admits DSD\'s ultrasonic noise floor; inflates peak.\n"
+              << "  --dsd-mode <direct|multistage> DSD decimation chain (default: multistage)\n"
+              << "      multistage — brickwall at Nyquist (measurement-grade). Works for\n"
+              << "                   DSD64/128/256 at every output rate.\n"
+              << "      direct     — single wide FIR, gentle ~30 kHz corner. DSD64 ->\n"
+              << "                   44100 only (libdsddpcm restriction).\n"
+              << "  --dsd-filter <default|firls|kaiser>  Final-stage filter (default: default)\n"
+              << "                   Honoured only at --dsd-out-rate 44100; ignored otherwise.\n"
+              << "  --dsd-out-rate <44100|88200|176400|352800>  DSD output rate (default: 44100)\n"
               << "  -q, --quiet                    Suppress progress output\n"
               << "  -v, --version                  Show version\n"
               << "  -h, --help                     Show this help\n\n"
@@ -732,13 +739,20 @@ void print_version() {
 #endif
               << "\n"
               << "Built: " << __DATE__ << " " << __TIME__ << "\n"
-              << "DSD chains (to 352.8 kHz), after foo_input_sacd 2.0.24:\n"
-              << "  DSD64  direct     " << dsd::describe_chain(dsd::Mode::Direct, 8) << "\n"
-              << "  DSD64  multistage " << dsd::describe_chain(dsd::Mode::Multistage, 8) << "\n"
-              << "  DSD128 direct     " << dsd::describe_chain(dsd::Mode::Direct, 16) << "\n"
-              << "  DSD128 multistage " << dsd::describe_chain(dsd::Mode::Multistage, 16) << "\n"
-              << "  DSD256 direct     " << dsd::describe_chain(dsd::Mode::Direct, 32) << "\n"
-              << "  DSD256 multistage " << dsd::describe_chain(dsd::Mode::Multistage, 32) << "\n";
+              << "DSD engine: libdsddpcm " << dsddpcm_version_string()
+              << " (BSD-2-Clause, vendored)\n"
+              << "DSD chains to " << g_dsd_opt.out_rate << " Hz (filter: "
+              << dsd::filter_name(g_dsd_opt.filter) << "):\n";
+    const int rates[3]     = { 2822400, 5644800, 11289600 };
+    const char* labels[3]  = { "DSD64 ", "DSD128", "DSD256" };
+    for (int i = 0; i < 3; ++i) {
+        dsd::Options direct = g_dsd_opt; direct.mode = dsd::Mode::Direct;
+        dsd::Options multi  = g_dsd_opt; multi.mode  = dsd::Mode::Multistage;
+        std::cout << "  " << labels[i] << " direct     "
+                  << dsd::describe_chain(direct, rates[i]) << "\n"
+                  << "  " << labels[i] << " multistage "
+                  << dsd::describe_chain(multi, rates[i]) << "\n";
+    }
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
@@ -750,7 +764,6 @@ int main(int argc, char* argv[]) {
 
     OutputFormat format = OutputFormat::Standard;
     std::string output_file;
-    dsd::Mode dsd_mode = dsd::Mode::Direct;
     bool quiet = false;
     std::vector<std::string> paths;
 
@@ -786,12 +799,25 @@ int main(int argc, char* argv[]) {
             }
         } else if (arg == "--dsd-mode" && i+1 < argc) {
             try {
-                dsd_mode = dsd::mode_from_string(argv[++i]);
-                g_dsd_mode = dsd_mode;
+                g_dsd_opt.mode = dsd::mode_from_string(argv[++i]);
             } catch (const std::exception& e) {
                 std::cerr << "Error: " << e.what() << "\n";
                 return 1;
             }
+        } else if (arg == "--dsd-filter" && i+1 < argc) {
+            try {
+                g_dsd_opt.filter = dsd::filter_from_string(argv[++i]);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << "\n";
+                return 1;
+            }
+        } else if (arg == "--dsd-out-rate" && i+1 < argc) {
+            int r = std::atoi(argv[++i]);
+            if (!dsd::is_valid_out_rate(r)) {
+                std::cerr << "Error: --dsd-out-rate must be 44100, 88200, 176400, or 352800\n";
+                return 1;
+            }
+            g_dsd_opt.out_rate = r;
         } else if ((arg == "-o" || arg == "--output") && i+1 < argc) {
             output_file = argv[++i];
         } else {
@@ -833,7 +859,7 @@ int main(int argc, char* argv[]) {
             std::string ext_str  = fs::path(g.audio_path).extension().string();
 
             try {
-                auto ad = audio::decode_file(g.audio_path, dsd_mode);
+                auto ad = audio::decode_file(g.audio_path, g_dsd_opt);
 
                 if (g.sheet.tracks.empty()) {
                     ++done;

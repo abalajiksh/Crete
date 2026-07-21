@@ -1,0 +1,8 @@
+Vendored from https://codeberg.org/abksh/libdsddpcm
+Release: v0.1.0
+Commit:  5876ee7241ac9f5eb503815f00e5b141128a04bd
+License: BSD-2-Clause (see LICENSE)
+
+Contents: include/dsddpcm.h, src/dsddpcm.c, src/dsddpcm_tables.h
+Built directly into crête (compiled as a C object, statically linked).
+Do not edit in place — update by re-vendoring the upstream tag.

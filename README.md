@@ -2,11 +2,11 @@
 
 Zero-dependency C++17 dynamic range meter. The name is French for *peak* / *crest* — the origin of the audio term *crest factor*.
 
-Measures **TT Dynamic Range** (Pleasurize Music Foundation algorithm), **EBU R128 integrated loudness**, **true peak** (4× polyphase FIR), **PLR**, **PSR**, **LRA**, **crest factor**, and per-channel variants for lossless audio files. PCM output is compatible with [dr.loudness-war.info](http://dr.loudness-war.info/) submission format; DSD is decimated with the exact filter chains of the foobar2000 SACD plugin, in either **Direct** or **Multistage** mode.
+Measures **TT Dynamic Range** (Pleasurize Music Foundation algorithm), **EBU R128 integrated loudness**, **true peak** (4× polyphase FIR), **PLR**, **PSR**, **LRA**, **crest factor**, and per-channel variants for lossless audio files. PCM output is compatible with [dr.loudness-war.info](http://dr.loudness-war.info/) submission format; DSD is decimated by the vendored, BSD-2-Clause **[libdsddpcm](https://codeberg.org/abksh/libdsddpcm)** kernel — a clean-room linear-phase, unity-DC decoder — with selectable **chain** (Direct / Multistage), **filter**, and **output rate**.
 
 The default build has **zero dependencies**. An optional third build tier statically links a compact, LGPL-only FFmpeg to add lossy/ALAC decode support — see below.
 
-**Current version: 0.8.1**
+**Current version: 0.9.0**
 
 ---
 
@@ -25,7 +25,7 @@ Three CLI build tiers, one GUI:
 
 ```bash
 make                    # optimized build, no JSON output
-make VERSION=0.8.1      # custom version stamp
+make VERSION=0.9.0      # custom version stamp
 make debug              # debug build with sanitizers
 make install            # install to /usr/local/bin
 ```
@@ -75,7 +75,7 @@ make debug-gui          # GUI with sanitizers
 
 The GUI binary is `crete-gui`. It supports drag-and-drop, native file/folder dialogs, sortable results, color-coded DR values, and saves a log next to the analysed folder.
 
-> **Note:** the GUI does not currently expose `--dsd-mode` and always analyses DSD in **Direct** mode. See *Pending work*.
+> **Note:** the GUI does not currently expose the `--dsd-*` options and analyses DSD with the defaults (**multistage**, `default` filter, **44.1 kHz**). See *Pending work*.
 
 ---
 
@@ -93,15 +93,17 @@ crete -f json /path/to/album/          # cli-json builds only
 crete -o dr_log.txt /path/to/album/
 crete -q /path/to/album/               # suppress progress, useful in CI
 
-crete --dsd-mode direct     /path/to/dsd/     # default
-crete --dsd-mode multistage /path/to/dsd/
+crete --dsd-mode multistage /path/to/dsd/           # default chain (measurement-grade)
+crete --dsd-mode direct     /path/to/dsd/           # DSD64 -> 44.1 kHz only
+crete --dsd-filter kaiser   /path/to/dsd/           # final-stage filter (44.1 kHz out only)
+crete --dsd-out-rate 352800 /path/to/dsd/           # 44100 (default) |88200|176400|352800
 
 crete-ffmpeg /path/to/album/           # cli-json-ffmpeg build: adds ALAC/MP3/AAC/Opus
 ```
 
-`--dsd-mode` selects the DSD→PCM decimation chain (see *DSD decimation* below). It has no effect on PCM formats. `crete --version` prints the resolved filter chain for each DSD rate.
+`--dsd-mode` (chain), `--dsd-filter` (final-stage filter), and `--dsd-out-rate` select the DSD→PCM decode; none affect PCM formats. `crete --version` prints the resolved chain, decimation, tap count, and group delay for each DSD rate at the current settings. See *DSD decimation* below for the support matrix.
 
-In `-f json`, DSD tracks carry a `"dsd_mode"` field recording which chain produced the numbers. The two modes differ by **2–3 dB on peak and RMS**, so an unlabelled DSD result is not interpretable.
+In `-f json`, DSD tracks carry `"dsd_mode"`, `"dsd_filter"`, and `"dsd_out_rate"` fields recording exactly how the numbers were produced — an unlabelled DSD result is not interpretable.
 
 ### GUI
 
@@ -122,8 +124,8 @@ Browse for a file or folder (or drag-and-drop), pick an output format, click Ana
 | WAV           | `.wav`             | PCM 8/16/24/32-bit, IEEE float 32/64-bit, `WAVE_FORMAT_EXTENSIBLE`     |
 | AIFF / AIFF-C | `.aif`, `.aiff`    | Standard big-endian; AIFF-C uncompressed (`NONE`) and `sowt` little-endian |
 | FLAC          | `.flac`            | Built-in decoder — no libFLAC dependency                                |
-| DSD (DSF)     | `.dsf`             | Sony format, LSB-first. Decimated to 352.8 kHz PCM                      |
-| DSD (DFF)     | `.dff`             | Philips DSDIFF, MSB-first. Same decimation chains as DSF                |
+| DSD (DSF)     | `.dsf`             | Sony format, LSB-first. Decimated via libdsddpcm (default 44.1 kHz, `--dsd-out-rate`) |
+| DSD (DFF)     | `.dff`             | Philips DSDIFF, MSB-first. Same decode engine as DSF                    |
 | Cue sheet     | `.cue`             | Splits a monolithic file into per-track results — see below             |
 
 ### FFmpeg decoders (`crete-ffmpeg` builds only)
@@ -149,7 +151,7 @@ Each track is reported as `NN - Title.ext` (e.g. `01 - What A Shame.dff`), match
 
 Track times are stored internally as CDDA frames (1/75 sec) and converted to PCM samples at the actual decoded rate, so the same cue works for 44.1 kHz WAV and 352.8 kHz DSD-decoded PCM without rounding loss (every standard rate is divisible by 75).
 
-> **Memory note.** A monolithic 60-minute DSD64 album decodes to ~21 GB of float64 PCM at 352.8 kHz before slicing. Cue-sliced analysis adds one slice (~1.7 GB) and the analyser's working set (~2× the slice) on top. Plan accordingly on memory-constrained hosts.
+> **Memory note.** At the default 44.1 kHz DSD output a monolithic 60-minute DSD64 album decodes to ~2.6 GB of float64 PCM before slicing; at `--dsd-out-rate 352800` that rises 8× to ~21 GB. Cue-sliced analysis adds one slice plus the analyser's working set (~2× the slice) on top. Plan accordingly on memory-constrained hosts.
 
 ---
 
@@ -238,48 +240,37 @@ PLR uses `min(max_true_peak, 0) − LUFSi` to match MAAT's clamp behavior on ove
 
 ## DSD decimation
 
-DSD bitstreams are decimated to **352.8 kHz** PCM using the filter chains of the foobar2000 SACD plugin (`foo_input_sacd` v2.0.24, `libdsdpcm`). Both of the plugin's modes are implemented and selectable with `--dsd-mode`.
+DSD bitstreams are decimated to PCM by **[libdsddpcm](https://codeberg.org/abksh/libdsddpcm) v0.1.0**, vendored under `third_party/libdsddpcm/` and statically linked. It is a clean-room, BSD-2-Clause kernel: linear-phase FIR only (constant group delay), **unity DC gain** (the +6 dB SACD makeup gain is *not* applied). crête keeps its own DSF/DFF container parsing and its one-thread-per-channel decode.
 
-### The two modes
+> **This replaces the former `dsd_lut.hpp`** (LGPL, transcribed from foobar's `foo_input_sacd`). DSD numbers **change** versus crête ≤ 0.8.1 — different clean-room filters and a different default output rate — so DSD reference baselines must be regenerated.
 
-| Mode | Stage 1 | Post-stages |
-|------|---------|-------------|
-| **`direct`** (default) | `fir1_64` — **641 taps** — decimation = ratio | 2:1 PCM halving if ratio > 32 |
-| **`multistage`** | `fir1_8` (80 taps) ÷8, or `fir1_16` (160 taps) ÷16 when ratio > 32 | 2:1 PCM halving (`fir2_2` 27-tap, `fir3_2` 151-tap) |
+### Three axes: chain, filter, output rate
 
-Resolved chains to 352.8 kHz:
+- **`--dsd-out-rate`** — `44100` (default) | `88200` | `176400` | `352800`.
+- **`--dsd-mode`** (chain):
+  - **`multistage`** (default) — LUT decimation to 8fs then a halving cascade; brickwall at Nyquist at 44.1 kHz output. **The measurement-grade path**, valid for DSD64/128/256 at every output rate.
+  - **`direct`** — a single wide FIR with a gentle ~30 kHz corner (passes an attenuated top octave). **DSD64 → 44100 only** (a libdsddpcm restriction); unsupported at any other rate.
+- **`--dsd-filter`** — the ranked final 88.2→44.1 kHz stage, honoured **only at 44100 Hz output** (higher rates accept `default` only):
 
-| Source | ratio | Direct | Multistage |
-|--------|-------|--------|------------|
-| DSD64 | 8 | `fir1_64/8` | `fir1_8/8` |
-| DSD128 | 16 | `fir1_64/16` | `fir1_8/8 → fir3_2/2` |
-| DSD256 | 32 | `fir1_64/32` | `fir1_8/8 → fir2_2/2 → fir3_2/2` |
-| DSD512 | 64 | `fir1_64/32 → fir3_2/2` | `fir1_16/16 → fir2_2/2 → fir3_2/2` |
+  | Filter | Design | Taps | Notes |
+  |--------|--------|------|-------|
+  | `default` | equiripple (Parks–McClellan) | 383 | golden default, ~154 dB stopband |
+  | `firls` | least-squares | 767 | cross-method check |
+  | `kaiser` | Kaiser window (α≈150) | 4095 | reference/maximum decode, higher latency |
 
-**Direct does not use `fir1_8` or `fir1_16`.** Those belong exclusively to Multistage. (crête ≤ 0.7.x had this backwards: its `fir1_8 ÷8` path was labelled "Direct" but is in fact foobar's Multistage, and its DSD128 path — `fir1_16 ÷16` — matched *neither* mode.)
+### Support matrix
 
-### Which mode to use
+| | 44100 | 88200 / 176400 / 352800 |
+|--|-------|--------------------------|
+| **multistage** | DSD64/128/256, any filter | DSD64/128/256, `default` filter only |
+| **direct** | DSD64 only, `default` only | unsupported |
 
-**Direct is the measurement-grade path** and the default. Its 641-tap brickwall removes DSD's shaped ultrasonic noise floor; on a synthetic 997 Hz sine it reproduces analytic RMS to **0.000 dB** at every level tested.
-
-Multistage's 80-tap `fir1_8` has a passband extending well past 20 kHz, so part of DSD's rising noise floor enters the measurement. On the same synthetic sine it overstates **peak** by +0.78 dB at −6 dBFS and **+4.19 dB at −20 dBFS** — the error grows as the signal gets quieter. On real material (I Robot, DSD64) Multistage reads ~2.5 dB hot on both peak and RMS versus Direct.
-
-Multistage is provided because it is what foobar produces in that mode, and because DACs that resample internally are closer to it than to Direct. It is not the right choice for measurement.
-
-### Output rates
-
-Output rate is always `dsd_rate / 2ⁿ` with `n ≥ 3`. **384 kHz and 768 kHz are not reachable** — the plugin's rational resampler was removed upstream in v2.0.12, and `foo_input_sacd` 2.0.24 reports `Samplerate: 352800 Hz` in *both* Direct and Multistage. Any DSD reference log showing 384/768 kHz came from an older plugin build.
-
-### Engine
-
-A byte-LUT engine (`dsd_lut.hpp`) replaces per-bit FIR convolution with precomputed 256-entry lookup tables — roughly 8× faster than the naive implementation, one thread per channel. FIR history is primed with `0x69` (DSD silence) and the group delay is **not** compensated, matching upstream exactly.
+**DSD512 and above are not supported** (the library's input enum tops out at DSD256); such files are rejected with a clear error. Unsupported chain/filter/rate combinations fail fast with an explanatory message. `crete --version` prints the resolved chain, decimation, tap count, and group delay for the current settings.
 
 ### Validation
 
-- **Decimation:** bit-exact against a direct ring-buffer transcription of `foo_input_sacd`, across both modes × 8 rate combinations (`dsd_xcheck`).
-- **Metrics:** against foobar2000 DR Meter v1.0.8 on I Robot (DSD64), both modes — sample peak **exact** on all 10 tracks, RMS ≤ 0.05 dB, track DR **20/20**, album DR **2/2**.
-- **DSD64 suite** (Café Blue, I Robot, Thriller, DSOTM): 4/4 albums pass, `DR (PMF)` max Δ **0.00**, SPPM max Δ **0.00** over 35 comparisons.
-- **DSD128 suite** (Boney M. ×2): 2/2 pass.
+- **Round-trip:** crête on a `.dsf` and crête on the WAV `dsd2wav` exports from it agree exactly (both go through the same libdsddpcm decode).
+- libdsddpcm ships its own clean-room validation (see its repo); crête's own DSD reference suites (formerly foobar-parity at 352.8 kHz) are **pending regeneration** against this engine — see `CRETE_PENDING.md`.
 
 ---
 
@@ -329,7 +320,7 @@ Caveats, by design:
 
 ### Code
 
-- **GUI does not expose `--dsd-mode`** — `crete-gui` always analyses DSD in Direct mode.
+- **GUI does not expose the `--dsd-*` options** — `crete-gui` analyses DSD with the defaults (multistage / `default` filter / 44.1 kHz).
 - `audio_ffmpeg.hpp` header comment still describes the old "foobar Direct = `fir1_8`/`fir1_16`" model; the routing logic is correct, the comment is not.
 - `nlohmann/json` version split: MinIO seeds v3.12.0, the Makefile pins v3.11.3.
 - Round-trip guard: crête on a `.dsf` and crête on the WAV exported from it must agree (measured 2.9e-8, float32 mantissa). Not yet a pytest case.
@@ -358,12 +349,15 @@ gui_main.cpp              GUI entry point (Dear ImGui + SDL2 + OpenGL)
 analysis.hpp              TT DR, EBU R128, true peak, PLR/PSR/LRA, crest factor
 audio.hpp                 WAV, AIFF/AIFF-C, FLAC, DSF, DFF decoders + FFmpeg routing
 audio_ffmpeg.hpp          FFmpeg decode backend (guarded by CRETE_HAS_FFMPEG)
-dsd_lut.hpp               Byte-LUT FIR engine + Direct/Multistage decimation chains
+dsd_decode.hpp            DSD decode front-end over libdsddpcm (chain/filter/rate)
+dsd_lut.hpp.bak           Retired LGPL byte-LUT engine (dormant, not built)
+dsd2wav.cpp               DSD -> WAV exporter (make dsd2wav); mirrors --dsd-* flags
 cue.hpp                   Zero-dependency cue sheet parser
 file_dialog.hpp           Portable native file/folder dialogs (Linux/macOS/Windows)
-Makefile                  Build system (cli / cli-json / cli-json-ffmpeg / gui / all)
+Makefile                  Build system (cli / cli-json / cli-json-ffmpeg / gui / dsd2wav)
 build_ffmpeg_compact.sh   One-time compact static FFmpeg build (LGPL-only, decode-only)
-third_party/              Dear ImGui, nlohmann/json (fetched on demand)
+third_party/libdsddpcm/   Vendored BSD-2-Clause DSD decode kernel (committed, compiled in)
+third_party/              Dear ImGui, nlohmann/json, compact FFmpeg (fetched on demand)
 ```
 
 `analysis.hpp` and `audio.hpp` are deliberately monolithic — single-translation-unit builds keep the CLI dependency-free and the build trivially reproducible across distros. `audio_ffmpeg.hpp` compiles to nothing unless `CRETE_HAS_FFMPEG` is defined by an FFmpeg build tier.
@@ -374,8 +368,6 @@ third_party/              Dear ImGui, nlohmann/json (fetched on demand)
 
 MIT License — Ashwin Balaji 2026.
 
-**Except `dsd_lut.hpp`.** Its coefficient tables (`fir1_8`, `fir1_16`, `fir1_64`, `fir2_2`, `fir3_2`) and its decimation-chain topology are derived from `libdsdpcm` in Maxim V. Anisiutkin's foobar2000 Super Audio CD Decoder plugin, which is **LGPL-2.1-or-later**. That file inherits LGPL-2.1.
-
-> The scope of this grew in v0.8.1: earlier versions used only the two DSD FIR tables, whereas the Direct/Multistage implementation also transcribes the 641-tap filter, the PCM halving stages, and the chain-selection logic. If crête's licensing is to remain cleanly MIT, the DSD path needs to be either relicensed or separated. This is an open decision, not a settled one.
+**DSD decode** is provided by the vendored **libdsddpcm** (`third_party/libdsddpcm/`, release v0.1.0), which is **BSD-2-Clause** — a clean-room implementation that shares no code with the LGPL `foo_input_sacd` oracle used only offline for validation. Its license text ships at `third_party/libdsddpcm/LICENSE`. This replaces the former `dsd_lut.hpp` (LGPL-2.1, transcribed from foobar's `libdsdpcm`), which is retired to `dsd_lut.hpp.bak` and is no longer built. crête's licensing is therefore now cleanly **MIT + BSD-2-Clause**.
 
 `crete-ffmpeg` builds statically link a compact FFmpeg configured LGPL-only (decode-only, no GPL or nonfree components); FFmpeg is used under LGPL 2.1+.

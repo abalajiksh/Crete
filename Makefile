@@ -41,14 +41,24 @@
 # ── Toolchain ───────────────────────────────────────────────────────────────
 CROSS     ?=
 CXX        = $(CROSS)g++
+CC         = $(CROSS)gcc
 CXXFLAGS   = -std=c++17 -Wall -Wextra -Wpedantic
+CFLAGS     = -std=c99 -O2 -Wall -Wextra
 LDFLAGS    =
 
-VERSION   ?= 0.8.1
+VERSION   ?= 0.9.0
 CXXFLAGS  += -DCRETE_VERSION='"$(VERSION)"'
 
 PREFIX    ?= /usr/local
 BUILD_DIR  = build
+
+# ── Vendored libdsddpcm (DSD -> PCM decode kernel, BSD-2-Clause) ─────────────
+# Committed under third_party/ (see .gitignore), compiled as a C object and
+# statically linked into every crête binary — keeps the single self-contained
+# executable. This is crête's sole DSD engine (dsd_lut.hpp is retired).
+LIBDSDDPCM_DIR = third_party/libdsddpcm
+LIBDSDDPCM_OBJ = $(BUILD_DIR)/dsddpcm.o
+CXXFLAGS      += -I$(LIBDSDDPCM_DIR)/include
 
 # ── Platform detection ──────────────────────────────────────────────────────
 UNAME_S := $(shell uname -s 2>/dev/null || echo Unknown)
@@ -102,7 +112,8 @@ CLI_TARGET = crete$(EXE_EXT)
 # FFmpeg tiers emit a distinctly-named binary so the in-house decoder (crete)
 # and the FFmpeg-enabled decoder (crete-ffmpeg) never overwrite each other.
 FFMPEG_TARGET = crete-ffmpeg$(EXE_EXT)
-CLI_HEADERS = analysis.hpp audio.hpp dsd_lut.hpp cue.hpp
+CLI_HEADERS = analysis.hpp audio.hpp dsd_decode.hpp cue.hpp \
+              $(LIBDSDDPCM_DIR)/include/dsddpcm.h
 
 # ── GUI target ──────────────────────────────────────────────────────────────
 IMGUI_DIR  = third_party/imgui
@@ -140,8 +151,8 @@ debug: CXXFLAGS += -O0 -g -fsanitize=address,undefined
 debug: LDFLAGS  += -fsanitize=address,undefined
 debug: $(CLI_TARGET)
 
-$(CLI_TARGET): $(CLI_SRC) $(CLI_HEADERS)
-	$(CXX) $(CXXFLAGS) -o $@ $(CLI_SRC) $(LDFLAGS) $(CLI_LDFLAGS)
+$(CLI_TARGET): $(CLI_SRC) $(CLI_HEADERS) $(LIBDSDDPCM_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $(CLI_SRC) $(LIBDSDDPCM_OBJ) $(LDFLAGS) $(CLI_LDFLAGS)
 
 # ── CLI builds with JSON (auto-fetches nlohmann/json) ───────────────────────
 release-json: CXXFLAGS += -O2 -DNDEBUG -DCRETE_HAS_JSON -I third_party
@@ -154,8 +165,8 @@ debug-json: $(CLI_TARGET)-json
 # Alias: "make cli-json" → "make release-json"
 cli-json: release-json
 
-$(CLI_TARGET)-json: $(CLI_SRC) $(CLI_HEADERS) $(NLOHMANN_HEADER)
-	$(CXX) $(CXXFLAGS) -o $(CLI_TARGET) $(CLI_SRC) $(LDFLAGS) $(CLI_LDFLAGS)
+$(CLI_TARGET)-json: $(CLI_SRC) $(CLI_HEADERS) $(NLOHMANN_HEADER) $(LIBDSDDPCM_OBJ)
+	$(CXX) $(CXXFLAGS) -o $(CLI_TARGET) $(CLI_SRC) $(LIBDSDDPCM_OBJ) $(LDFLAGS) $(CLI_LDFLAGS)
 
 # ── Fetch nlohmann/json header ──────────────────────────────────────────────
 $(NLOHMANN_HEADER):
@@ -172,13 +183,26 @@ debug-gui: GUI_CXXFLAGS += -O0 -g -fsanitize=address,undefined
 debug-gui: GUI_LDFLAGS  += -fsanitize=address,undefined
 debug-gui: $(GUI_TARGET)
 
-$(GUI_TARGET): $(GUI_SRC) $(IMGUI_OBJS) analysis.hpp audio.hpp file_dialog.hpp
-	$(CXX) $(GUI_CXXFLAGS) -o $@ $(GUI_SRC) $(IMGUI_OBJS) $(GUI_LDFLAGS)
+$(GUI_TARGET): $(GUI_SRC) $(IMGUI_OBJS) analysis.hpp audio.hpp dsd_decode.hpp file_dialog.hpp $(LIBDSDDPCM_OBJ)
+	$(CXX) $(GUI_CXXFLAGS) -o $@ $(GUI_SRC) $(IMGUI_OBJS) $(LIBDSDDPCM_OBJ) $(GUI_LDFLAGS)
 
 # ── ImGui object files ──────────────────────────────────────────────────────
 $(BUILD_DIR)/%.o: $(IMGUI_DIR)/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(GUI_CXXFLAGS) -c -o $@ $<
+
+# ── Vendored libdsddpcm object (C99, build-config-independent) ───────────────
+$(LIBDSDDPCM_OBJ): $(LIBDSDDPCM_DIR)/src/dsddpcm.c \
+                   $(LIBDSDDPCM_DIR)/src/dsddpcm_tables.h \
+                   $(LIBDSDDPCM_DIR)/include/dsddpcm.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(LIBDSDDPCM_DIR)/include -c -o $@ $<
+
+# ── dsd2wav (reference-generation tool: DSD -> WAV via crête's decimation) ────
+# File target (not phony): `make dsd2wav` on POSIX, `make dsd2wav.exe` on Windows.
+DSD2WAV_TARGET = dsd2wav$(EXE_EXT)
+$(DSD2WAV_TARGET): dsd2wav.cpp audio.hpp dsd_decode.hpp $(LIBDSDDPCM_OBJ)
+	$(CXX) $(CXXFLAGS) -O2 -DNDEBUG -o $@ dsd2wav.cpp $(LIBDSDDPCM_OBJ) $(LDFLAGS) $(CLI_LDFLAGS)
 
 # ── Install ─────────────────────────────────────────────────────────────────
 install: release
@@ -192,7 +216,8 @@ install-gui: gui
 
 # ── Clean ───────────────────────────────────────────────────────────────────
 clean:
-	rm -f crete crete.exe crete-gui crete-gui.exe crete-ffmpeg crete-ffmpeg.exe
+	rm -f crete crete.exe crete-gui crete-gui.exe crete-ffmpeg crete-ffmpeg.exe \
+	      dsd2wav dsd2wav.exe
 	rm -rf $(BUILD_DIR)
 
 distclean: clean
@@ -251,9 +276,9 @@ debug-ffmpeg: $(CLI_TARGET)-ffmpeg
 
 cli-ffmpeg: release-ffmpeg
 
-$(CLI_TARGET)-ffmpeg: $(CLI_SRC) $(CLI_HEADERS) audio_ffmpeg.hpp
+$(CLI_TARGET)-ffmpeg: $(CLI_SRC) $(CLI_HEADERS) audio_ffmpeg.hpp $(LIBDSDDPCM_OBJ)
 	@$(FFMPEG_PRECHECK)
-	$(CXX) $(CXXFLAGS) -o $(FFMPEG_TARGET) $(CLI_SRC) $(LDFLAGS) $(CLI_LDFLAGS)
+	$(CXX) $(CXXFLAGS) -o $(FFMPEG_TARGET) $(CLI_SRC) $(LIBDSDDPCM_OBJ) $(LDFLAGS) $(CLI_LDFLAGS)
 
 # ── CLI + JSON + FFmpeg (for the pytest harness) ────────────────────────────
 release-json-ffmpeg: CXXFLAGS += -O2 -DNDEBUG -DCRETE_HAS_JSON -I third_party -DCRETE_HAS_FFMPEG $(FFMPEG_CFLAGS)
@@ -266,9 +291,9 @@ debug-json-ffmpeg: $(CLI_TARGET)-json-ffmpeg
 
 cli-json-ffmpeg: release-json-ffmpeg
 
-$(CLI_TARGET)-json-ffmpeg: $(CLI_SRC) $(CLI_HEADERS) audio_ffmpeg.hpp $(NLOHMANN_HEADER)
+$(CLI_TARGET)-json-ffmpeg: $(CLI_SRC) $(CLI_HEADERS) audio_ffmpeg.hpp $(NLOHMANN_HEADER) $(LIBDSDDPCM_OBJ)
 	@$(FFMPEG_PRECHECK)
-	$(CXX) $(CXXFLAGS) -o $(FFMPEG_TARGET) $(CLI_SRC) $(LDFLAGS) $(CLI_LDFLAGS)
+	$(CXX) $(CXXFLAGS) -o $(FFMPEG_TARGET) $(CLI_SRC) $(LIBDSDDPCM_OBJ) $(LDFLAGS) $(CLI_LDFLAGS)
 
 # ── Diagnose what the FFmpeg tiers resolve to (run this when a build fails) ──
 ffmpeg-info:
