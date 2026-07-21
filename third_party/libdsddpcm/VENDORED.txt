@@ -1,8 +1,12 @@
 Vendored from https://codeberg.org/abksh/libdsddpcm
-Release: v0.1.0
-Commit:  5876ee7241ac9f5eb503815f00e5b141128a04bd
+Release: v0.2.1
+Commit:  6889bc62e56c58657465c28e7bdab1540848010a
 License: BSD-2-Clause (see LICENSE)
 
 Contents: include/dsddpcm.h, src/dsddpcm.c, src/dsddpcm_tables.h
 Built directly into crête (compiled as a C object, statically linked).
 Do not edit in place — update by re-vendoring the upstream tag.
+
+Changes vs v0.1.0: adds DSD512 input support (multistage chain, fir1_64m
+stage-1). Public API/ABI otherwise unchanged (DSDDPCM_DSD512 appended to
+the dsddpcm_dsd_rate enum).

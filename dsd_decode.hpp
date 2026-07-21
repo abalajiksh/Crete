@@ -6,6 +6,7 @@
 // dsd_lut.hpp.bak). All DSD -> PCM decimation now goes through the vendored,
 // BSD-2-Clause libdsddpcm kernel (third_party/libdsddpcm, release v0.1.0),
 // which is clean-room and shares no code with the LGPL foo_input_sacd oracle.
+// (Vendored release: v0.2.1 — adds DSD512 support over the initial v0.1.0.)
 //
 // crête keeps its own container parsing (DSF/DFF) and its per-channel threading:
 // each channel is decoded through an independent channels=1 context, which is
@@ -16,11 +17,11 @@
 //   * Output rates: 44100 / 88200 / 176400 / 352800 Hz (44.1k family).
 //   * DIRECT chain: DSD64 -> 44100 only, DEFAULT filter only. Gentle ~30 kHz
 //     corner, passes an attenuated top octave. UNSUPPORTED at any other combo.
-//   * MULTISTAGE chain: DSD64/128/256 -> any of the four rates. This is the
+//   * MULTISTAGE chain: DSD64/128/256/512 -> any of the four rates. This is the
 //     measurement-grade path (brickwall at Nyquist for 44100 output).
 //   * Filter selection (default / leastsquares / kaiser) applies ONLY at 44100
 //     output (the ranked 88.2k->44.1k final stage). Higher rates: DEFAULT only.
-//   * DSD512 and above: NOT supported (input enum tops out at DSD256).
+//   * DSD1024 and above: NOT supported (input enum tops out at DSD512).
 //
 // Unsupported combinations throw a std::runtime_error explaining the constraint.
 //
@@ -90,11 +91,12 @@ inline dsddpcm_dsd_rate to_dsd_rate(int dsd_rate_hz) {
         case 64:  return DSDDPCM_DSD64;
         case 128: return DSDDPCM_DSD128;
         case 256: return DSDDPCM_DSD256;
+        case 512: return DSDDPCM_DSD512;
         default:
             throw std::runtime_error(
                 "dsd: unsupported DSD rate " + std::to_string(dsd_rate_hz) +
-                " Hz — libdsddpcm supports DSD64/128/256 only "
-                "(DSD512 and above are not available)");
+                " Hz — libdsddpcm supports DSD64/128/256/512 only "
+                "(DSD1024 and above are not available)");
     }
 }
 

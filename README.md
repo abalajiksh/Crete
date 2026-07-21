@@ -6,7 +6,7 @@ Measures **TT Dynamic Range** (Pleasurize Music Foundation algorithm), **EBU R12
 
 The default build has **zero dependencies**. An optional third build tier statically links a compact, LGPL-only FFmpeg to add lossy/ALAC decode support — see below.
 
-**Current version: 0.9.0**
+**Current version: 0.9.1**
 
 ---
 
@@ -25,7 +25,7 @@ Three CLI build tiers, one GUI:
 
 ```bash
 make                    # optimized build, no JSON output
-make VERSION=0.9.0      # custom version stamp
+make VERSION=0.9.1      # custom version stamp
 make debug              # debug build with sanitizers
 make install            # install to /usr/local/bin
 ```
@@ -240,7 +240,7 @@ PLR uses `min(max_true_peak, 0) − LUFSi` to match MAAT's clamp behavior on ove
 
 ## DSD decimation
 
-DSD bitstreams are decimated to PCM by **[libdsddpcm](https://codeberg.org/abksh/libdsddpcm) v0.1.0**, vendored under `third_party/libdsddpcm/` and statically linked. It is a clean-room, BSD-2-Clause kernel: linear-phase FIR only (constant group delay), **unity DC gain** (the +6 dB SACD makeup gain is *not* applied). crête keeps its own DSF/DFF container parsing and its one-thread-per-channel decode.
+DSD bitstreams are decimated to PCM by **[libdsddpcm](https://codeberg.org/abksh/libdsddpcm) v0.2.1**, vendored under `third_party/libdsddpcm/` and statically linked. It is a clean-room, BSD-2-Clause kernel: linear-phase FIR only (constant group delay), **unity DC gain** (the +6 dB SACD makeup gain is *not* applied). crête keeps its own DSF/DFF container parsing and its one-thread-per-channel decode.
 
 > **This replaces the former `dsd_lut.hpp`** (LGPL, transcribed from foobar's `foo_input_sacd`). DSD numbers **change** versus crête ≤ 0.8.1 — different clean-room filters and a different default output rate — so DSD reference baselines must be regenerated.
 
@@ -248,7 +248,7 @@ DSD bitstreams are decimated to PCM by **[libdsddpcm](https://codeberg.org/abksh
 
 - **`--dsd-out-rate`** — `44100` (default) | `88200` | `176400` | `352800`.
 - **`--dsd-mode`** (chain):
-  - **`multistage`** (default) — LUT decimation to 8fs then a halving cascade; brickwall at Nyquist at 44.1 kHz output. **The measurement-grade path**, valid for DSD64/128/256 at every output rate.
+  - **`multistage`** (default) — LUT decimation to 8fs then a halving cascade; brickwall at Nyquist at 44.1 kHz output. **The measurement-grade path**, valid for DSD64/128/256/512 at every output rate.
   - **`direct`** — a single wide FIR with a gentle ~30 kHz corner (passes an attenuated top octave). **DSD64 → 44100 only** (a libdsddpcm restriction); unsupported at any other rate.
 - **`--dsd-filter`** — the ranked final 88.2→44.1 kHz stage, honoured **only at 44100 Hz output** (higher rates accept `default` only):
 
@@ -262,10 +262,10 @@ DSD bitstreams are decimated to PCM by **[libdsddpcm](https://codeberg.org/abksh
 
 | | 44100 | 88200 / 176400 / 352800 |
 |--|-------|--------------------------|
-| **multistage** | DSD64/128/256, any filter | DSD64/128/256, `default` filter only |
+| **multistage** | DSD64/128/256/512, any filter | DSD64/128/256/512, `default` filter only |
 | **direct** | DSD64 only, `default` only | unsupported |
 
-**DSD512 and above are not supported** (the library's input enum tops out at DSD256); such files are rejected with a clear error. Unsupported chain/filter/rate combinations fail fast with an explanatory message. `crete --version` prints the resolved chain, decimation, tap count, and group delay for the current settings.
+**DSD1024 and above are not supported** (the library's input enum tops out at DSD512); such files are rejected with a clear error. Unsupported chain/filter/rate combinations fail fast with an explanatory message. `crete --version` prints the resolved chain, decimation, tap count, and group delay for the current settings.
 
 ### Validation
 

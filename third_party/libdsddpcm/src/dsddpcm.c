@@ -13,7 +13,8 @@
  *
  * Chains:
  *   DIRECT     = fir1_64 alone, /64 (DSD64 -> 44.1 kHz only).
- *   MULTISTAGE = fir1_8/fir1_16/fir1_32 (DSD64/128/256) to 8fs = 352.8 kHz, then
+ *   MULTISTAGE = fir1_8d/fir1_16/fir1_32/fir1_64m (DSD64/128/256/512) to
+ *                8fs = 352.8 kHz, then
  *                hb43_150 halvings to the target, with a sweep-ranked final
  *                88.2k -> 44.1k stage (dsddpcm_filter); optional rational
  *                up-80/down-147 stage for the 48k interop family.
@@ -46,7 +47,7 @@ int dsddpcm_abi_version(void) { return DSDDPCM_VERSION_MAJOR; }
 
 const char *dsddpcm_version_string(void)
 {
-    return "0.1.0";
+    return "0.2.1";
 }
 
 static uint8_t bit_reverse(uint8_t b)
@@ -319,14 +320,19 @@ static dsddpcm_status setup_chain(dsddpcm_ctx *c)
         int64_t sum;
         unsigned halvings, gd_num;
         if (cfg->in_rate == DSDDPCM_DSD64) {
-            q = dsddpcm_fir1_8;  n = DSDDPCM_FIR1_8_N;
-            sum = DSDDPCM_FIR1_8_SUM;  s1d = 8;
+            /* fir1_8d supersedes the incumbent-recipe fir1_8 (kept in the tables
+             * for provenance), lifting the stage-1 fold-band floor -141 -> -157 dB. */
+            q = dsddpcm_fir1_8d; n = DSDDPCM_FIR1_8D_N;
+            sum = DSDDPCM_FIR1_8D_SUM; s1d = 8;
         } else if (cfg->in_rate == DSDDPCM_DSD128) {
             q = dsddpcm_fir1_16; n = DSDDPCM_FIR1_16_N;
             sum = DSDDPCM_FIR1_16_SUM; s1d = 16;
         } else if (cfg->in_rate == DSDDPCM_DSD256) {
             q = dsddpcm_fir1_32; n = DSDDPCM_FIR1_32_N;
             sum = DSDDPCM_FIR1_32_SUM; s1d = 32;
+        } else if (cfg->in_rate == DSDDPCM_DSD512) {
+            q = dsddpcm_fir1_64m; n = DSDDPCM_FIR1_64M_N;
+            sum = DSDDPCM_FIR1_64M_SUM; s1d = 64;
         } else {
             return DSDDPCM_ERR_UNSUPPORTED;
         }

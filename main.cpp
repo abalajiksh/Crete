@@ -43,7 +43,7 @@ extern "C" {
 
 // ── Version info ───────────────────────────────────────────────────────────
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.9.0"
+#define CRETE_VERSION "0.9.1"
 #endif
 
 static constexpr const char* PROGRAM_NAME    = "crête";
@@ -712,7 +712,7 @@ void print_usage(const char* argv0) {
               << "  -o, --output <file>            Write output to file\n"
               << "  --dsd-mode <direct|multistage> DSD decimation chain (default: multistage)\n"
               << "      multistage — brickwall at Nyquist (measurement-grade). Works for\n"
-              << "                   DSD64/128/256 at every output rate.\n"
+              << "                   DSD64/128/256/512 at every output rate.\n"
               << "      direct     — single wide FIR, gentle ~30 kHz corner. DSD64 ->\n"
               << "                   44100 only (libdsddpcm restriction).\n"
               << "  --dsd-filter <default|firls|kaiser>  Final-stage filter (default: default)\n"
@@ -743,9 +743,9 @@ void print_version() {
               << " (BSD-2-Clause, vendored)\n"
               << "DSD chains to " << g_dsd_opt.out_rate << " Hz (filter: "
               << dsd::filter_name(g_dsd_opt.filter) << "):\n";
-    const int rates[3]     = { 2822400, 5644800, 11289600 };
-    const char* labels[3]  = { "DSD64 ", "DSD128", "DSD256" };
-    for (int i = 0; i < 3; ++i) {
+    const int rates[4]     = { 2822400, 5644800, 11289600, 22579200 };
+    const char* labels[4]  = { "DSD64 ", "DSD128", "DSD256", "DSD512" };
+    for (int i = 0; i < 4; ++i) {
         dsd::Options direct = g_dsd_opt; direct.mode = dsd::Mode::Direct;
         dsd::Options multi  = g_dsd_opt; multi.mode  = dsd::Mode::Multistage;
         std::cout << "  " << labels[i] << " direct     "

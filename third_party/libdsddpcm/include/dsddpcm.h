@@ -27,8 +27,8 @@ extern "C" {
 
 /* ---- versioning ------------------------------------------------------- */
 #define DSDDPCM_VERSION_MAJOR 0
-#define DSDDPCM_VERSION_MINOR 1
-#define DSDDPCM_VERSION_PATCH 0
+#define DSDDPCM_VERSION_MINOR 2
+#define DSDDPCM_VERSION_PATCH 1
 /* Runtime SONAME major; must equal DSDDPCM_VERSION_MAJOR at load. */
 int dsddpcm_abi_version(void);
 const char *dsddpcm_version_string(void);
@@ -49,7 +49,8 @@ const char *dsddpcm_strerror(dsddpcm_status s);
 typedef enum {
     DSDDPCM_DSD64  = 64,
     DSDDPCM_DSD128 = 128,
-    DSDDPCM_DSD256 = 256
+    DSDDPCM_DSD256 = 256,
+    DSDDPCM_DSD512 = 512
 } dsddpcm_dsd_rate;
 
 /* Output PCM sample rate family. The 44.1k family is primary (pure integer
