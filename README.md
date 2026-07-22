@@ -54,7 +54,7 @@ The compact FFmpeg build is **LGPL-only** (no GPL, no nonfree components), **dec
 
 Decoder routing is strict:
 
-- **Native formats (WAV, AIFF, FLAC, DSF, DFF) always use crête's own decoders**, even in the FFmpeg build. This preserves parity against the MAAT/foobar reference data.
+- **Native formats (WAV, AIFF, FLAC, DSF, DFF) always use crête's own decoders**, even in the FFmpeg build. This preserves parity against the MAAT reference data.
 - FFmpeg handles only non-native formats: **ALAC (`.m4a`), MP3, AAC, Opus**.
 - **DSD is never routed through FFmpeg** — FFmpeg's `dsd2pcm` decimation is a different filter chain and would break DSD parity.
 
@@ -199,7 +199,7 @@ Per-track block view with all per-channel metrics in a vertical table — easier
 
 ### JSON (`-f json`, requires `make cli-json` or `make cli-json-ffmpeg`)
 
-Machine-readable output with every metric for every track, including the full per-channel `channel_metrics` array, and `dsd_mode` for DSD sources. Used by the pytest CI harness to compare against reference databases without scraping text output.
+Machine-readable output with every metric for every track, including the full per-channel `channel_metrics` array, and `dsd_mode` / `dsd_filter` / `dsd_out_rate` for DSD sources. Used by the pytest CI harness to compare against reference databases without scraping text output.
 
 ---
 
@@ -273,7 +273,7 @@ DSD bitstreams are decimated to PCM by **[libdsddpcm](https://codeberg.org/abksh
 ### Validation
 
 - **Round-trip:** crête on a `.dsf` and crête on the WAV `dsd2wav` exports from it agree exactly (both go through the same libdsddpcm decode).
-- libdsddpcm ships its own clean-room validation (see its repo); crête's own DSD reference suites (formerly foobar-parity at 352.8 kHz) are **pending regeneration** against this engine — see `CRETE_PENDING.md`.
+- libdsddpcm ships its own clean-room validation (see its repo). crête's DSD reference suites were **re-baselined against MAAT DROffline (2026-07)** on this engine: MAAT measures the 32-bit-float WAVs `dsd2wav` exports at the pinned decode config, at both 44.1 kHz and 352.8 kHz output. foobar2000 is fully retired as a reference oracle.
 
 ---
 
@@ -343,28 +343,23 @@ Now the largest remaining source of disagreement. These are **corpus problems, n
 - **`Min. PSR` — 101/135 flagged, max Δ 7.83 dB.** The worst case, `EMW_88k` track 15, has a reference value of exactly **`+0.00`** — a failed or missing MAAT export, not a measurement. Purge or re-capture before treating any PSR number as meaningful.
 - **`EMW_96k` track 11.** The only PCM track that appears as an outlier across three unrelated metrics (RMS Δ 2.31, LRA Δ 2.94), and — since the FIX 9 bias was removed — the **only negative DR mismatch in the entire corpus** (crête DR16 / ref DR17). Confirm it is a clean downsample with a good reference before trusting it.
 
-### Test harness
+### Test harness — overhauled 2026-07, former pending items done
 
-- **`BoneyM_10k_DSD128_352` reports PASS with zero comparisons.** Album DR and track count match, but no per-track metric rows are produced, so the album contributes nothing and still passes. A suite that compares nothing must fail.
-- **Baseline-relative regression harness.** Commit per-metric deltas-vs-reference as `baselines/vX.Y.Z.json`; fail only when a metric *worsens* beyond baseline + ~0.1 dB. Replaces the per-metric "catastrophic" thresholds, which were a bootstrap.
-- Keep one loose absolute backstop (~5 dB) per album suite to catch gross breakage.
+- ~~`BoneyM_10k_DSD128_352` PASS with zero comparisons~~ — an album contributing **zero** metric comparisons now fails outright.
+- ~~Baseline-relative regression harness~~ — implemented: a fully-green run snapshots per-album per-metric max |Δ| into `baselines/<suite>.json`; subsequent runs fail only when a metric worsens beyond baseline + margin, capped by an absolute backstop that still catches gross breakage.
 
-### MAAT as a DSD metric oracle
+Still open: a **cross-arch identity smoke check** — the same FLAC through the x86-64 and aarch64 binaries must be bit-identical (the regression test for the `-ffp-contract=off` guarantee).
 
-The foobar `ext` export carries only **DR, RMS, and Peak**. Fourteen of crête's twenty-one metrics — LUFSi, LRA, PLR, PSR, TPL, M/S — are therefore **completely untested on DSD**, and no amount of foobar re-recording can change that.
+### MAAT as the DSD metric oracle — done (2026-07)
 
-Planned: export decimated PCM to 352.8 kHz WAV (`dsd2wav`) and measure it in MAAT alongside the PCM suite. This splits DSD validation into two independently-verifiable layers:
+foobar2000 is retired as an oracle entirely (its `ext` export carried only DR, RMS, and Peak, leaving most metrics untested on DSD); **MAAT DROffline is the sole external reference**. The planned `dsd2wav` route is implemented and recorded: crête exports the decimated PCM to 32-bit float WAV, MAAT measures those WAVs, and the results are imported as DSD references — every DSD album in the corpus, at both 44.1 kHz and 352.8 kHz output (chain=multistage, filter=default pinned).
 
-| Layer | Oracle |
-|-------|--------|
-| Decimation | `foo_input_sacd` source, bit-exact (`dsd_xcheck`) |
-| Metrics on PCM | MAAT, on the exported WAV |
+Answers to the old open questions: MAAT accepts 32-bit float WAV at 352.8 kHz without resampling, but reports sentinel values for the BS.1770 loudness family at that rate — those rows are dropped at import, so the 352.8 kHz suites gate on SPPM / TPL / RMS / DR only.
 
-Caveats, by design:
+Standing caveats:
 
-- The exported WAV comes out of crête's own decimation, so this is **not** an end-to-end independent check. **The foobar DSD suite must be retained** — it is the only test that validates decimation *and* metrics against a tool sharing no code with crête.
-- MAAT references generated this way are keyed to a specific `crete_version` + `dsd_mode`. Store both alongside the reference rows, gate on `dsd_xcheck`, and **never commit the exported WAVs as corpus** — regenerate them, or one decimation gets baked into the reference data permanently.
-- Open questions: does MAAT accept 32-bit float WAV (its spec says "Linear PCM"), and does it accept 352.8 kHz without silently resampling? DSD decimation routinely exceeds ±1.0, so a 24-bit integer export would clip and destroy exactly the peak/SPPM values under test.
+- The exported WAV comes out of crête's own decimation, so this validates **metrics, not decimation**, end-to-end. The old bit-exact `dsd_xcheck` gate against the LGPL `foo_input_sacd` transcription is obsolete (libdsddpcm is clean-room and intentionally differs); decimation correctness rests on libdsddpcm's own golden vectors plus crête's internal parity suites.
+- MAAT references recorded this way are keyed to a specific `crete_version` + decode config, stored alongside the reference rows. The exported WAVs are **never committed as corpus** — they are regenerated, so no one decimation gets baked into the reference data permanently.
 
 ### Code
 
@@ -374,7 +369,7 @@ Caveats, by design:
 
 ### Not yet exercised
 
-- **DSD256 / DSD512.** Both resolve correctly through the multistage chain (`fir1_32` for DSD256, `fir1_64m` for DSD512; DSD512 was enabled by the libdsddpcm v0.2.1 bump in 0.9.1), but there is no corpus and no reference data. Direct is DSD64 → 44.1 kHz only, so it does not apply to these rates.
+- **DSD512.** Resolves correctly through the multistage chain (`fir1_64m`; enabled by the libdsddpcm v0.2.1 bump in 0.9.1), but there is no corpus and no reference data yet. DSD256 graduated 2026-07 — it now has a dedicated suite and corpus (`fir1_32` multistage). Direct is DSD64 → 44.1 kHz only, so it does not apply to these rates.
 - **DFF container.** Decoder path exists; no dedicated parity test against the DSF version of the same album.
 - **AIFF.** No test files.
 
@@ -416,6 +411,6 @@ third_party/              Dear ImGui, nlohmann/json, compact FFmpeg (fetched on 
 
 MIT License — Ashwin Balaji 2026.
 
-**DSD decode** is provided by the vendored **libdsddpcm** (`third_party/libdsddpcm/`, release v0.1.0), which is **BSD-2-Clause** — a clean-room implementation that shares no code with the LGPL `foo_input_sacd` oracle used only offline for validation. Its license text ships at `third_party/libdsddpcm/LICENSE`. This replaces the former `dsd_lut.hpp` (LGPL-2.1, transcribed from foobar's `libdsdpcm`), which is retired to `dsd_lut.hpp.bak` and is no longer built. crête's licensing is therefore now cleanly **MIT + BSD-2-Clause**.
+**DSD decode** is provided by the vendored **libdsddpcm** (`third_party/libdsddpcm/`, release v0.2.1), which is **BSD-2-Clause** — a clean-room implementation that shares no code with the LGPL `foo_input_sacd` transcription it replaced. Its license text ships at `third_party/libdsddpcm/LICENSE`. This replaces the former `dsd_lut.hpp` (LGPL-2.1, transcribed from foobar's `libdsdpcm`), which is retired to `dsd_lut.hpp.bak` and is no longer built. crête's licensing is therefore now cleanly **MIT + BSD-2-Clause**.
 
 `crete-ffmpeg` builds statically link a compact FFmpeg configured LGPL-only (decode-only, no GPL or nonfree components); FFmpeg is used under LGPL 2.1+.
