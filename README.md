@@ -8,6 +8,10 @@ crête also **detects MQA-encoded files** and reports them unconditionally: if y
 
 The default build has **zero dependencies**. An optional third build tier statically links a compact, LGPL-only FFmpeg to add lossy/ALAC decode support — see below.
 
+![CI](https://minio.insightsintoinfinite.com/badge/status.svg)
+
+For more details on CI test suite - see below.
+
 **Current version: 0.10.1**
 
 ---
@@ -409,6 +413,15 @@ third_party/              Dear ImGui, nlohmann/json, compact FFmpeg (fetched on 
 ```
 
 `analysis.hpp` and `audio.hpp` are deliberately monolithic — single-translation-unit builds keep the CLI dependency-free and the build trivially reproducible across distros. `audio_ffmpeg.hpp` compiles to nothing unless `CRETE_HAS_FFMPEG` is defined by an FFmpeg build tier.
+
+---
+
+## CI Test Suite Results
+
+![synthetic](https://minio.insightsintoinfinite.com/badge/suite-SYNTHETIC.svg)
+![dsd64](https://minio.insightsintoinfinite.com/badge/suite-DSD64.svg)
+
+![test matrix](https://minio.insightsintoinfinite.com/badge/tests.svg)
 
 ---
 
