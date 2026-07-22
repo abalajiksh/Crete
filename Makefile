@@ -42,8 +42,19 @@
 CROSS     ?=
 CXX        = $(CROSS)g++
 CC         = $(CROSS)gcc
-CXXFLAGS   = -std=c++17 -Wall -Wextra -Wpedantic
-CFLAGS     = -std=c99 -O2 -Wall -Wextra
+
+# Cross-ISA determinism: GCC defaults to -ffp-contract=fast, which fuses a*b+c
+# into a single FMA (one rounding) wherever the target has FMA hardware. That
+# fires on aarch64 (FMA is ARMv8 baseline) and any x86 build with -mfma/-march,
+# but NOT on the generic x86-64 baseline — so the same source yields ULP-
+# different results across arches. crête's identity is bit-level reproducibility
+# (K-weighting biquads, RMS accumulation), so we pin contraction OFF everywhere:
+# every arch computes a*b then +c with separate roundings. No-op on the current
+# generic x86-64 build; forces FMA-capable targets (ARM CI) to match it.
+FP_DETERMINISM = -ffp-contract=off
+
+CXXFLAGS   = -std=c++17 -Wall -Wextra -Wpedantic $(FP_DETERMINISM)
+CFLAGS     = -std=c99 -O2 -Wall -Wextra $(FP_DETERMINISM)
 LDFLAGS    =
 
 VERSION   ?= 0.9.2
