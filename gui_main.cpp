@@ -246,6 +246,20 @@ static std::string generate_log(const std::vector<dr::TrackResult>& tracks,
         }
         out += sep2+"\n";
     }
+
+    // MQA warning appended to every log format, mirroring the CLI banner.
+    int mqa_n = 0; bool mqa_studio = false; double mqa_rate = 0;
+    for (const auto& t : tracks)
+        if (t.mqa.datasync_found) { mqa_n++; mqa_studio = mqa_studio || t.mqa.studio; mqa_rate = t.mqa.orig_rate/1000.0; }
+    if (mqa_n) {
+        std::snprintf(line,sizeof(line),
+            "\n!! MQA LOSSY ENCODING DETECTED — source is not lossless\n"
+            "   %d track(s) · %s · authored %.1f kHz\n"
+            "   DR is measured on the delivered PCM; encoded content above the base band\n"
+            "   is not reconstructed (no open MQA decoder exists).\n",
+            mqa_n, mqa_studio ? "MQA Studio" : "MQA", mqa_rate);
+        out += line;
+    }
     return out;
 }
 
@@ -285,6 +299,8 @@ static void analysis_worker(AppState* app) {
                 auto ad = audio::decode_file(files[i], app->active_dsd_opt);
                 slots[i] = dr::analyze_track(ad.channels, ad.sample_rate,
                                              ad.bit_depth, ad.codec, fname);
+                slots[i].mqa = mqa::analyze_pcm(ad.channels, ad.sample_rate,
+                                                ad.bit_depth);
                 ok[i] = 1;
             } catch (const std::exception& e) {
                 std::lock_guard<std::mutex> lk(app->mtx);
@@ -503,6 +519,21 @@ static void detail_panel(AppState& app) {
         app.selected_track+1, t.channels, t.codec.c_str(), t.bit_depth, t.sample_rate,
         format_duration(t.duration_secs).c_str());
 
+    // MQA warning — a listener measuring DR is entitled to know the source is
+    // lossy MQA, not lossless. Deterministic datasync only (see mqa_detect.hpp).
+    if (t.mqa.datasync_found) {
+        ImGui::Spacing();
+        char mb[96];
+        std::snprintf(mb, sizeof(mb), "MQA %s · authored %.1f kHz",
+                      t.mqa.studio ? "Studio" : "(lossy)", t.mqa.orig_rate / 1000.0);
+        theme::Tag(mb, theme::P().accentSoft, theme::P().accent);
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::P().accent);
+        ImGui::TextWrapped("Lossy MQA encoding — this is not lossless audio.");
+        ImGui::PopStyleColor();
+        ImGui::TextDisabled("DR is measured on the delivered %u kHz stream; the encoded "
+                            "content above the base band is not reconstructed.", t.sample_rate);
+    }
+
     // Hero DR + per-channel
     theme::Rule(2.0f, 8.0f);
     ImGui::BeginGroup();
@@ -595,6 +626,12 @@ static void band_results(AppState& app) {
             ImGui::TableSetColumnIndex(1);
             auto name=t.filename; auto dot=name.rfind('.'); if(dot!=std::string::npos) name=name.substr(0,dot);
             ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(name.c_str());
+            if (t.mqa.datasync_found) {
+                ImGui::SameLine(0, 8);
+                ImGui::PushStyleColor(ImGuiCol_Text, theme::P().accent);
+                ImGui::TextUnformatted("MQA");
+                ImGui::PopStyleColor();
+            }
 
             ImGui::TableSetColumnIndex(2);
             if (t.is_clipping) { ImGui::PushStyleColor(ImGuiCol_Text, theme::P().accent); ImGui::TextUnformatted("over"); ImGui::PopStyleColor(); }

@@ -57,7 +57,7 @@ CXXFLAGS   = -std=c++17 -Wall -Wextra -Wpedantic $(FP_DETERMINISM)
 CFLAGS     = -std=c99 -O2 -Wall -Wextra $(FP_DETERMINISM)
 LDFLAGS    =
 
-VERSION   ?= 0.9.2
+VERSION   ?= 0.10.0
 CXXFLAGS  += -DCRETE_VERSION='"$(VERSION)"'
 
 PREFIX    ?= /usr/local
@@ -123,7 +123,7 @@ CLI_TARGET = crete$(EXE_EXT)
 # FFmpeg tiers emit a distinctly-named binary so the in-house decoder (crete)
 # and the FFmpeg-enabled decoder (crete-ffmpeg) never overwrite each other.
 FFMPEG_TARGET = crete-ffmpeg$(EXE_EXT)
-CLI_HEADERS = analysis.hpp audio.hpp dsd_decode.hpp cue.hpp \
+CLI_HEADERS = analysis.hpp audio.hpp dsd_decode.hpp mqa_detect.hpp cue.hpp \
               $(LIBDSDDPCM_DIR)/include/dsddpcm.h
 
 # ── GUI target ──────────────────────────────────────────────────────────────

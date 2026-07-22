@@ -4,9 +4,11 @@ Zero-dependency C++17 dynamic range meter. The name is French for *peak* / *cres
 
 Measures **TT Dynamic Range** (Pleasurize Music Foundation algorithm), **EBU R128 integrated loudness**, **true peak** (4× polyphase FIR), **PLR**, **PSR**, **LRA**, **crest factor**, and per-channel variants for lossless audio files. PCM output is compatible with [dr.loudness-war.info](http://dr.loudness-war.info/) submission format; DSD is decimated by the vendored, BSD-2-Clause **[libdsddpcm](https://codeberg.org/abksh/libdsddpcm)** kernel — a clean-room linear-phase, unity-DC decoder — with selectable **chain** (Direct / Multistage), **filter**, and **output rate**.
 
+crête also **detects MQA-encoded files** and reports them unconditionally: if you are measuring dynamic range, you are entitled to know the source is lossy MQA rather than lossless. Detection is deterministic — it reconstructs the buried MQA bitstream (XOR of the stereo low bits) and verifies the `datasync` packet, then reports the authored sample rate and the green/Studio authentication level. It never asserts MQA from statistics alone, so it does not false-positive on noisy-but-lossless masters (e.g. analog tape hiss). No open MQA decoder exists, so DR is measured on the delivered PCM stream; the warning makes clear the encoded content above the base band is not reconstructed. See *MQA detection* below.
+
 The default build has **zero dependencies**. An optional third build tier statically links a compact, LGPL-only FFmpeg to add lossy/ALAC decode support — see below.
 
-**Current version: 0.9.2**
+**Current version: 0.10.0**
 
 ---
 
@@ -25,7 +27,7 @@ Three CLI build tiers, one GUI:
 
 ```bash
 make                    # optimized build, no JSON output
-make VERSION=0.9.2      # custom version stamp
+make VERSION=0.10.0     # custom version stamp
 make debug              # debug build with sanitizers
 make install            # install to /usr/local/bin
 ```
@@ -284,6 +286,51 @@ DSD bitstreams are decimated to PCM by **[libdsddpcm](https://codeberg.org/abksh
 | 8–13     | Typical commercial release                         |
 | 14–20    | Audiophile / well-mastered                         |
 | > 20     | Exceptional dynamics (classical, jazz, vinyl-era)  |
+
+---
+
+## MQA detection
+
+MQA is a lossy codec delivered inside an ordinary lossless-looking container (44.1/48 kHz,
+stereo, 16/24-bit FLAC/WAV/AIFF), with the encoded data hidden in the low bits. Because a
+DR measurement on such a file describes lossy audio dressed as "hi-res," crête flags it
+**unconditionally** — there is no flag to enable and no flag to suppress it.
+
+**How it works (deterministic).** The primary MQA bitstream is the XOR of one low bit from
+each left/right sample pair. crête reconstructs that bitstream across candidate carrier
+positions (bit 8 for 24-bit hi-res MQA; bit 0 for 16-bit MQA-CD, which shifts the whole
+encoding down a byte) and searches for the `datasync` packet — a 40-bit sync value
+(`0x11319207d5`) followed by a well-formed field structure. A match is proof, not a guess:
+the odds of a coincidental 40-bit magic *plus* valid fields are negligible, and in practice
+only the true carrier plane ever hits. From the packet it reads the authoritative metadata:
+
+- **authored sample rate** (`orig_rate`, e.g. 44.1 / 96 / 192 kHz),
+- **authentication level** — `auth_level ≥ 9` is "Studio" / blue, below that is "green,"
+- render filter / bit-depth indices and the carrier bit position.
+
+```
+==============================================================================================
+  ⚠  MQA LOSSY ENCODING DETECTED — source is not lossless
+----------------------------------------------------------------------------------------------
+  11 track(s) · MQA Studio · authored 44.1 kHz · carrier bit 8 · auth level 9
+----------------------------------------------------------------------------------------------
+  DR is measured on the delivered PCM stream; content encoded above the base
+  band is not reconstructed (no open MQA decoder exists).
+==============================================================================================
+```
+
+The `-f json` output carries a per-track `mqa` object (`detected`, `studio`, `original_rate`,
+`auth_level`, `render_filter`, `render_bitdepth`, `carrier_bit`).
+
+**What it does not do.** crête does not *decode* (unfold/render) MQA — that DSP exists only
+in the proprietary licensed decoder, so DR is always measured on the delivered base-band PCM.
+Detection is also deliberately conservative: it reports MQA **only** on a verified datasync,
+which catches both 24-bit hi-res MQA and 16-bit MQA-CD. A raw LSB-entropy figure is exposed
+in JSON as a diagnostic, but it is never treated as a verdict — near-full low-bit entropy is
+equally consistent with analog tape hiss or a prior lossy generation, so using it to claim
+"MQA" would false-positive on legitimate lossless masters. Provenance: the bitstream layout is a clean-room reimplementation of the format
+*description* in the BSD-2-Clause `mqa` project's spec and MQA patent WO2013186561A2 — facts
+and an interface, no decoder code — so crête stays MIT.
 
 ---
 

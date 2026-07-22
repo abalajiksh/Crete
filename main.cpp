@@ -24,15 +24,18 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <tuple>
 #include <vector>
 
 #ifdef CRETE_HAS_FFMPEG
@@ -43,7 +46,7 @@ extern "C" {
 
 // ── Version info ───────────────────────────────────────────────────────────
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.9.2"
+#define CRETE_VERSION "0.10.0"
 #endif
 
 static constexpr const char* PROGRAM_NAME    = "crête";
@@ -236,6 +239,56 @@ std::vector<AnalysisGroup> collect_groups(const std::string& path) {
     }
 
     return groups;
+}
+
+// ── MQA warning block (all human-facing formats) ───────────────────────────
+//
+// A listener measuring DR is entitled to know the source is MQA-encoded lossy
+// audio rather than lossless. This block fires ONLY on a verified datasync
+// packet — a 40-bit magic plus a well-formed field structure, which is never a
+// coincidence. The LSB-entropy heuristic is deliberately NOT surfaced here: it
+// cannot separate MQA from analog tape hiss or a prior lossy generation, and a
+// false "this is MQA" on legitimate lossless would betray the whole tool. Hits
+// are grouped by their authoritative fields so an album collapses to one line.
+std::string format_khz(int hz) {
+    std::ostringstream os;
+    os << std::fixed << std::setprecision(1) << (hz / 1000.0) << " kHz";
+    return os.str();
+}
+
+void print_mqa_summary(const std::vector<dr::TrackResult>& tracks) {
+    // key: (orig_rate, studio, auth_level, bit_position) → track count
+    std::map<std::tuple<int,int,int,int>, int> hits;
+    for (const auto& t : tracks) {
+        if (t.mqa.datasync_found)
+            hits[std::make_tuple(t.mqa.orig_rate, t.mqa.studio ? 1 : 0,
+                                 t.mqa.auth_level, t.mqa.bit_position)]++;
+    }
+    if (hits.empty()) return;
+
+    const std::string top(94, '=');
+    const std::string mid(94, '-');
+
+    std::cout << "\n" << top << "\n";
+    std::cout << "  ⚠  MQA LOSSY ENCODING DETECTED — source is not lossless\n";
+    std::cout << mid << "\n";
+
+    for (const auto& [k, count] : hits) {
+        const int  orig   = std::get<0>(k);
+        const bool studio = std::get<1>(k) != 0;
+        const int  auth   = std::get<2>(k);
+        const int  bp     = std::get<3>(k);
+        std::cout << "  " << count << " track(s) · "
+                  << (studio ? "MQA Studio" : "MQA")
+                  << " · authored " << (orig ? format_khz(orig) : "unknown rate")
+                  << " · carrier bit " << bp
+                  << " · auth level " << auth << "\n";
+    }
+
+    std::cout << mid << "\n";
+    std::cout << "  DR is measured on the delivered PCM stream; content encoded above the base\n";
+    std::cout << "  band is not reconstructed (no open MQA decoder exists).\n";
+    std::cout << top << "\n";
 }
 
 // ── Standard output (dr.loudness-war.info compatible) ──────────────────────
@@ -662,6 +715,26 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
 
         jt["verdict"] = dr::verdict_string(t.verdict);
 
+        // MQA forensic verdict. Emitted for every track so downstream tools can
+        // flag lossy-encoded "hi-res" without re-analysing the PCM.
+        {
+            json jm;
+            jm["detected"]        = t.mqa.datasync_found;
+            jm["confidence"]      = t.mqa.confidence;
+            if (t.mqa.datasync_found) {
+                jm["studio"]          = t.mqa.studio;
+                jm["original_rate"]   = t.mqa.orig_rate;
+                jm["stream_rate"]     = t.mqa.src_rate;
+                jm["auth_level"]      = t.mqa.auth_level;
+                jm["render_filter"]   = t.mqa.render_filter;
+                jm["render_bitdepth"] = t.mqa.render_bitdepth;
+                jm["carrier_bit"]     = t.mqa.bit_position;
+            } else {
+                jm["lsb_entropy"]     = t.mqa.lsb_entropy;
+            }
+            jt["mqa"] = jm;
+        }
+
         json jch = json::array();
         size_t nch = t.ch_metrics.size();
         for (size_t c = 0; c < nch; ++c) {
@@ -861,6 +934,10 @@ int main(int argc, char* argv[]) {
             try {
                 auto ad = audio::decode_file(g.audio_path, g_dsd_opt);
 
+                // File-level MQA check, stamped onto every track from this decode.
+                const mqa::Info minfo =
+                    mqa::analyze_pcm(ad.channels, ad.sample_rate, ad.bit_depth);
+
                 if (g.sheet.tracks.empty()) {
                     ++done;
                     if (!quiet)
@@ -869,6 +946,7 @@ int main(int argc, char* argv[]) {
                     results.push_back(dr::analyze_track(
                         ad.channels, ad.sample_rate, ad.bit_depth,
                         ad.codec, basename));
+                    results.back().mqa = minfo;
                 } else {
                     size_t total_samples = ad.channels.empty()
                                            ? 0 : ad.channels[0].size();
@@ -917,6 +995,7 @@ int main(int argc, char* argv[]) {
                         results.push_back(dr::analyze_track(
                             slice, ad.sample_rate, ad.bit_depth,
                             ad.codec, track_name));
+                        results.back().mqa = minfo;
                     }
                 }
             } catch (const std::exception& e) {
@@ -966,6 +1045,11 @@ int main(int argc, char* argv[]) {
 #endif
                 break;
         }
+
+        // MQA is reported in-band for JSON (per track); for every human-facing
+        // format we append an unmissable warning block.
+        if (format != OutputFormat::Json)
+            print_mqa_summary(results);
     }
 
     if (out_fp) std::fclose(out_fp);

@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "mqa_detect.hpp"
+
 namespace dr {
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -88,6 +90,12 @@ struct TrackResult {
     double      psr_db = 0.0;
 
     Verdict     verdict = Verdict::Normal;
+
+    // Forensic: MQA lossy-encoding identification. Populated by the caller
+    // (not analyze_track) since it is a file-level, not per-slice, property.
+    // Reported unconditionally — a listener measuring DR is entitled to know
+    // the source is MQA and not lossless. See mqa_detect.hpp.
+    mqa::Info   mqa;
 };
 
 // ── Helper functions ───────────────────────────────────────────────────────

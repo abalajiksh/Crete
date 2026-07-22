@@ -306,16 +306,19 @@ inline bool GhostButton(const char* label) {
     return r;
 }
 
-// A small tinted tag (accentSoft fill, accentInk text).
-inline void Tag(const char* text) {
+// A small tinted tag with explicit fill / text colors.
+inline void Tag(const char* text, const ImVec4& fill, const ImVec4& txt) {
     ImVec2 sz = ImGui::CalcTextSize(text);
     ImVec2 p = ImGui::GetCursorScreenPos();
     ImVec2 pad(9, 4);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(p, ImVec2(p.x + sz.x + pad.x * 2, p.y + sz.y + pad.y * 2),
-                      u32(P().accentSoft));
-    dl->AddText(ImVec2(p.x + pad.x, p.y + pad.y), u32(P().accentInk), text);
+                      u32(fill));
+    dl->AddText(ImVec2(p.x + pad.x, p.y + pad.y), u32(txt), text);
     ImGui::Dummy(ImVec2(sz.x + pad.x * 2, sz.y + pad.y * 2));
 }
+
+// A small tinted tag (accentSoft fill, accentInk text).
+inline void Tag(const char* text) { Tag(text, P().accentSoft, P().accentInk); }
 
 } // namespace theme
