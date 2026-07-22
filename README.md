@@ -339,12 +339,14 @@ and an interface, no decoder code — so crête stays MIT.
 
 ## Pending work
 
-### Reference-data hygiene (highest priority)
+### Reference-data hygiene — PCM QUALIFICATION re-recorded (2026-07-22)
 
-Now the largest remaining source of disagreement. These are **corpus problems, not algorithm problems**.
+The harness repo re-measured all 11 QUALIFICATION albums (Thriller × 5 rates, East_Meets_West × 6 rates) fresh against MAAT DROffline MkII 2.2.3, replacing the pre-overhaul `maat` rows wholesale. The old rows predated MAAT's Folder Log preset overhaul and were missing metrics; every album now carries the full 21-metric set (TPL/SPPM/RMS/M-S/LUFSi/DR/LRA/PLR/Min. PSR, L/R/joint) the DSD suites already had.
 
-- **`Min. PSR` — 101/135 flagged, max Δ 7.83 dB.** The worst case, `EMW_88k` track 15, has a reference value of exactly **`+0.00`** — a failed or missing MAAT export, not a measurement. Purge or re-capture before treating any PSR number as meaningful.
-- **`EMW_96k` track 11.** The only PCM track that appears as an outlier across three unrelated metrics (RMS Δ 2.31, LRA Δ 2.94), and — since the FIX 9 bias was removed — the **only negative DR mismatch in the entire corpus** (crête DR16 / ref DR17). Confirm it is a clean downsample with a good reference before trusting it.
+The two known issues below were symptoms of those stale rows. **crête has not yet been re-validated against the new rows** — a manual Jenkins QUALIFICATION run is the next step — so treat these as historical until that run reports clean:
+
+- **`Min. PSR` — 101/135 flagged, max Δ 7.83 dB.** The worst case, `EMW_88k` track 15, had a reference value of exactly **`+0.00`** — a failed or missing MAAT export from the old rows, not a measurement.
+- **`EMW_96k` track 11.** The only PCM track that appeared as an outlier across three unrelated metrics (RMS Δ 2.31, LRA Δ 2.94), and — since the FIX 9 bias was removed — the only negative DR mismatch in the corpus (crête DR16 / ref DR17).
 
 ### Test harness — overhauled 2026-07, former pending items done
 
