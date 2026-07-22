@@ -43,7 +43,7 @@ extern "C" {
 
 // ── Version info ───────────────────────────────────────────────────────────
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.9.1"
+#define CRETE_VERSION "0.9.2"
 #endif
 
 static constexpr const char* PROGRAM_NAME    = "crête";

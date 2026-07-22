@@ -1,12 +1,19 @@
 // ============================================================================
-// crête GUI — Dear ImGui Dynamic Range Meter
+// crête GUI — Dear ImGui Dynamic Range Meter (Modernist redesign)
 //
 // Build: make gui   (requires SDL2 + OpenGL + Dear ImGui in third_party/)
+//
+// Layout is organised as horizontal bands (Modernist grid):
+//   header · source bar · DSD strip (DSD sources only) · verdict band ·
+//   results table (DR meter-bar) + grouped detail panel · error log.
+// Settings / DR Guide / output options live in an inline right-side panel,
+// not a modal. Light + dark shells share one palette (crete_theme.hpp).
 // ============================================================================
 
 #include "analysis.hpp"
 #include "audio.hpp"
 #include "file_dialog.hpp"
+#include "crete_theme.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -33,44 +40,35 @@
 
 namespace fs = std::filesystem;
 
-// ── Version info ───────────────────────────────────────────────────────────
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.1.3"
+#define CRETE_VERSION "0.9.2"
 #endif
 static constexpr const char* PROGRAM_NAME    = "crête";
 static constexpr const char* PROGRAM_VERSION = CRETE_VERSION;
 
-// ── DR color coding ────────────────────────────────────────────────────────
-static ImVec4 dr_color(int dr) {
-    if (dr > 20) return ImVec4(0.2f, 0.9f, 0.3f, 1.0f);
-    if (dr >= 14) return ImVec4(0.4f, 0.85f, 0.4f, 1.0f);
-    if (dr >= 8)  return ImVec4(0.9f, 0.85f, 0.3f, 1.0f);
-    if (dr >= 5)  return ImVec4(0.95f, 0.55f, 0.2f, 1.0f);
-    return ImVec4(0.95f, 0.25f, 0.2f, 1.0f);
-}
-
-static const char* verdict_short(dr::Verdict v) {
-    switch (v) {
-        case dr::Verdict::Exceptional: return "Exceptional";
-        case dr::Verdict::Excellent:   return "Excellent";
-        case dr::Verdict::Normal:      return "Normal";
-        case dr::Verdict::Compressed:  return "Compressed";
-        case dr::Verdict::Brickwalled: return "Brickwalled";
-    }
-    return "";
-}
+static const char* FORMAT_LABELS[] = { "Standard", "foobar", "Extended" };
+static const char* DSD_MODE_LABELS[]   = { "Multistage", "Direct" };
+static const char* DSD_FILTER_LABELS[] = { "default", "firls", "kaiser" };
+static const char* DSD_RATE_LABELS[]   = { "44.1", "88.2", "176.4", "352.8" };
+static const int   DSD_RATES[]         = { 44100, 88200, 176400, 352800 };
 
 // ── Application state ──────────────────────────────────────────────────────
 struct AppState {
-    // Input
     char path_buf[4096] = "";
 
-    // Output
     int  output_mode = 0;
     char output_path[4096] = "";
     int  format_idx = 0;
 
-    // Analysis state
+    // DSD decode options (exposed in the DSD strip)
+    int  dsd_mode_idx   = 0;   // 0 Multistage, 1 Direct
+    int  dsd_filter_idx = 0;   // 0 default, 1 firls, 2 kaiser
+    int  dsd_rate_idx   = 0;   // index into DSD_RATES
+    dsd::Options active_dsd_opt;   // snapshotted at analysis start
+
+    bool dark_mode = false;
+    bool restyle_requested = false;
+
     std::atomic<bool>  is_analyzing{false};
     std::atomic<bool>  cancel_requested{false};
     std::atomic<float> progress{0.0f};
@@ -85,49 +83,49 @@ struct AppState {
 
     std::thread        worker;
 
-    // UI state
-    bool show_settings = false;
+    // UI
+    bool side_open = false;
+    int  side_tab  = 0;   // 0 About/Settings, 1 DR Guide
     int  selected_track = 0;
-    bool show_detail = true;
 
-    // Collect files from path
+    // Cached DSD probe — recomputed only when path_buf changes, so the folder
+    // is not re-scanned from disk on every frame (source_is_dsd runs per-frame).
+    std::string dsd_probe_path;
+    bool        dsd_probe_val = false;
+
+    dsd::Options build_dsd_opts() const {
+        dsd::Options o;
+        o.mode = (dsd_mode_idx == 1) ? dsd::Mode::Direct : dsd::Mode::Multistage;
+        o.filter = (dsd_filter_idx == 2) ? dsd::Filter::Kaiser
+                 : (dsd_filter_idx == 1) ? dsd::Filter::LeastSquares
+                                         : dsd::Filter::Default;
+        o.out_rate = DSD_RATES[dsd_rate_idx];
+        // Direct chain is DSD64 -> 44100 / default only; force valid combo.
+        if (o.mode == dsd::Mode::Direct) { o.filter = dsd::Filter::Default; o.out_rate = 44100; }
+        return o;
+    }
+
     std::vector<std::string> collect_files_from_path() {
         std::vector<std::string> files;
         std::string p = path_buf;
-
-        while (!p.empty() && (p.back() == ' ' || p.back() == '\n' || p.back() == '\r'))
-            p.pop_back();
-        while (p.size() > 1 && (p.back() == '/' || p.back() == '\\'))
-            p.pop_back();
-
+        while (!p.empty() && (p.back()==' '||p.back()=='\n'||p.back()=='\r')) p.pop_back();
+        while (p.size()>1 && (p.back()=='/'||p.back()=='\\')) p.pop_back();
         if (p.empty()) return files;
-
         try {
             if (fs::is_regular_file(p)) {
-                if (audio::is_supported_format(p))
-                    files.push_back(p);
-                else {
-                    std::lock_guard<std::mutex> lock(mtx);
-                    error_log += "Unsupported format: " + fs::path(p).extension().string() + "\n";
-                }
+                if (audio::is_supported_format(p)) files.push_back(p);
+                else { std::lock_guard<std::mutex> lk(mtx);
+                       error_log += "Unsupported format: " + fs::path(p).extension().string() + "\n"; }
             } else if (fs::is_directory(p)) {
-                for (const auto& entry : fs::directory_iterator(p)) {
-                    if (entry.is_regular_file() &&
-                        audio::is_supported_format(entry.path().string()))
-                        files.push_back(entry.path().string());
-                }
+                for (const auto& e : fs::directory_iterator(p))
+                    if (e.is_regular_file() && audio::is_supported_format(e.path().string()))
+                        files.push_back(e.path().string());
                 std::sort(files.begin(), files.end());
-                if (files.empty()) {
-                    std::lock_guard<std::mutex> lock(mtx);
-                    error_log += "No supported audio files (.wav .flac .aif .dsf .dff) in folder.\n";
-                }
-            } else {
-                std::lock_guard<std::mutex> lock(mtx);
-                error_log += "Path not found: " + p + "\n";
-            }
+                if (files.empty()) { std::lock_guard<std::mutex> lk(mtx);
+                    error_log += "No supported audio files (.wav .flac .aif .dsf .dff) in folder.\n"; }
+            } else { std::lock_guard<std::mutex> lk(mtx); error_log += "Path not found: " + p + "\n"; }
         } catch (const std::exception& e) {
-            std::lock_guard<std::mutex> lock(mtx);
-            error_log += "Error scanning path: " + std::string(e.what()) + "\n";
+            std::lock_guard<std::mutex> lk(mtx); error_log += "Error scanning path: " + std::string(e.what()) + "\n";
         }
         return files;
     }
@@ -136,863 +134,598 @@ struct AppState {
         std::string dir;
         if (output_mode == 0) {
             std::string p = path_buf;
-            if (fs::is_directory(p))
-                dir = p;
-            else if (fs::is_regular_file(p))
-                dir = fs::path(p).parent_path().string();
-        } else {
-            dir = output_path;
-        }
+            if (fs::is_directory(p)) dir = p;
+            else if (fs::is_regular_file(p)) dir = fs::path(p).parent_path().string();
+        } else dir = output_path;
         if (dir.empty()) return "";
-        if (dir.back() != '/' && dir.back() != '\\') dir += '/';
+        if (dir.back()!='/' && dir.back()!='\\') dir += '/';
         return dir + "dr_analysis.txt";
     }
 };
 
+// Filesystem probe: is this path a DSD file, or a folder containing one?
+// This touches the disk (directory scan), so callers must cache the result.
+static bool probe_path_is_dsd(const std::string& path) {
+    std::string ext = audio::get_extension(path);
+    if (ext == ".dsf" || ext == ".dff") return true;
+    if (fs::is_directory(path)) {
+        try {
+            for (const auto& e : fs::directory_iterator(path)) {
+                std::string x = audio::get_extension(e.path().string());
+                if (x == ".dsf" || x == ".dff") return true;
+            }
+        } catch (...) {}
+    }
+    return false;
+}
+
+// True if the current path (or the loaded results) points at DSD material.
+// Runs every frame, so the disk probe is memoised on the path string and the
+// folder is only re-scanned when the path actually changes.
+static bool source_is_dsd(AppState& app) {
+    for (const auto& t : app.results) if (t.codec == "DSD") return true;
+    if (app.dsd_probe_path != app.path_buf) {
+        app.dsd_probe_path = app.path_buf;
+        app.dsd_probe_val  = probe_path_is_dsd(app.path_buf);
+    }
+    return app.dsd_probe_val;
+}
+
 // ── Format helpers ─────────────────────────────────────────────────────────
 static std::string format_duration(double secs) {
-    int m = static_cast<int>(secs) / 60;
-    int s = static_cast<int>(secs) % 60;
-    char buf[16];
-    std::snprintf(buf, sizeof(buf), "%d:%02d", m, s);
-    return buf;
+    int m = (int)secs / 60, s = (int)secs % 60;
+    char b[16]; std::snprintf(b, sizeof(b), "%d:%02d", m, s); return b;
 }
 
-// ── Font loading ───────────────────────────────────────────────────────────
-static void load_fonts() {
-    ImGuiIO& io = ImGui::GetIO();
-
-    static const ImWchar glyph_ranges[] = {
-        0x0020, 0x00FF,
-        0x0100, 0x017F,
-        0,
-    };
-
-    std::string base_path;
-    char* sdl_base = SDL_GetBasePath();
-    if (sdl_base) {
-        base_path = sdl_base;
-        SDL_free(sdl_base);
-    }
-
-    const char* candidates[] = {
-        "fonts/Sora/Sora-VariableFont_wght.ttf",
-        "fonts/Sora/static/Sora-Regular.ttf",
-        "fonts/Sora/Sora-Regular.ttf",
-    };
-
-    ImFont* font = nullptr;
-    for (const auto& rel : candidates) {
-        std::string full = base_path + rel;
-        std::ifstream test(full, std::ios::binary);
-        if (test.good()) {
-            test.close();
-            font = io.Fonts->AddFontFromFileTTF(
-                full.c_str(), 18.0f, nullptr, glyph_ranges);
-            if (font) break;
-        }
-    }
-
-    if (!font) {
-        ImFontConfig cfg;
-        cfg.SizePixels = 16.0f;
-        io.Fonts->AddFontDefault(&cfg);
-    }
-}
-
-// ── Log generation (same format as CLI) ────────────────────────────────────
+// ── Log generation (unchanged output formats: std / foobar / ext) ───────────
 static std::string generate_log(const std::vector<dr::TrackResult>& tracks,
-                                 const std::string& folder_path, int format_idx) {
-    std::string out;
-    char line[512];
-
+                                const std::string& folder_path, int format_idx) {
+    std::string out; char line[512];
     if (format_idx == 0) {
-        std::string sep(94, '-');
-        std::string sep2(94, '=');
-        out += sep + "\n";
-        out += " Analyzed Folder: " + folder_path + "\n";
-        out += sep + "\n";
-        out += "DR         Peak       RMS        Filename\n";
-        out += sep + "\n\n";
-
+        std::string sep(94,'-'), sep2(94,'=');
+        out += sep+"\n Analyzed Folder: "+folder_path+"\n"+sep+"\nDR         Peak       RMS        Filename\n"+sep+"\n\n";
         for (const auto& t : tracks) {
             std::string peak;
             if (t.is_clipping) peak = "over      ";
-            else { std::snprintf(line, sizeof(line), "%.2f dB  ", t.peak_dbfs); peak = line; }
-
-            std::snprintf(line, sizeof(line), "DR%-3d      %-10s %.2f dB   %s\n",
-                          t.dr_score, peak.c_str(), t.rms_dbfs, t.filename.c_str());
+            else { std::snprintf(line,sizeof(line),"%.2f dB  ",t.peak_dbfs); peak=line; }
+            std::snprintf(line,sizeof(line),"DR%-3d      %-10s %.2f dB   %s\n",
+                          t.dr_score,peak.c_str(),t.rms_dbfs,t.filename.c_str());
             out += line;
         }
-
-        out += sep + "\n\n";
-        std::snprintf(line, sizeof(line), " Number of Files: %zu\n", tracks.size());
-        out += line;
-        std::snprintf(line, sizeof(line), " Official DR Value: DR%d\n", dr::album_dr(tracks));
-        out += line;
-        out += "\n" + sep2 + "\n";
-
+        out += sep+"\n\n";
+        std::snprintf(line,sizeof(line)," Number of Files: %zu\n",tracks.size()); out += line;
+        std::snprintf(line,sizeof(line)," Official DR Value: DR%d\n",dr::album_dr(tracks)); out += line;
+        out += "\n"+sep2+"\n";
     } else if (format_idx == 1) {
-        std::string sep(80, '-');
-        std::string sep2(80, '=');
-
-        auto now = std::chrono::system_clock::now();
-        auto tt = std::chrono::system_clock::to_time_t(now);
-        char date_buf[32];
-        std::strftime(date_buf, sizeof(date_buf), "%Y-%m-%d %H:%M:%S", std::localtime(&tt));
-
-        out += std::string(PROGRAM_NAME) + " " + PROGRAM_VERSION + " / TT DR Offline Meter\n";
-        out += "log date: " + std::string(date_buf) + "\n\n";
-        out += sep + "\n";
-        out += "Analyzed: " + folder_path + "\n";
-        out += sep + "\n\n";
-        out += "DR         Peak         RMS     Duration Track\n";
-        out += sep + "\n";
-
+        std::string sep(80,'-'), sep2(80,'=');
+        auto now=std::chrono::system_clock::now(); auto tt=std::chrono::system_clock::to_time_t(now);
+        char db[32]; std::strftime(db,sizeof(db),"%Y-%m-%d %H:%M:%S",std::localtime(&tt));
+        out += std::string(PROGRAM_NAME)+" "+PROGRAM_VERSION+" / TT DR Offline Meter\n";
+        out += "log date: "+std::string(db)+"\n\n"+sep+"\nAnalyzed: "+folder_path+"\n"+sep+"\n\n";
+        out += "DR         Peak         RMS     Duration Track\n"+sep+"\n";
         for (const auto& t : tracks) {
-            auto name = t.filename;
-            auto dot = name.rfind('.');
-            if (dot != std::string::npos) name = name.substr(0, dot);
-
-            char peak_s[16];
-            if (t.is_clipping) std::snprintf(peak_s, sizeof(peak_s), "  0.00 dB");
-            else std::snprintf(peak_s, sizeof(peak_s), "%6.2f dB", t.peak_dbfs);
-
-            std::snprintf(line, sizeof(line), "DR%-3d      %s  %7.2f dB %8s %s\n",
-                          t.dr_score, peak_s, t.rms_dbfs,
-                          format_duration(t.duration_secs).c_str(), name.c_str());
+            auto name=t.filename; auto dot=name.rfind('.'); if(dot!=std::string::npos) name=name.substr(0,dot);
+            char ps[16]; if(t.is_clipping) std::snprintf(ps,sizeof(ps),"  0.00 dB"); else std::snprintf(ps,sizeof(ps),"%6.2f dB",t.peak_dbfs);
+            std::snprintf(line,sizeof(line),"DR%-3d      %s  %7.2f dB %8s %s\n",
+                          t.dr_score,ps,t.rms_dbfs,format_duration(t.duration_secs).c_str(),name.c_str());
             out += line;
         }
-
-        out += sep + "\n\n";
-        std::snprintf(line, sizeof(line), "Number of tracks:  %zu\n", tracks.size());
-        out += line;
-        std::snprintf(line, sizeof(line), "Official DR value: DR%d\n", dr::album_dr(tracks));
-        out += line;
-
-        if (!tracks.empty()) {
-            const auto& f = tracks[0];
-            std::snprintf(line, sizeof(line),
-                "\nSamplerate:        %u Hz\nChannels:          %u\n"
-                "Bits per sample:   %u\nCodec:             %s\n",
-                f.sample_rate, f.channels, f.bit_depth, f.codec.c_str());
-            out += line;
-        }
-        out += sep2 + "\n";
-
+        out += sep+"\n\n";
+        std::snprintf(line,sizeof(line),"Number of tracks:  %zu\n",tracks.size()); out += line;
+        std::snprintf(line,sizeof(line),"Official DR value: DR%d\n",dr::album_dr(tracks)); out += line;
+        if (!tracks.empty()) { const auto& f=tracks[0];
+            std::snprintf(line,sizeof(line),"\nSamplerate:        %u Hz\nChannels:          %u\nBits per sample:   %u\nCodec:             %s\n",
+                          f.sample_rate,f.channels,f.bit_depth,f.codec.c_str()); out += line; }
+        out += sep2+"\n";
     } else {
-        std::string sep(120, '-');
-        std::string sep2(120, '=');
-
-        auto now = std::chrono::system_clock::now();
-        auto tt = std::chrono::system_clock::to_time_t(now);
-        char date_buf[32];
-        std::strftime(date_buf, sizeof(date_buf), "%Y-%m-%d %H:%M:%S", std::localtime(&tt));
-
-        out += std::string(PROGRAM_NAME) + " " + PROGRAM_VERSION +
-               " — Extended Dynamic Range Analysis\n";
-        out += "log date: " + std::string(date_buf) + "\n\n";
-        out += sep + "\nAnalyzed: " + folder_path + "\n" + sep + "\n\n";
-
-        std::snprintf(line, sizeof(line), "%-6s %-10s %-10s %-10s %-10s %-8s %-8s  %s\n",
-                      "DR", "Peak", "RMS", "LUFS", "PLR", "Crest", "Dur", "Filename");
-        out += line;
-        out += sep + "\n";
-
-        double sum_lufs = 0.0;
+        std::string sep(120,'-'), sep2(120,'=');
+        auto now=std::chrono::system_clock::now(); auto tt=std::chrono::system_clock::to_time_t(now);
+        char db[32]; std::strftime(db,sizeof(db),"%Y-%m-%d %H:%M:%S",std::localtime(&tt));
+        out += std::string(PROGRAM_NAME)+" "+PROGRAM_VERSION+" — Extended Dynamic Range Analysis\n";
+        out += "log date: "+std::string(db)+"\n\n"+sep+"\nAnalyzed: "+folder_path+"\n"+sep+"\n\n";
+        std::snprintf(line,sizeof(line),"%-6s %-10s %-10s %-10s %-10s %-8s %-8s  %s\n","DR","Peak","RMS","LUFS","PLR","Crest","Dur","Filename");
+        out += line; out += sep+"\n";
+        double sum_lufs=0.0;
         for (const auto& t : tracks) {
-            auto name = t.filename;
-            auto dot = name.rfind('.');
-            if (dot != std::string::npos) name = name.substr(0, dot);
-
-            char peak_s[16];
-            if (t.is_clipping) std::snprintf(peak_s, sizeof(peak_s), "over");
-            else std::snprintf(peak_s, sizeof(peak_s), "%.2f dB", t.peak_dbfs);
-
-            std::snprintf(line, sizeof(line),
-                "DR%-3d  %-10s %-10.2f %-10.1f %-10.1f %-8.1f %-8s  %s\n",
-                t.dr_score, peak_s, t.rms_dbfs, t.integrated_lufs,
-                t.plr_db, t.crest_factor_db,
-                format_duration(t.duration_secs).c_str(), name.c_str());
-            out += line;
-            sum_lufs += t.integrated_lufs;
+            auto name=t.filename; auto dot=name.rfind('.'); if(dot!=std::string::npos) name=name.substr(0,dot);
+            char ps[16]; if(t.is_clipping) std::snprintf(ps,sizeof(ps),"over"); else std::snprintf(ps,sizeof(ps),"%.2f dB",t.peak_dbfs);
+            std::snprintf(line,sizeof(line),"DR%-3d  %-10s %-10.2f %-10.1f %-10.1f %-8.1f %-8s  %s\n",
+                          t.dr_score,ps,t.rms_dbfs,t.integrated_lufs,t.plr_db,t.crest_factor_db,
+                          format_duration(t.duration_secs).c_str(),name.c_str());
+            out += line; sum_lufs += t.integrated_lufs;
         }
-
-        out += sep + "\n\n";
-        std::snprintf(line, sizeof(line), "Number of tracks:  %zu\n", tracks.size());
-        out += line;
-        std::snprintf(line, sizeof(line), "Official DR value: DR%d\n", dr::album_dr(tracks));
-        out += line;
+        out += sep+"\n\n";
+        std::snprintf(line,sizeof(line),"Number of tracks:  %zu\n",tracks.size()); out += line;
+        std::snprintf(line,sizeof(line),"Official DR value: DR%d\n",dr::album_dr(tracks)); out += line;
         if (!tracks.empty()) {
-            std::snprintf(line, sizeof(line), "Avg. loudness:     %.1f LUFS\n",
-                          sum_lufs / tracks.size());
-            out += line;
-            const auto& f = tracks[0];
-            std::snprintf(line, sizeof(line),
-                "\nSamplerate:        %u Hz\nChannels:          %u\n"
-                "Bits per sample:   %u\nCodec:             %s\n"
-                "Verdict:           %s\n",
-                f.sample_rate, f.channels, f.bit_depth, f.codec.c_str(),
-                dr::verdict_string(dr::classify_dr(dr::album_dr(tracks))));
-            out += line;
+            std::snprintf(line,sizeof(line),"Avg. loudness:     %.1f LUFS\n",sum_lufs/tracks.size()); out += line;
+            const auto& f=tracks[0];
+            std::snprintf(line,sizeof(line),"\nSamplerate:        %u Hz\nChannels:          %u\nBits per sample:   %u\nCodec:             %s\nVerdict:           %s\n",
+                          f.sample_rate,f.channels,f.bit_depth,f.codec.c_str(),
+                          dr::verdict_string(dr::classify_dr(dr::album_dr(tracks)))); out += line;
         }
-        out += sep2 + "\n";
+        out += sep2+"\n";
     }
-
     return out;
 }
 
-// ── Analysis worker thread ─────────────────────────────────────────────────
+// ── Analysis worker ─────────────────────────────────────────────────────────
 static void analysis_worker(AppState* app) {
     auto files = app->collect_files_from_path();
-    app->total_files.store(static_cast<int>(files.size()));
-
+    const int n = (int)files.size();
+    app->total_files.store(n);
     if (files.empty()) {
-        std::lock_guard<std::mutex> lock(app->mtx);
+        std::lock_guard<std::mutex> lk(app->mtx);
         app->error_log += "No supported audio files found.\n";
         app->is_analyzing.store(false);
         return;
     }
 
-    std::vector<dr::TrackResult> results;
-    results.reserve(files.size());
+    // Decode + analyze files in parallel. Each file is independent (decode_file
+    // and analyze_track hold no shared mutable state); DSD files still fan out
+    // per-channel inside decode_file. Results land in per-index slots so the
+    // original file order is preserved; a failure just leaves ok[i] = 0 and is
+    // recorded in the error log. Threads pull work via an atomic cursor and
+    // stop early on cancel.
+    std::vector<dr::TrackResult> slots(n);
+    std::vector<uint8_t>         ok(n, 0);
+    std::atomic<int> next{0}, completed{0};
 
-    for (size_t i = 0; i < files.size(); ++i) {
-        if (app->cancel_requested.load()) break;
+    unsigned hw = std::thread::hardware_concurrency();
+    const int nthreads = std::min<int>(hw ? (int)hw : 4, n);
 
-        auto fname = fs::path(files[i]).filename().string();
-        {
-            std::lock_guard<std::mutex> lock(app->mtx);
-            app->current_filename = fname;
+    auto do_work = [&]() {
+        for (;;) {
+            if (app->cancel_requested.load()) break;
+            int i = next.fetch_add(1);
+            if (i >= n) break;
+            auto fname = fs::path(files[i]).filename().string();
+            { std::lock_guard<std::mutex> lk(app->mtx); app->current_filename = fname; }
+            try {
+                auto ad = audio::decode_file(files[i], app->active_dsd_opt);
+                slots[i] = dr::analyze_track(ad.channels, ad.sample_rate,
+                                             ad.bit_depth, ad.codec, fname);
+                ok[i] = 1;
+            } catch (const std::exception& e) {
+                std::lock_guard<std::mutex> lk(app->mtx);
+                app->error_log += fname + ": " + e.what() + "\n";
+            }
+            int done = completed.fetch_add(1) + 1;
+            app->current_file.store(done);
+            app->progress.store((float)done / (float)n);
         }
-        app->current_file.store(static_cast<int>(i + 1));
-        app->progress.store(static_cast<float>(i) / static_cast<float>(files.size()));
+    };
 
-        try {
-            auto ad = audio::decode_file(files[i]);
-            auto result = dr::analyze_track(
-                ad.channels, ad.sample_rate, ad.bit_depth, ad.codec, fname);
-            results.push_back(std::move(result));
-        } catch (const std::exception& e) {
-            std::lock_guard<std::mutex> lock(app->mtx);
-            app->error_log += fname + ": " + e.what() + "\n";
-        }
-    }
+    std::vector<std::thread> pool;
+    pool.reserve(nthreads);
+    for (int k = 0; k < nthreads; ++k) pool.emplace_back(do_work);
+    for (auto& th : pool) th.join();
 
     app->progress.store(1.0f);
 
-    // Write log file
+    // Compact successful results back into original file order.
+    std::vector<dr::TrackResult> results;
+    results.reserve(n);
+    for (int i = 0; i < n; ++i) if (ok[i]) results.push_back(std::move(slots[i]));
+
     if (!results.empty() && !app->cancel_requested.load()) {
         std::string out_path = app->get_output_filepath();
         if (!out_path.empty()) {
-            std::string folder = app->path_buf;
-            std::string log = generate_log(results, folder, app->format_idx);
-            try {
-                std::ofstream ofs(out_path);
-                if (ofs) {
-                    ofs << log;
-                    std::lock_guard<std::mutex> lock(app->mtx);
-                    app->error_log += "Log saved to: " + out_path + "\n";
-                }
-            } catch (...) {
-                std::lock_guard<std::mutex> lock(app->mtx);
-                app->error_log += "Failed to write: " + out_path + "\n";
-            }
+            std::string log = generate_log(results, app->path_buf, app->format_idx);
+            try { std::ofstream ofs(out_path); if (ofs) { ofs<<log;
+                   std::lock_guard<std::mutex> lk(app->mtx); app->error_log += "Log saved to: "+out_path+"\n"; } }
+            catch (...) { std::lock_guard<std::mutex> lk(app->mtx); app->error_log += "Failed to write: "+out_path+"\n"; }
         }
     }
-
-    {
-        std::lock_guard<std::mutex> lock(app->mtx);
-        app->results = std::move(results);
-        app->analysis_done = true;
-        app->current_filename.clear();
-    }
+    { std::lock_guard<std::mutex> lk(app->mtx);
+      app->results = std::move(results); app->analysis_done = true; app->current_filename.clear(); }
     app->is_analyzing.store(false);
 }
 
-// ── Start / cancel analysis ────────────────────────────────────────────────
 static void start_analysis(AppState* app) {
     if (app->is_analyzing.load()) return;
-
-    {
-        std::lock_guard<std::mutex> lock(app->mtx);
-        app->results.clear();
-        app->error_log.clear();
-        app->analysis_done = false;
-    }
-    app->progress.store(0.0f);
-    app->current_file.store(0);
-    app->cancel_requested.store(false);
-    app->is_analyzing.store(true);
-    app->selected_track = 0;
-
+    { std::lock_guard<std::mutex> lk(app->mtx);
+      app->results.clear(); app->error_log.clear(); app->analysis_done = false; }
+    app->progress.store(0.0f); app->current_file.store(0);
+    app->cancel_requested.store(false); app->is_analyzing.store(true); app->selected_track = 0;
+    app->active_dsd_opt = app->build_dsd_opts();   // snapshot options for the thread
     if (app->worker.joinable()) app->worker.join();
     app->worker = std::thread(analysis_worker, app);
 }
+static void cancel_analysis(AppState* app) { app->cancel_requested.store(true); }
 
-static void cancel_analysis(AppState* app) {
-    app->cancel_requested.store(true);
+// ── Bands ────────────────────────────────────────────────────────────────────
+static void band_header(AppState& app) {
+    ImGui::PushFont(theme::g_brand);
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::P().accent);
+    ImGui::TextUnformatted("crête");
+    ImGui::PopStyleColor(); ImGui::PopFont();
+
+    ImGui::SameLine(0, 14);
+    ImGui::AlignTextToFramePadding();
+    theme::Kicker("DYNAMIC RANGE METER");
+    ImGui::SameLine(0, 12);
+    ImGui::TextDisabled("v%s", PROGRAM_VERSION);
+
+    float btns = 190.0f;
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - btns + ImGui::GetCursorPosX());
+    if (theme::GhostButton("DR Guide")) { app.side_open = !(app.side_open && app.side_tab==1); app.side_tab = 1; }
+    ImGui::SameLine();
+    if (theme::GhostButton("Settings")) { app.side_open = !(app.side_open && app.side_tab==0); app.side_tab = 0; }
+    theme::Rule(2.0f);
 }
 
-// ── Custom ImGui styling ───────────────────────────────────────────────────
-static void setup_style() {
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 4.0f;
-    style.FrameRounding = 3.0f;
-    style.GrabRounding = 3.0f;
-    style.ScrollbarRounding = 3.0f;
-    style.TabRounding = 3.0f;
-    style.WindowPadding = ImVec2(12, 12);
-    style.FramePadding = ImVec2(8, 4);
-    style.ItemSpacing = ImVec2(8, 6);
+static void band_source(AppState& app, bool analyzing) {
+    theme::Kicker("SOURCE");
+    float btn = 88, fmt_w = 260, analyze_w = 120;
+    float reserve = btn*2 + fmt_w + analyze_w + 8*4;
+    ImGui::SetNextItemWidth(std::max(160.0f, ImGui::GetContentRegionAvail().x - reserve));
+    ImGui::InputTextWithHint("##path", "Drop a folder or choose a file…", app.path_buf, sizeof(app.path_buf));
+    ImGui::SameLine();
+    if (ImGui::Button("File…", ImVec2(btn,0))) { auto f=nfd::open_file("Select Audio File");
+        if(!f.empty()) std::strncpy(app.path_buf,f.c_str(),sizeof(app.path_buf)-1); }
+    ImGui::SameLine();
+    if (ImGui::Button("Folder…", ImVec2(btn,0))) { auto f=nfd::open_folder("Select Album Folder");
+        if(!f.empty()) std::strncpy(app.path_buf,f.c_str(),sizeof(app.path_buf)-1); }
 
-    ImGui::StyleColorsDark();
-    auto& c = style.Colors;
-    c[ImGuiCol_WindowBg]      = ImVec4(0.10f, 0.10f, 0.12f, 1.0f);
-    c[ImGuiCol_Header]        = ImVec4(0.20f, 0.22f, 0.27f, 1.0f);
-    c[ImGuiCol_HeaderHovered] = ImVec4(0.28f, 0.30f, 0.38f, 1.0f);
-    c[ImGuiCol_Button]        = ImVec4(0.22f, 0.24f, 0.32f, 1.0f);
-    c[ImGuiCol_ButtonHovered] = ImVec4(0.30f, 0.35f, 0.48f, 1.0f);
-    c[ImGuiCol_FrameBg]       = ImVec4(0.15f, 0.16f, 0.19f, 1.0f);
-    c[ImGuiCol_Tab]           = ImVec4(0.18f, 0.20f, 0.25f, 1.0f);
-    c[ImGuiCol_TabSelected]   = ImVec4(0.28f, 0.32f, 0.42f, 1.0f);
-    c[ImGuiCol_TableHeaderBg] = ImVec4(0.18f, 0.20f, 0.25f, 1.0f);
+    ImGui::SameLine(0, 16);
+    theme::Segmented("fmt", FORMAT_LABELS, 3, &app.format_idx);
+
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - analyze_w);
+    if (!analyzing) {
+        bool empty = (app.path_buf[0]=='\0');
+        if (empty) ImGui::BeginDisabled();
+        if (theme::PrimaryButton(app.analysis_done ? "Re-analyze" : "Analyze", ImVec2(analyze_w,0)))
+            start_analysis(&app);
+        if (empty) ImGui::EndDisabled();
+    } else {
+        if (ImGui::Button("Cancel", ImVec2(analyze_w,0))) cancel_analysis(&app);
+    }
+    theme::Rule(1.0f);
 }
 
-// ── Render detail panel for selected track ─────────────────────────────────
-static void render_detail_panel(AppState& app) {
+static void band_dsd(AppState& app) {
+    const theme::Palette& p = theme::P();
+    // accentSoft inset with a left accent bar
+    ImVec2 c0 = ImGui::GetCursorScreenPos();
+    float w = ImGui::GetContentRegionAvail().x;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    float pad = 10.0f, h = 34.0f;
+    dl->AddRectFilled(ImVec2(c0.x-6, c0.y), ImVec2(c0.x+w, c0.y+h), theme::u32(p.accentSoft));
+    dl->AddRectFilled(ImVec2(c0.x-6, c0.y), ImVec2(c0.x-3, c0.y+h), theme::u32(p.accent));
+    ImGui::Dummy(ImVec2(0, pad*0.4f));
+
+    ImGui::PushStyleColor(ImGuiCol_Text, p.accentInk);
+    ImGui::PushFont(theme::g_head); ImGui::TextUnformatted("DSD SOURCE"); ImGui::PopFont();
+    ImGui::PopStyleColor();
+    ImGui::SameLine(); ImGui::TextDisabled("· DSF / DFF");
+
+    bool direct = (app.dsd_mode_idx == 1);
+    ImGui::SameLine(0, 20); theme::Kicker("CHAIN"); ImGui::SameLine();
+    theme::Segmented("dsdmode", DSD_MODE_LABELS, 2, &app.dsd_mode_idx);
+
+    ImGui::SameLine(0, 16); theme::Kicker("FILTER"); ImGui::SameLine();
+    if (direct) app.dsd_filter_idx = 0;
+    theme::Segmented("dsdfilt", DSD_FILTER_LABELS, 3, &app.dsd_filter_idx, direct ? 0b110u : 0u);
+
+    ImGui::SameLine(0, 16); theme::Kicker("RATE"); ImGui::SameLine();
+    if (direct) app.dsd_rate_idx = 0;
+    theme::Segmented("dsdrate", DSD_RATE_LABELS, 4, &app.dsd_rate_idx, direct ? 0b1110u : 0u);
+    ImGui::SameLine(0, 6); ImGui::TextDisabled("kHz");
+    ImGui::Dummy(ImVec2(0, 8));
+    theme::Rule(2.0f);
+}
+
+static void stat(const char* value, const char* label, const ImVec4* vc = nullptr) {
+    ImGui::BeginGroup();
+    ImGui::PushFont(theme::g_head);
+    ImGui::PushStyleColor(ImGuiCol_Text, vc ? *vc : theme::P().ink);
+    ImGui::TextUnformatted(value);
+    ImGui::PopStyleColor(); ImGui::PopFont();
+    theme::Kicker(label);
+    ImGui::EndGroup();
+}
+
+static void band_verdict(AppState& app) {
+    int adr = dr::album_dr(app.results);
+    const char* verdict = dr::verdict_string(dr::classify_dr((double)adr));
+    ImGui::BeginGroup();
+    ImGui::PushFont(theme::g_big);
+    char drs[16]; std::snprintf(drs,sizeof(drs),"DR%d",adr);
+    ImGui::TextUnformatted(drs);
+    ImGui::PopFont();
+    theme::Tag(verdict);
+    ImGui::EndGroup();
+
+    ImGui::SameLine(0, 24);
+    // stats: files / avg lufs / max TP / total
+    double sum_lufs=0, dur=0, maxtp=-99;
+    for (auto& t: app.results){ sum_lufs+=t.integrated_lufs; dur+=t.duration_secs; maxtp=std::max(maxtp,t.max_true_peak_dbtp); }
+    char b1[24],b2[24],b3[24],b4[24];
+    std::snprintf(b1,sizeof(b1),"%zu",app.results.size());
+    std::snprintf(b2,sizeof(b2),"%.1f",app.results.empty()?0:sum_lufs/app.results.size());
+    std::snprintf(b3,sizeof(b3),"%+.1f",maxtp);
+    std::snprintf(b4,sizeof(b4),"%s",format_duration(dur).c_str());
+    ImVec4 tpc = (maxtp > -0.1) ? theme::P().accent : theme::P().ink;
+    ImGui::AlignTextToFramePadding();
+    stat(b1,"FILES");           ImGui::SameLine(0,22);
+    stat(b2,"AVG LUFS");        ImGui::SameLine(0,22);
+    stat(b3,"MAX dBTP",&tpc);   ImGui::SameLine(0,22);
+    stat(b4,"TOTAL");
+    theme::Rule(2.0f);
+}
+
+static void band_progress(AppState& app) {
+    float prog = app.progress.load(); int cur=app.current_file.load(), tot=app.total_files.load();
+    ImGui::PushFont(theme::g_head);
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::P().accent);
+    ImGui::TextUnformatted("ANALYZING"); ImGui::PopStyleColor(); ImGui::PopFont();
+    ImGui::SameLine();
+    // render_ui already holds app.mtx across this call — do NOT re-lock here:
+    // app.mtx is non-recursive, so a second lock on the UI thread deadlocks it.
+    ImGui::TextDisabled("· %d / %d · %s", cur, tot, app.current_filename.c_str());
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 40 + ImGui::GetCursorPosX());
+    ImGui::Text("%d%%", (int)(prog*100));
+    ImGui::ProgressBar(prog, ImVec2(-FLT_MIN, 8), "");
+    theme::Rule(2.0f);
+}
+
+static void empty_state(AppState&) {
+    ImGui::Dummy(ImVec2(0, 40));
+    const char* t1 = "Drop an album folder or an audio file";
+    float tw = 0; { ImGui::PushFont(theme::g_brand); tw = ImGui::CalcTextSize(t1).x; ImGui::PopFont(); }
+    ImGui::SetCursorPosX((ImGui::GetWindowWidth()-tw)*0.5f);
+    ImGui::PushFont(theme::g_brand); ImGui::TextUnformatted(t1); ImGui::PopFont();
+    const char* t2 = "…or use the File / Folder buttons above to browse";
+    ImGui::SetCursorPosX((ImGui::GetWindowWidth()-ImGui::CalcTextSize(t2).x)*0.5f);
+    ImGui::TextDisabled("%s", t2);
+    const char* chips = "WAV   AIFF   FLAC   DSF   DFF   CUE";
+    ImGui::Dummy(ImVec2(0,8));
+    ImGui::SetCursorPosX((ImGui::GetWindowWidth()-ImGui::CalcTextSize(chips).x)*0.5f);
+    ImGui::TextDisabled("%s", chips);
+}
+
+// ── Detail panel (grouped, not a dense grid) ────────────────────────────────
+static void detail_panel(AppState& app) {
     if (app.results.empty()) return;
-
-    int n = static_cast<int>(app.results.size());
-    if (app.selected_track < 0) app.selected_track = 0;
-    if (app.selected_track >= n) app.selected_track = n - 1;
-
+    int n=(int)app.results.size();
+    app.selected_track = std::clamp(app.selected_track, 0, n-1);
     const auto& t = app.results[app.selected_track];
     size_t nch = t.ch_metrics.size();
+    auto name = t.filename; auto dot=name.rfind('.'); if(dot!=std::string::npos) name=name.substr(0,dot);
+    char b[64];
 
-    // ── Navigation bar ─────────────────────────────────────────────────
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    bool at_start = (app.selected_track == 0);
-    bool at_end   = (app.selected_track == n - 1);
-
-    if (at_start) ImGui::BeginDisabled();
-    if (ImGui::ArrowButton("##prev", ImGuiDir_Left))
-        app.selected_track--;
-    if (at_start) ImGui::EndDisabled();
-
-    ImGui::SameLine();
-
-    // Track counter + filename
-    auto name = t.filename;
-    auto dot = name.rfind('.');
-    if (dot != std::string::npos) name = name.substr(0, dot);
-
-    ImGui::Text("%d/%d", app.selected_track + 1, n);
-    ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.0f, 1.0f), "%s", name.c_str());
-
-    ImGui::SameLine();
-    if (at_end) ImGui::BeginDisabled();
-    if (ImGui::ArrowButton("##next", ImGuiDir_Right))
-        app.selected_track++;
-    if (at_end) ImGui::EndDisabled();
-
-    ImGui::SameLine();
-    ImGui::TextDisabled("  %s %u-bit / %u Hz  |  %s",
-        t.codec.c_str(), t.bit_depth, t.sample_rate,
+    ImVec4 acc = theme::P().accent;
+    theme::Kicker("SELECTED TRACK", &acc);
+    ImGui::PushFont(theme::g_head); ImGui::TextWrapped("%s", name.c_str()); ImGui::PopFont();
+    ImGui::TextDisabled("%02d · %u ch · %s %u-bit / %u Hz · %s",
+        app.selected_track+1, t.channels, t.codec.c_str(), t.bit_depth, t.sample_rate,
         format_duration(t.duration_secs).c_str());
 
-    ImGui::Spacing();
+    // Hero DR + per-channel
+    theme::Rule(2.0f, 8.0f);
+    ImGui::BeginGroup();
+    ImGui::PushFont(theme::g_big);
+    std::snprintf(b,sizeof(b),"DR%d",t.dr_score); ImGui::TextUnformatted(b);
+    ImGui::PopFont();
+    ImGui::EndGroup();
+    ImGui::SameLine(0,14);
+    ImGui::BeginGroup();
+    theme::Kicker("DYNAMIC RANGE · PMF");
+    if (nch >= 2) ImGui::Text("L  %.1f   /   R  %.1f", t.ch_metrics[0].dr_raw, t.ch_metrics[1].dr_raw);
+    else if (nch == 1) ImGui::Text("Mono  %.1f", t.ch_metrics[0].dr_raw);
+    ImGui::EndGroup();
+    theme::Rule(2.0f, 8.0f);
 
-    // ── Channel labels ─────────────────────────────────────────────────
-    auto ch_label = [&](size_t c) -> const char* {
-        if (nch == 1) return "Mono";
-        if (nch == 2) return (c == 0) ? "Left" : "Right";
-        static char buf[8];
-        std::snprintf(buf, sizeof(buf), "Ch%zu", c + 1);
-        return buf;
-    };
+    theme::SectionLabel("DYNAMICS");
+    std::snprintf(b,sizeof(b),"%.2f dB", t.psr_db);          theme::KeyValue("Min PSR", b);
+    std::snprintf(b,sizeof(b),"%.2f dB", t.plr_db);          theme::KeyValue("PLR", b);
+    std::snprintf(b,sizeof(b),"%.2f LU", t.lra_lu);          theme::KeyValue("LRA", b);
+    std::snprintf(b,sizeof(b),"%.2f dB", t.crest_factor_db); theme::KeyValue("Crest factor", b);
 
-    // ── Metrics table ──────────────────────────────────────────────────
-    int col_count = static_cast<int>(nch) + 2; // metric label + per-channel + joint
-    ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                            ImGuiTableFlags_SizingFixedFit;
+    theme::SectionLabel("LOUDNESS");
+    std::snprintf(b,sizeof(b),"%.2f LUFS", t.integrated_lufs);    theme::KeyValue("Integrated", b);
+    std::snprintf(b,sizeof(b),"%.2f LUFS", t.max_momentary_lufs); theme::KeyValue("Max Momentary", b);
+    std::snprintf(b,sizeof(b),"%.2f LUFS", t.max_short_term_lufs);theme::KeyValue("Max Short-term", b);
 
-    if (ImGui::BeginTable("Detail", col_count, flags)) {
-        // Column setup
-        ImGui::TableSetupColumn("Metric", ImGuiTableColumnFlags_WidthFixed, 160);
-        for (size_t c = 0; c < nch; ++c)
-            ImGui::TableSetupColumn(ch_label(c), ImGuiTableColumnFlags_WidthFixed, 95);
-        ImGui::TableSetupColumn("Joint", ImGuiTableColumnFlags_WidthFixed, 110);
+    theme::SectionLabel(nch>=2 ? "PEAKS · L / R" : "PEAKS");
+    if (nch >= 2) {
+        std::snprintf(b,sizeof(b),"%.2f / %.2f dB", t.ch_metrics[0].sample_peak_dbfs, t.ch_metrics[1].sample_peak_dbfs);
+        theme::KeyValue("Sample Peak", b);
+        std::snprintf(b,sizeof(b),"%.2f / %.2f dBTP", t.ch_metrics[0].true_peak_dbtp, t.ch_metrics[1].true_peak_dbtp);
+        theme::KeyValue("True Peak", b);
+    } else {
+        ImVec4 pc = t.is_clipping ? theme::P().accent : theme::P().ink;
+        if (t.is_clipping) theme::KeyValue("Sample Peak", "over", &pc);
+        else { std::snprintf(b,sizeof(b),"%.2f dB", t.peak_dbfs); theme::KeyValue("Sample Peak", b); }
+        std::snprintf(b,sizeof(b),"%.2f dBTP", t.max_true_peak_dbtp); theme::KeyValue("True Peak", b);
+    }
+    std::snprintf(b,sizeof(b),"%.2f dBTP", t.max_true_peak_dbtp); theme::KeyValue("Max True Peak", b);
+}
+
+// ── Results (table + detail split) ──────────────────────────────────────────
+static void band_results(AppState& app) {
+    float avail_h = ImGui::GetContentRegionAvail().y;
+    float detail_w = 372.0f;
+    ImGui::BeginChild("tbl", ImVec2(ImGui::GetContentRegionAvail().x - detail_w - 20, avail_h), false);
+
+    ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+        ImGuiTableFlags_Sortable | ImGuiTableFlags_Reorderable | ImGuiTableFlags_BordersInnerH;
+    int ncols = (app.format_idx==2) ? 7 : 7; // DR TRACK PEAK RMS LUFS PLR DUR
+    if (ImGui::BeginTable("Results", ncols, flags)) {
+        ImGui::TableSetupColumn("DR", ImGuiTableColumnFlags_WidthFixed|ImGuiTableColumnFlags_DefaultSort, 120);
+        ImGui::TableSetupColumn("TRACK", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("PEAK", ImGuiTableColumnFlags_WidthFixed, 78);
+        ImGui::TableSetupColumn("RMS", ImGuiTableColumnFlags_WidthFixed, 74);
+        ImGui::TableSetupColumn("LUFS", ImGuiTableColumnFlags_WidthFixed, 66);
+        ImGui::TableSetupColumn("PLR", ImGuiTableColumnFlags_WidthFixed, 58);
+        ImGui::TableSetupColumn("DUR", ImGuiTableColumnFlags_WidthFixed, 54);
+        ImGui::TableSetupScrollFreeze(0,1);
         ImGui::TableHeadersRow();
 
-        char buf[32];
+        if (ImGuiTableSortSpecs* sort = ImGui::TableGetSortSpecs())
+            if (sort->SpecsDirty && sort->SpecsCount>0) {
+                auto& sp = sort->Specs[0]; bool asc = sp.SortDirection==ImGuiSortDirection_Ascending;
+                std::sort(app.results.begin(), app.results.end(),
+                    [&](const dr::TrackResult&a,const dr::TrackResult&b){
+                        switch(sp.ColumnIndex){
+                            case 0: return asc? a.dr_score<b.dr_score : a.dr_score>b.dr_score;
+                            case 2: return asc? a.peak_dbfs<b.peak_dbfs : a.peak_dbfs>b.peak_dbfs;
+                            case 3: return asc? a.rms_dbfs<b.rms_dbfs : a.rms_dbfs>b.rms_dbfs;
+                            case 4: return asc? a.integrated_lufs<b.integrated_lufs : a.integrated_lufs>b.integrated_lufs;
+                            case 5: return asc? a.plr_db<b.plr_db : a.plr_db>b.plr_db;
+                            case 6: return asc? a.duration_secs<b.duration_secs : a.duration_secs>b.duration_secs;
+                            default: return asc? a.filename<b.filename : a.filename>b.filename;
+                        }});
+                sort->SpecsDirty=false;
+            }
 
-        // Helper: row with per-channel values and a joint value
-        auto metric_row = [&](const char* label, auto ch_fn, const char* joint_str,
-                              ImVec4 joint_color = ImVec4(1,1,1,1)) {
+        char b[64];
+        for (int i=0;i<(int)app.results.size();++i) {
+            const auto& t = app.results[i];
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            ImGui::TextDisabled("%s", label);
-            for (size_t c = 0; c < nch; ++c) {
-                ImGui::TableSetColumnIndex(static_cast<int>(c) + 1);
-                ch_fn(c);
-            }
-            ImGui::TableSetColumnIndex(static_cast<int>(nch) + 1);
-            ImGui::TextColored(joint_color, "%s", joint_str);
-        };
+            char sid[24]; std::snprintf(sid,sizeof(sid),"##r%d",i);
+            if (ImGui::Selectable(sid, i==app.selected_track, ImGuiSelectableFlags_SpanAllColumns))
+                app.selected_track = i;
+            ImGui::SameLine(0,0);
+            theme::DrMeterBar(t.dr_score);
 
-        // True Peak
-        std::snprintf(buf, sizeof(buf), "%.2f dB", t.max_true_peak_dbtp);
-        metric_row("Max True Peak", [&](size_t c) {
-            char b[32]; std::snprintf(b, sizeof(b), "%.2f dB", t.ch_metrics[c].true_peak_dbtp);
-            ImGui::Text("%s", b);
-        }, buf);
+            ImGui::TableSetColumnIndex(1);
+            auto name=t.filename; auto dot=name.rfind('.'); if(dot!=std::string::npos) name=name.substr(0,dot);
+            ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(name.c_str());
 
-        // Sample Peak
-        {
-            char jp[32];
-            if (t.is_clipping) std::snprintf(jp, sizeof(jp), "over");
-            else std::snprintf(jp, sizeof(jp), "%.2f dB", t.peak_dbfs);
-            ImVec4 col = t.is_clipping ? ImVec4(0.95f, 0.3f, 0.2f, 1.0f) : ImVec4(1,1,1,1);
-            metric_row("Max Sample Peak", [&](size_t c) {
-                char b[32]; std::snprintf(b, sizeof(b), "%.2f dB", t.ch_metrics[c].sample_peak_dbfs);
-                ImGui::Text("%s", b);
-            }, jp, col);
+            ImGui::TableSetColumnIndex(2);
+            if (t.is_clipping) { ImGui::PushStyleColor(ImGuiCol_Text, theme::P().accent); ImGui::TextUnformatted("over"); ImGui::PopStyleColor(); }
+            else { std::snprintf(b,sizeof(b),"%.2f",t.peak_dbfs); ImGui::TextUnformatted(b); }
+            ImGui::TableSetColumnIndex(3); std::snprintf(b,sizeof(b),"%.1f",t.rms_dbfs); ImGui::TextUnformatted(b);
+            ImGui::TableSetColumnIndex(4); std::snprintf(b,sizeof(b),"%.1f",t.integrated_lufs); ImGui::TextUnformatted(b);
+            ImGui::TableSetColumnIndex(5); std::snprintf(b,sizeof(b),"%.1f",t.plr_db); ImGui::TextUnformatted(b);
+            ImGui::TableSetColumnIndex(6);
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::P().muted);
+            ImGui::TextUnformatted(format_duration(t.duration_secs).c_str());
+            ImGui::PopStyleColor();
         }
-
-        // RMS
-        std::snprintf(buf, sizeof(buf), "%.2f dB", t.rms_dbfs);
-        metric_row("RMS", [&](size_t c) {
-            char b[32]; std::snprintf(b, sizeof(b), "%.2f dB", t.ch_metrics[c].rms_dbfs);
-            ImGui::Text("%s", b);
-        }, buf);
-
-        // Max Momentary Loudness
-        std::snprintf(buf, sizeof(buf), "%.2f LUFS", t.max_momentary_lufs);
-        metric_row("Max Momentary", [&](size_t c) {
-            char b[32]; std::snprintf(b, sizeof(b), "%.2f", t.ch_metrics[c].max_momentary_lufs);
-            ImGui::TextDisabled("%s", b);
-        }, buf);
-
-        // Max Short-Term Loudness
-        std::snprintf(buf, sizeof(buf), "%.2f LUFS", t.max_short_term_lufs);
-        metric_row("Max Short-Term", [&](size_t c) {
-            char b[32]; std::snprintf(b, sizeof(b), "%.2f", t.ch_metrics[c].max_short_term_lufs);
-            ImGui::TextDisabled("%s", b);
-        }, buf);
-
-        // Integrated Loudness (joint only)
-        std::snprintf(buf, sizeof(buf), "%.2f LUFS", t.integrated_lufs);
-        metric_row("Integrated", [&](size_t) {
-            ImGui::TextDisabled("—");
-        }, buf);
-
-        // DR (PMF)
-        std::snprintf(buf, sizeof(buf), "DR%d", t.dr_score);
-        ImVec4 dr_col = dr_color(t.dr_score);
-        metric_row("DR (PMF)", [&](size_t c) {
-            char b[32]; std::snprintf(b, sizeof(b), "%.2f", t.ch_metrics[c].dr_raw);
-            ImGui::Text("%s", b);
-        }, buf, dr_col);
-
-        // Min PSR (joint only)
-        std::snprintf(buf, sizeof(buf), "%.2f dB", t.psr_db);
-        metric_row("Min PSR", [&](size_t) {
-            ImGui::TextDisabled("—");
-        }, buf);
-
-        // PLR (joint only)
-        std::snprintf(buf, sizeof(buf), "%.2f dB", t.plr_db);
-        metric_row("PLR", [&](size_t) {
-            ImGui::TextDisabled("—");
-        }, buf);
-
-        // LRA (joint only)
-        std::snprintf(buf, sizeof(buf), "%.2f LU", t.lra_lu);
-        metric_row("LRA", [&](size_t) {
-            ImGui::TextDisabled("—");
-        }, buf);
-
         ImGui::EndTable();
     }
+    ImGui::EndChild();
+
+    ImGui::SameLine(0, 0);
+    // 2px divider between table and detail
+    ImVec2 dp = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddRectFilled(dp, ImVec2(dp.x+2, dp.y+avail_h), theme::u32(theme::P().lineStrong));
+    ImGui::SameLine(0, 18);
+
+    ImGui::BeginChild("detail", ImVec2(detail_w-20, avail_h), false);
+    detail_panel(app);
+    ImGui::EndChild();
 }
 
-// ── Render settings modal ──────────────────────────────────────────────────
-static void render_settings(bool* open) {
-    ImGui::SetNextWindowSize(ImVec2(520, 440), ImGuiCond_FirstUseEver);
-    if (!ImGui::BeginPopupModal("Settings", open,
-            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar)) return;
+// ── Right side panel: Settings / DR Guide ────────────────────────────────────
+static void side_panel(AppState& app) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::P().surface);
+    ImGui::BeginChild("side", ImVec2(360, 0), true);
 
-    if (ImGui::BeginTabBar("SettingsTabs")) {
-        if (ImGui::BeginTabItem("About")) {
-            ImGui::Spacing();
-            ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f),
-                "%s %s", PROGRAM_NAME, PROGRAM_VERSION);
-            ImGui::Separator();
-            ImGui::Spacing();
-            ImGui::TextWrapped(
-                "Zero-dependency dynamic range meter.\n\n"
-                "Measures TT Dynamic Range (Pleasurize Music Foundation algorithm), "
-                "EBU R128 integrated loudness, and crest factor for lossless audio files.\n\n"
-                "Output compatible with dr.loudness-war.info submission format.");
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-            ImGui::Text("Supported formats:");
-            ImGui::BulletText("WAV (PCM 8/16/24/32-bit, IEEE float)");
-            ImGui::BulletText("AIFF / AIFF-C");
-            ImGui::BulletText("FLAC (built-in decoder)");
-            ImGui::BulletText("DSF / DFF (DSD, decimated to PCM)");
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-            ImGui::TextDisabled("MIT License - Ashwin Balaji 2026");
-            ImGui::TextDisabled("Sora typeface: SIL Open Font License 1.1");
-            ImGui::EndTabItem();
+    const char* tabs[] = { "Settings", "DR Guide" };
+    theme::Segmented("sidetabs", tabs, 2, &app.side_tab);
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 24 + ImGui::GetCursorPosX());
+    if (theme::GhostButton("×")) app.side_open = false;
+    theme::Rule(2.0f);
+
+    if (app.side_tab == 0) {
+        theme::SectionLabel("APPEARANCE");
+        if (ImGui::Checkbox("Dark shell", &app.dark_mode)) app.restyle_requested = true;
+
+        theme::SectionLabel("SAVE LOG TO");
+        ImGui::RadioButton("Analysis folder", &app.output_mode, 0);
+        ImGui::RadioButton("Custom folder",   &app.output_mode, 1);
+        if (app.output_mode == 1) {
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 40);
+            ImGui::InputText("##out", app.output_path, sizeof(app.output_path));
+            ImGui::SameLine();
+            if (ImGui::Button("…")) { auto f=nfd::open_folder("Select Output Folder");
+                if(!f.empty()) std::strncpy(app.output_path,f.c_str(),sizeof(app.output_path)-1); }
         }
 
-        if (ImGui::BeginTabItem("DR Guide")) {
-            ImGui::Spacing();
-            ImGui::TextWrapped(
-                "The Dynamic Range (DR) value measures the difference between the "
-                "loudest and average levels in a recording. Higher values indicate "
-                "more dynamic range — more contrast between loud and quiet passages.");
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            if (ImGui::BeginTable("DRGuide", 3,
-                    ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
-                ImGui::TableSetupColumn("DR Score", ImGuiTableColumnFlags_WidthFixed, 80);
-                ImGui::TableSetupColumn("Rating", ImGuiTableColumnFlags_WidthFixed, 100);
-                ImGui::TableSetupColumn("Description", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableHeadersRow();
-
-                auto row = [](const char* score, const char* rating,
-                              const char* desc, ImVec4 col) {
-                    ImGui::TableNextRow();
-                    ImGui::TableSetColumnIndex(0);
-                    ImGui::TextColored(col, "%s", score);
-                    ImGui::TableSetColumnIndex(1);
-                    ImGui::TextColored(col, "%s", rating);
-                    ImGui::TableSetColumnIndex(2);
-                    ImGui::TextWrapped("%s", desc);
-                };
-
-                row("> 20", "Exceptional",
-                    "Audiophile recordings, classical, jazz. Full dynamic expression.",
-                    ImVec4(0.2f, 0.9f, 0.3f, 1.0f));
-                row("14 - 20", "Excellent",
-                    "Well-mastered releases. Vinyl-era, high-quality remasters.",
-                    ImVec4(0.4f, 0.85f, 0.4f, 1.0f));
-                row("8 - 13", "Normal",
-                    "Typical commercial releases. Adequate dynamics for most genres.",
-                    ImVec4(0.9f, 0.85f, 0.3f, 1.0f));
-                row("5 - 7", "Compressed",
-                    "Heavily compressed. Loudness war casualty. Listening fatigue likely.",
-                    ImVec4(0.95f, 0.55f, 0.2f, 1.0f));
-                row("< 5", "Brickwalled",
-                    "Severely clipped. Near-constant loudness, no dynamics. Distorted.",
-                    ImVec4(0.95f, 0.25f, 0.2f, 1.0f));
-
-                ImGui::EndTable();
-            }
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-            ImGui::TextWrapped(
-                "Algorithm: Audio is split into 3-second blocks. "
-                "RMS and peak are computed per block with power summed across channels. "
-                "Silent blocks are discarded. The top 20%% loudest blocks by RMS are selected. "
-                "DR = 20 * log10(mean_peak / mean_rms) of those blocks.");
-            ImGui::EndTabItem();
+        theme::SectionLabel("ABOUT");
+        ImGui::PushFont(theme::g_head); ImGui::Text("%s %s", PROGRAM_NAME, PROGRAM_VERSION); ImGui::PopFont();
+        ImGui::TextWrapped("Zero-dependency dynamic range meter. TT Dynamic Range (PMF), "
+            "EBU R128 integrated loudness, true peak, PLR/PSR/LRA and crest factor. "
+            "Output compatible with dr.loudness-war.info.");
+        ImGui::Dummy(ImVec2(0,6));
+        ImGui::TextDisabled("Native: WAV · AIFF/AIFF-C · FLAC · DSF/DFF (DSD)");
+        ImGui::TextDisabled("MIT License — Ashwin Balaji 2026");
+        ImGui::TextDisabled("Archivo: SIL Open Font License 1.1");
+    } else {
+        theme::SectionLabel("WHAT DR MEANS");
+        ImGui::TextWrapped("The Dynamic Range (DR) value is the gap between the loudest and "
+            "average levels. Higher = more contrast between loud and quiet passages.");
+        theme::SectionLabel("SCALE");
+        struct Row { const char* s; const char* r; };
+        Row rows[] = {
+            {"> 20",   "Exceptional — audiophile, classical, jazz"},
+            {"14 – 20","Excellent — well-mastered, vinyl-era"},
+            {"8 – 13", "Normal — typical commercial release"},
+            {"5 – 7",  "Compressed — loudness-war casualty"},
+            {"< 5",    "Brickwalled — clipped, no dynamics"},
+        };
+        for (auto& r : rows) {
+            ImGui::PushFont(theme::g_head); ImGui::TextUnformatted(r.s); ImGui::PopFont();
+            ImGui::SameLine(80); ImGui::TextWrapped("%s", r.r);
         }
-
-        ImGui::EndTabBar();
+        theme::SectionLabel("ALGORITHM");
+        ImGui::TextWrapped("Audio is split into 3-second blocks; RMS and peak are computed per "
+            "block (power-summed across channels). Silent blocks are dropped. DR is taken from "
+            "the top 20%% loudest blocks, per channel, then averaged.");
     }
-
-    ImGui::Spacing();
-    if (ImGui::Button("Close", ImVec2(120, 0)))
-        ImGui::CloseCurrentPopup();
-
-    ImGui::EndPopup();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
 }
 
-// ── Main render function ───────────────────────────────────────────────────
+// ── Main render ──────────────────────────────────────────────────────────────
 static void render_ui(AppState& app) {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
     ImGui::Begin("##Main", nullptr,
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|
+        ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoBringToFrontOnFocus);
 
     bool analyzing = app.is_analyzing.load();
+    float side_w = app.side_open ? (360 + 20) : 0;
 
-    // ── Header ─────────────────────────────────────────────────────────
-    ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "%s", PROGRAM_NAME);
-    ImGui::SameLine();
-    ImGui::TextDisabled("v%s", PROGRAM_VERSION);
-    ImGui::SameLine(ImGui::GetWindowWidth() - 90);
-    if (ImGui::Button("Settings", ImVec2(76, 0)))
-        app.show_settings = true;
+    ImGui::BeginChild("content", ImVec2(ImGui::GetContentRegionAvail().x - side_w, 0), false);
+    band_header(app);
+    band_source(app, analyzing);
+    if (source_is_dsd(app)) band_dsd(app);
 
-    ImGui::Separator();
-    ImGui::Spacing();
+    // Held across the bands below (band_progress / band_verdict / band_results
+    // / error log) which read shared state — they must NOT re-lock app.mtx.
+    std::lock_guard<std::mutex> lk(app.mtx);
+    if (analyzing)              band_progress(app);
+    else if (!app.results.empty()) band_verdict(app);
 
-    // ── Path input ─────────────────────────────────────────────────────
-    ImGui::Text("Path:");
-    ImGui::SameLine();
-    float btn_w = 72;
-    float avail = ImGui::GetContentRegionAvail().x - (btn_w * 2 + 16);
-    ImGui::SetNextItemWidth(avail);
-    ImGui::InputText("##path", app.path_buf, sizeof(app.path_buf));
+    if (!app.results.empty())  band_results(app);
+    else if (!analyzing)       empty_state(app);
 
-    ImGui::SameLine();
-    if (ImGui::Button("File...", ImVec2(btn_w, 0))) {
-        auto f = nfd::open_file("Select Audio File");
-        if (!f.empty())
-            std::strncpy(app.path_buf, f.c_str(), sizeof(app.path_buf) - 1);
+    if (!app.error_log.empty()) {
+        ImGui::Dummy(ImVec2(0,4)); theme::Rule(1.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::P().accentInk);
+        ImGui::TextWrapped("%s", app.error_log.c_str());
+        ImGui::PopStyleColor();
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Folder...", ImVec2(btn_w, 0))) {
-        auto f = nfd::open_folder("Select Album Folder");
-        if (!f.empty())
-            std::strncpy(app.path_buf, f.c_str(), sizeof(app.path_buf) - 1);
-    }
+    ImGui::EndChild();
 
-    ImGui::Spacing();
-
-    // ── Output settings ────────────────────────────────────────────────
-    ImGui::Text("Save log to:");
-    ImGui::SameLine();
-    ImGui::RadioButton("Analysis folder", &app.output_mode, 0);
-    ImGui::SameLine();
-    ImGui::RadioButton("Custom:", &app.output_mode, 1);
-    if (app.output_mode == 1) {
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - btn_w - 8);
-        ImGui::InputText("##outpath", app.output_path, sizeof(app.output_path));
-        ImGui::SameLine();
-        if (ImGui::Button("...##out", ImVec2(btn_w, 0))) {
-            auto f = nfd::open_folder("Select Output Folder");
-            if (!f.empty())
-                std::strncpy(app.output_path, f.c_str(), sizeof(app.output_path) - 1);
-        }
-    }
-
-    // ── Format selector ────────────────────────────────────────────────
-    ImGui::Text("Format:");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(180);
-    const char* fmts[] = {"Standard (dr.loudness-war.info)", "foobar2000 style", "Extended (all metrics)"};
-    ImGui::Combo("##format", &app.format_idx, fmts, 3);
-
-    ImGui::Spacing();
-
-    // ── Action buttons + progress ──────────────────────────────────────
-    if (!analyzing) {
-        bool path_empty = (app.path_buf[0] == '\0');
-        if (path_empty) ImGui::BeginDisabled();
-        if (ImGui::Button("Analyze", ImVec2(100, 28)))
-            start_analysis(&app);
-        if (path_empty) ImGui::EndDisabled();
-    } else {
-        if (ImGui::Button("Cancel", ImVec2(100, 28)))
-            cancel_analysis(&app);
-    }
-
-    ImGui::SameLine();
-
-    if (analyzing) {
-        float prog = app.progress.load();
-        int cur = app.current_file.load();
-        int tot = app.total_files.load();
-        char overlay[128];
-        {
-            std::lock_guard<std::mutex> lock(app.mtx);
-            if (!app.current_filename.empty())
-                std::snprintf(overlay, sizeof(overlay), "[%d/%d] %s",
-                              cur, tot, app.current_filename.c_str());
-            else
-                std::snprintf(overlay, sizeof(overlay), "%d%%",
-                              static_cast<int>(prog * 100));
-        }
-        ImGui::ProgressBar(prog, ImVec2(ImGui::GetContentRegionAvail().x, 28), overlay);
-    } else if (app.analysis_done) {
-        std::lock_guard<std::mutex> lock(app.mtx);
-        if (app.results.empty()) {
-            ImGui::TextColored(ImVec4(0.95f, 0.4f, 0.3f, 1.0f),
-                "No results. Check error log.");
-        } else {
-            int adr = dr::album_dr(app.results);
-            ImGui::TextColored(dr_color(adr),
-                "Album DR: DR%d  |  %zu files  |  %s",
-                adr, app.results.size(),
-                dr::verdict_string(dr::classify_dr(static_cast<double>(adr))));
-        }
-    }
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // ── Results table + detail panel ───────────────────────────────────
-    {
-        std::lock_guard<std::mutex> lock(app.mtx);
-
-        if (!app.results.empty()) {
-            // Compute available height: split between table and detail panel
-            float total_avail = ImGui::GetContentRegionAvail().y -
-                                (app.error_log.empty() ? 10 : 50);
-            float detail_h = app.show_detail ? 310.0f : 0.0f;
-            float table_h = total_avail - detail_h;
-            if (table_h < 80) table_h = 80;
-
-            ImGuiTableFlags tbl_flags =
-                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY |
-                ImGuiTableFlags_Sortable | ImGuiTableFlags_Reorderable;
-
-            int n_cols = (app.format_idx == 2) ? 8 : 5;
-
-            if (ImGui::BeginTable("Results", n_cols, tbl_flags, ImVec2(0, table_h))) {
-                ImGui::TableSetupColumn("DR", ImGuiTableColumnFlags_WidthFixed |
-                    ImGuiTableColumnFlags_DefaultSort, 50);
-                ImGui::TableSetupColumn("Peak", ImGuiTableColumnFlags_WidthFixed, 85);
-                ImGui::TableSetupColumn("RMS", ImGuiTableColumnFlags_WidthFixed, 85);
-                if (app.format_idx == 2) {
-                    ImGui::TableSetupColumn("LUFS", ImGuiTableColumnFlags_WidthFixed, 70);
-                    ImGui::TableSetupColumn("PLR", ImGuiTableColumnFlags_WidthFixed, 70);
-                    ImGui::TableSetupColumn("Crest", ImGuiTableColumnFlags_WidthFixed, 65);
-                }
-                ImGui::TableSetupColumn("Dur", ImGuiTableColumnFlags_WidthFixed, 55);
-                ImGui::TableSetupColumn("Filename", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableHeadersRow();
-
-                // Handle sorting
-                if (ImGuiTableSortSpecs* sort = ImGui::TableGetSortSpecs()) {
-                    if (sort->SpecsDirty && sort->SpecsCount > 0) {
-                        auto& spec = sort->Specs[0];
-                        bool asc = (spec.SortDirection == ImGuiSortDirection_Ascending);
-                        std::sort(app.results.begin(), app.results.end(),
-                            [&](const dr::TrackResult& a, const dr::TrackResult& b) {
-                                switch (spec.ColumnIndex) {
-                                    case 0: return asc ? a.dr_score < b.dr_score
-                                                       : a.dr_score > b.dr_score;
-                                    case 1: return asc ? a.peak_dbfs < b.peak_dbfs
-                                                       : a.peak_dbfs > b.peak_dbfs;
-                                    case 2: return asc ? a.rms_dbfs < b.rms_dbfs
-                                                       : a.rms_dbfs > b.rms_dbfs;
-                                    default: return asc ? a.filename < b.filename
-                                                        : a.filename > b.filename;
-                                }
-                            });
-                        sort->SpecsDirty = false;
-                    }
-                }
-
-                for (int row_idx = 0; row_idx < static_cast<int>(app.results.size()); ++row_idx) {
-                    const auto& t = app.results[row_idx];
-                    ImGui::TableNextRow();
-                    char buf[64];
-
-                    // Make entire row selectable
-                    ImGui::TableSetColumnIndex(0);
-                    bool is_sel = (row_idx == app.selected_track);
-                    char sel_id[32];
-                    std::snprintf(sel_id, sizeof(sel_id), "##row%d", row_idx);
-                    if (ImGui::Selectable(sel_id, is_sel,
-                            ImGuiSelectableFlags_SpanAllColumns |
-                            ImGuiSelectableFlags_AllowOverlap, ImVec2(0, 0))) {
-                        app.selected_track = row_idx;
-                        app.show_detail = true;
-                    }
-                    ImGui::SameLine();
-
-                    // DR (color-coded)
-                    ImGui::TextColored(dr_color(t.dr_score), "DR%d", t.dr_score);
-
-                    // Peak
-                    ImGui::TableSetColumnIndex(1);
-                    if (t.is_clipping)
-                        ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.2f, 1.0f), "over");
-                    else {
-                        std::snprintf(buf, sizeof(buf), "%.2f dB", t.peak_dbfs);
-                        ImGui::Text("%s", buf);
-                    }
-
-                    // RMS
-                    ImGui::TableSetColumnIndex(2);
-                    std::snprintf(buf, sizeof(buf), "%.2f dB", t.rms_dbfs);
-                    ImGui::Text("%s", buf);
-
-                    int col_offset = 3;
-                    if (app.format_idx == 2) {
-                        ImGui::TableSetColumnIndex(3);
-                        std::snprintf(buf, sizeof(buf), "%.1f", t.integrated_lufs);
-                        ImGui::Text("%s", buf);
-
-                        ImGui::TableSetColumnIndex(4);
-                        std::snprintf(buf, sizeof(buf), "%.1f dB", t.plr_db);
-                        ImGui::Text("%s", buf);
-
-                        ImGui::TableSetColumnIndex(5);
-                        std::snprintf(buf, sizeof(buf), "%.1f dB", t.crest_factor_db);
-                        ImGui::Text("%s", buf);
-
-                        col_offset = 6;
-                    }
-
-                    ImGui::TableSetColumnIndex(col_offset);
-                    ImGui::Text("%s", format_duration(t.duration_secs).c_str());
-
-                    ImGui::TableSetColumnIndex(col_offset + 1);
-                    auto name = t.filename;
-                    auto dot = name.rfind('.');
-                    if (dot != std::string::npos) name = name.substr(0, dot);
-                    ImGui::Text("%s", name.c_str());
-                }
-
-                ImGui::EndTable();
-            }
-
-            // ── Detail panel ───────────────────────────────────────────
-            if (app.show_detail && !app.results.empty()) {
-                render_detail_panel(app);
-            }
-        }
-
-        // ── Error log ──────────────────────────────────────────────────
-        if (!app.error_log.empty()) {
-            ImGui::Spacing();
-            ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "Log:");
-            ImGui::SameLine();
-            ImGui::TextWrapped("%s", app.error_log.c_str());
-        }
-    }
-
+    if (app.side_open) { ImGui::SameLine(0, 20); side_panel(app); }
     ImGui::End();
-
-    // ── Settings popup ─────────────────────────────────────────────────
-    if (app.show_settings) ImGui::OpenPopup("Settings");
-    render_settings(&app.show_settings);
 }
 
-// ── Main ───────────────────────────────────────────────────────────────────
+// ── Main ─────────────────────────────────────────────────────────────────────
 int main(int, char**) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
-        fprintf(stderr, "SDL_Init error: %s\n", SDL_GetError());
-        return 1;
+        fprintf(stderr, "SDL_Init error: %s\n", SDL_GetError()); return 1;
     }
-
 #if defined(IMGUI_IMPL_OPENGL_ES2)
     const char* glsl_version = "#version 100";
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
@@ -1012,20 +745,14 @@ int main(int, char**) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 #endif
-
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 
-    SDL_Window* window = SDL_CreateWindow(
-        "crête — Dynamic Range Meter",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        1100, 750,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-    if (!window) {
-        fprintf(stderr, "SDL_CreateWindow error: %s\n", SDL_GetError());
-        return 1;
-    }
+    SDL_Window* window = SDL_CreateWindow("crête — Dynamic Range Meter",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1180, 780,
+        SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE|SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!window) { fprintf(stderr, "SDL_CreateWindow error: %s\n", SDL_GetError()); return 1; }
 
     SDL_GLContext gl_ctx = SDL_GL_CreateContext(window);
     SDL_GL_MakeCurrent(window, gl_ctx);
@@ -1037,69 +764,53 @@ int main(int, char**) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.IniFilename = nullptr;
 
-    setup_style();
-    load_fonts();
+    theme::load_fonts();
+    AppState app;
+    theme::apply(app.dark_mode);
 
     ImGui_ImplSDL2_InitForOpenGL(window, gl_ctx);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
-    AppState app;
-
     bool running = true;
     while (running) {
-        SDL_Event event;
-        while (SDL_PollEvent(&event)) {
-            ImGui_ImplSDL2_ProcessEvent(&event);
-            if (event.type == SDL_QUIT) running = false;
-            if (event.type == SDL_WINDOWEVENT &&
-                event.window.event == SDL_WINDOWEVENT_CLOSE &&
-                event.window.windowID == SDL_GetWindowID(window))
-                running = false;
-
-            if (event.type == SDL_DROPFILE) {
-                char* dropped = event.drop.file;
-                if (dropped) {
-                    std::strncpy(app.path_buf, dropped, sizeof(app.path_buf) - 1);
-                    SDL_free(dropped);
-                }
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            ImGui_ImplSDL2_ProcessEvent(&ev);
+            if (ev.type == SDL_QUIT) running = false;
+            if (ev.type == SDL_WINDOWEVENT && ev.window.event == SDL_WINDOWEVENT_CLOSE &&
+                ev.window.windowID == SDL_GetWindowID(window)) running = false;
+            if (ev.type == SDL_DROPFILE && ev.drop.file) {
+                std::strncpy(app.path_buf, ev.drop.file, sizeof(app.path_buf)-1);
+                SDL_free(ev.drop.file);
             }
         }
+        if (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) { SDL_Delay(100); continue; }
 
-        if (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) {
-            SDL_Delay(100);
-            continue;
-        }
+        if (app.restyle_requested) { theme::apply(app.dark_mode); app.restyle_requested = false; }
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
-
         render_ui(app);
-
         ImGui::Render();
-        int w, h;
-        SDL_GL_GetDrawableSize(window, &w, &h);
-        glViewport(0, 0, w, h);
-        glClearColor(0.1f, 0.1f, 0.12f, 1.0f);
+
+        int w,h; SDL_GL_GetDrawableSize(window,&w,&h);
+        glViewport(0,0,w,h);
+        const ImVec4 bg = theme::P().bg;
+        glClearColor(bg.x,bg.y,bg.z,1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
     }
 
-    if (app.is_analyzing.load()) {
-        app.cancel_requested.store(true);
-        if (app.worker.joinable()) app.worker.join();
-    } else if (app.worker.joinable()) {
-        app.worker.join();
-    }
+    if (app.is_analyzing.load()) { app.cancel_requested.store(true); if (app.worker.joinable()) app.worker.join(); }
+    else if (app.worker.joinable()) app.worker.join();
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
-
     SDL_GL_DeleteContext(gl_ctx);
     SDL_DestroyWindow(window);
     SDL_Quit();
-
     return 0;
 }

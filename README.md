@@ -6,7 +6,7 @@ Measures **TT Dynamic Range** (Pleasurize Music Foundation algorithm), **EBU R12
 
 The default build has **zero dependencies**. An optional third build tier statically links a compact, LGPL-only FFmpeg to add lossy/ALAC decode support — see below.
 
-**Current version: 0.9.1**
+**Current version: 0.9.2**
 
 ---
 
@@ -25,7 +25,7 @@ Three CLI build tiers, one GUI:
 
 ```bash
 make                    # optimized build, no JSON output
-make VERSION=0.9.1      # custom version stamp
+make VERSION=0.9.2      # custom version stamp
 make debug              # debug build with sanitizers
 make install            # install to /usr/local/bin
 ```
@@ -73,9 +73,10 @@ make all                # cli-json + gui together
 make debug-gui          # GUI with sanitizers
 ```
 
-The GUI binary is `crete-gui`. It supports drag-and-drop, native file/folder dialogs, sortable results, color-coded DR values, and saves a log next to the analysed folder.
+The GUI binary is `crete-gui`. Its Modernist redesign lays the app out as horizontal bands — source bar, DSD strip, verdict band, DR meter-bar table + grouped detail panel — with a light/dark shell. It supports drag-and-drop, native file/folder dialogs, sortable results, DR meter bars, and saves a log next to the analysed folder.
 
-> **Note:** the GUI does not currently expose the `--dsd-*` options and analyses DSD with the defaults (**multistage**, `default` filter, **44.1 kHz**). See *Pending work*.
+- **DSD strip** — appears only for DSD sources and exposes the three decode axes (chain / filter / output rate), matching the CLI's `--dsd-*` flags; picking *Direct* auto-restricts filter and rate to the one valid combo.
+- **Parallel analysis** — an album's files are decoded and analysed across a thread pool (`hardware_concurrency`), preserving file order. Measurement is unchanged (bit-identical to sequential); it is purely faster (~5–6× on a typical album). DSD files still fan out per-channel inside each decode.
 
 ---
 
@@ -320,14 +321,13 @@ Caveats, by design:
 
 ### Code
 
-- **GUI does not expose the `--dsd-*` options** — `crete-gui` analyses DSD with the defaults (multistage / `default` filter / 44.1 kHz).
 - `audio_ffmpeg.hpp` header comment still describes the old "foobar Direct = `fir1_8`/`fir1_16`" model; the routing logic is correct, the comment is not.
 - `nlohmann/json` version split: MinIO seeds v3.12.0, the Makefile pins v3.11.3.
 - Round-trip guard: crête on a `.dsf` and crête on the WAV exported from it must agree (measured 2.9e-8, float32 mantissa). Not yet a pytest case.
 
 ### Not yet exercised
 
-- **DSD256 / DSD512.** Both chains are implemented and resolve correctly, but there is no corpus and no reference data. (`fir1_32` does **not** exist and is not needed — DSD256 Direct is `fir1_64 ÷32`.)
+- **DSD256 / DSD512.** Both resolve correctly through the multistage chain (`fir1_32` for DSD256, `fir1_64m` for DSD512; DSD512 was enabled by the libdsddpcm v0.2.1 bump in 0.9.1), but there is no corpus and no reference data. Direct is DSD64 → 44.1 kHz only, so it does not apply to these rates.
 - **DFF container.** Decoder path exists; no dedicated parity test against the DSF version of the same album.
 - **AIFF.** No test files.
 
@@ -345,7 +345,8 @@ Caveats, by design:
 
 ```
 main.cpp                  CLI entry point, output formatters, cue-aware grouping
-gui_main.cpp              GUI entry point (Dear ImGui + SDL2 + OpenGL)
+gui_main.cpp              GUI entry point (Dear ImGui + SDL2 + OpenGL); parallel decode
+crete_theme.hpp           GUI Modernist theme: palette (light/dark), fonts, widgets
 analysis.hpp              TT DR, EBU R128, true peak, PLR/PSR/LRA, crest factor
 audio.hpp                 WAV, AIFF/AIFF-C, FLAC, DSF, DFF decoders + FFmpeg routing
 audio_ffmpeg.hpp          FFmpeg decode backend (guarded by CRETE_HAS_FFMPEG)

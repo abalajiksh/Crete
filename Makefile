@@ -46,7 +46,7 @@ CXXFLAGS   = -std=c++17 -Wall -Wextra -Wpedantic
 CFLAGS     = -std=c99 -O2 -Wall -Wextra
 LDFLAGS    =
 
-VERSION   ?= 0.9.1
+VERSION   ?= 0.9.2
 CXXFLAGS  += -DCRETE_VERSION='"$(VERSION)"'
 
 PREFIX    ?= /usr/local
