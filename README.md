@@ -8,7 +8,7 @@ crête also **detects MQA-encoded files** and reports them unconditionally: if y
 
 The default build has **zero dependencies**. An optional third build tier statically links a compact, LGPL-only FFmpeg to add lossy/ALAC decode support — see below.
 
-**Current version: 0.10.0**
+**Current version: 0.10.1**
 
 ---
 
@@ -27,7 +27,7 @@ Three CLI build tiers, one GUI:
 
 ```bash
 make                    # optimized build, no JSON output
-make VERSION=0.10.0     # custom version stamp
+make VERSION=0.10.1     # custom version stamp
 make debug              # debug build with sanitizers
 make install            # install to /usr/local/bin
 ```
@@ -78,7 +78,7 @@ make debug-gui          # GUI with sanitizers
 The GUI binary is `crete-gui`. Its Modernist redesign lays the app out as horizontal bands — source bar, DSD strip, verdict band, DR meter-bar table + grouped detail panel — with a light/dark shell. It supports drag-and-drop, native file/folder dialogs, sortable results, DR meter bars, and saves a log next to the analysed folder.
 
 - **DSD strip** — appears only for DSD sources and exposes the three decode axes (chain / filter / output rate), matching the CLI's `--dsd-*` flags; picking *Direct* auto-restricts filter and rate to the one valid combo.
-- **Parallel analysis** — an album's files are decoded and analysed across a thread pool (`hardware_concurrency`), preserving file order. Measurement is unchanged (bit-identical to sequential); it is purely faster (~5–6× on a typical album). DSD files still fan out per-channel inside each decode.
+- **Parallel analysis** — an album's files are decoded and analysed across a thread pool (`hardware_concurrency`), preserving file order. Measurement is unchanged (bit-identical to sequential); it is purely faster (~5–6× on a typical album). DSD files still fan out per-channel inside each decode. The CLI uses the same pool since 0.10.1 (`-j` to cap it).
 
 ---
 
@@ -95,6 +95,7 @@ crete -f detail /path/to/album/
 crete -f json /path/to/album/          # cli-json builds only
 crete -o dr_log.txt /path/to/album/
 crete -q /path/to/album/               # suppress progress, useful in CI
+crete -j 2 /path/to/album/             # cap parallel file workers (default: all cores)
 
 crete --dsd-mode multistage /path/to/dsd/           # default chain (measurement-grade)
 crete --dsd-mode direct     /path/to/dsd/           # DSD64 -> 44.1 kHz only
@@ -107,6 +108,8 @@ crete-ffmpeg /path/to/album/           # cli-json-ffmpeg build: adds ALAC/MP3/AA
 `--dsd-mode` (chain), `--dsd-filter` (final-stage filter), and `--dsd-out-rate` select the DSD→PCM decode; none affect PCM formats. `crete --version` prints the resolved chain, decimation, tap count, and group delay for each DSD rate at the current settings. See *DSD decimation* below for the support matrix.
 
 In `-f json`, DSD tracks carry `"dsd_mode"`, `"dsd_filter"`, and `"dsd_out_rate"` fields recording exactly how the numbers were produced — an unlabelled DSD result is not interpretable.
+
+Since 0.10.1 the CLI analyses an album's files **in parallel** (one worker per core by default), same as the GUI: results are order-preserving and bit-identical to a sequential run — `-j` only changes wall-clock time, never a number. Use `-j N` to cap workers (e.g. `-j 2` for high-rate DSD output on memory-constrained hosts, since each in-flight file holds its full decoded float64 buffer — see the memory note under *Cue sheet support*), or `-j 1` for a strictly sequential run.
 
 ### GUI
 

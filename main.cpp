@@ -23,6 +23,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -32,9 +33,11 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -46,7 +49,7 @@ extern "C" {
 
 // ── Version info ───────────────────────────────────────────────────────────
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.10.0"
+#define CRETE_VERSION "0.10.1"
 #endif
 
 static constexpr const char* PROGRAM_NAME    = "crête";
@@ -791,6 +794,8 @@ void print_usage(const char* argv0) {
               << "  --dsd-filter <default|firls|kaiser>  Final-stage filter (default: default)\n"
               << "                   Honoured only at --dsd-out-rate 44100; ignored otherwise.\n"
               << "  --dsd-out-rate <44100|88200|176400|352800>  DSD output rate (default: 44100)\n"
+              << "  -j, --jobs <N>                 Parallel file workers (default: all cores;\n"
+              << "                                 1 = sequential). Does not change any numbers.\n"
               << "  -q, --quiet                    Suppress progress output\n"
               << "  -v, --version                  Show version\n"
               << "  -h, --help                     Show this help\n\n"
@@ -838,6 +843,7 @@ int main(int argc, char* argv[]) {
     OutputFormat format = OutputFormat::Standard;
     std::string output_file;
     bool quiet = false;
+    int jobs = 0;   // 0 = auto (hardware_concurrency)
     std::vector<std::string> paths;
 
     for (int i = 1; i < argc; ++i) {
@@ -850,6 +856,12 @@ int main(int argc, char* argv[]) {
             return 0;
         } else if (arg == "-q" || arg == "--quiet") {
             quiet = true;
+        } else if ((arg == "-j" || arg == "--jobs") && i+1 < argc) {
+            jobs = std::atoi(argv[++i]);
+            if (jobs < 1) {
+                std::cerr << "Error: --jobs must be >= 1\n";
+                return 1;
+            }
         } else if ((arg == "-f" || arg == "--format") && i+1 < argc) {
             std::string fmt = argv[++i];
             if (fmt == "std")              format = OutputFormat::Standard;
@@ -923,11 +935,30 @@ int main(int argc, char* argv[]) {
         for (const auto& g : groups)
             total_tracks += g.sheet.tracks.empty() ? 1 : g.sheet.tracks.size();
 
-        std::vector<dr::TrackResult> results;
-        results.reserve(total_tracks);
+        // Decode + analyse groups in parallel (a group = one standalone file,
+        // or one cue-sliced monolith yielding N contiguous tracks). Mirrors
+        // the GUI worker pool: decode_file/analyze_track hold no shared
+        // mutable state, DSD decodes still fan out per-channel inside each
+        // group, and results land in per-group slots so the flattened output
+        // order matches the sequential walk exactly. Measurement is
+        // unchanged — parallelism only reorders the wall-clock schedule.
+        const size_t ngroups = groups.size();
+        std::vector<std::vector<dr::TrackResult>> slots(ngroups);
+        std::vector<std::string> errlog(ngroups);
+        std::atomic<size_t> next{0}, done{0};
+        std::mutex io_mtx;
 
-        size_t done = 0;
-        for (const auto& g : groups) {
+        auto progress = [&](const std::string& name) {
+            size_t d = done.fetch_add(1) + 1;
+            if (!quiet) {
+                std::lock_guard<std::mutex> lk(io_mtx);
+                std::cerr << "\rAnalyzing [" << d << "/" << total_tracks
+                          << "] " << name << "...          " << std::flush;
+            }
+        };
+
+        auto process_group = [&](size_t gi) {
+            const auto& g = groups[gi];
             std::string basename = fs::path(g.audio_path).filename().string();
             std::string ext_str  = fs::path(g.audio_path).extension().string();
 
@@ -939,21 +970,17 @@ int main(int argc, char* argv[]) {
                     mqa::analyze_pcm(ad.channels, ad.sample_rate, ad.bit_depth);
 
                 if (g.sheet.tracks.empty()) {
-                    ++done;
-                    if (!quiet)
-                        std::cerr << "\rAnalyzing [" << done << "/" << total_tracks
-                                  << "] " << basename << "...          " << std::flush;
-                    results.push_back(dr::analyze_track(
+                    progress(basename);
+                    slots[gi].push_back(dr::analyze_track(
                         ad.channels, ad.sample_rate, ad.bit_depth,
                         ad.codec, basename));
-                    results.back().mqa = minfo;
+                    slots[gi].back().mqa = minfo;
                 } else {
                     size_t total_samples = ad.channels.empty()
                                            ? 0 : ad.channels[0].size();
                     const auto& tracks_cue = g.sheet.tracks;
 
                     for (size_t i = 0; i < tracks_cue.size(); ++i) {
-                        ++done;
                         const auto& trk = tracks_cue[i];
 
                         uint64_t start = cue::frames_to_samples(
@@ -974,14 +1001,11 @@ int main(int argc, char* argv[]) {
                                       trk.number, trk.title.c_str(),
                                       ext_str.c_str());
 
-                        if (!quiet)
-                            std::cerr << "\rAnalyzing [" << done << "/" << total_tracks
-                                      << "] " << track_name
-                                      << "...          " << std::flush;
+                        progress(track_name);
 
                         if (start >= end) {
-                            std::cerr << "\nWarning: empty cue range for "
-                                      << track_name << "\n";
+                            errlog[gi] += std::string("Warning: empty cue range for ")
+                                          + track_name + "\n";
                             continue;
                         }
 
@@ -992,18 +1016,47 @@ int main(int argc, char* argv[]) {
                                 ad.channels[c].begin() + static_cast<std::ptrdiff_t>(end));
                         }
 
-                        results.push_back(dr::analyze_track(
+                        slots[gi].push_back(dr::analyze_track(
                             slice, ad.sample_rate, ad.bit_depth,
                             ad.codec, track_name));
-                        results.back().mqa = minfo;
+                        slots[gi].back().mqa = minfo;
                     }
                 }
             } catch (const std::exception& e) {
-                std::cerr << "\nError: " << basename << ": " << e.what() << "\n";
+                errlog[gi] += "Error: " + basename + ": " + e.what() + "\n";
             }
+        };
+
+        unsigned hw = std::thread::hardware_concurrency();
+        size_t nthreads = jobs > 0 ? (size_t)jobs : (hw ? (size_t)hw : 4);
+        nthreads = std::min(nthreads, ngroups);
+
+        if (nthreads <= 1) {
+            for (size_t gi = 0; gi < ngroups; ++gi) process_group(gi);
+        } else {
+            auto worker = [&]() {
+                for (;;) {
+                    size_t gi = next.fetch_add(1);
+                    if (gi >= ngroups) break;
+                    process_group(gi);
+                }
+            };
+            std::vector<std::thread> pool;
+            pool.reserve(nthreads);
+            for (size_t k = 0; k < nthreads; ++k) pool.emplace_back(worker);
+            for (auto& th : pool) th.join();
         }
 
         if (!quiet) std::cerr << "\r" << std::string(80, ' ') << "\r";
+
+        // Flatten per-group slots in original group order; errors/warnings
+        // are replayed afterwards so they never interleave mid-progress.
+        std::vector<dr::TrackResult> results;
+        results.reserve(total_tracks);
+        for (size_t gi = 0; gi < ngroups; ++gi)
+            for (auto& t : slots[gi]) results.push_back(std::move(t));
+        for (size_t gi = 0; gi < ngroups; ++gi)
+            if (!errlog[gi].empty()) std::cerr << errlog[gi];
 
         if (results.empty()) continue;
 
