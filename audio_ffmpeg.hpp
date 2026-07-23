@@ -9,9 +9,9 @@
 // ALAC (.m4a/.mp4), AAC, MP3, Opus, Vorbis, WMA, WavPack, Monkey's Audio, etc.
 //
 // The native WAV/AIFF/FLAC/DSF/DFF paths are never routed here (see decode_file
-// in audio.hpp), so the bit-exact agreement with MAAT (PCM) and foobar Direct
-// (DSD) is preserved. DSD in particular MUST stay native: FFmpeg's dsd2pcm
-// decimation filter differs from foobar's fir1_8/fir1_16.
+// in audio.hpp), so agreement with the MAAT reference data is preserved. DSD in
+// particular MUST stay native: crête decimates via the vendored libdsddpcm
+// kernel, whose clean-room filter chain differs from FFmpeg's dsd2pcm.
 //
 // Conversion is sample-format only. Output rate == input rate, so swresample
 // performs no resampling and introduces no delay or sample-count change — the

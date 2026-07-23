@@ -28,7 +28,7 @@ Three CLI build tiers, one GUI:
 
 ```bash
 make                    # optimized build, no JSON output
-make VERSION=0.10.1     # custom version stamp
+make VERSION=0.11.1     # custom version stamp
 make debug              # debug build with sanitizers
 make install            # install to /usr/local/bin
 ```
@@ -76,7 +76,7 @@ make all                # cli-json + gui together
 make debug-gui          # GUI with sanitizers
 ```
 
-The GUI binary is `crete-gui`. Its Modernist redesign lays the app out as horizontal bands — source bar, DSD strip, verdict band, DR meter-bar table + grouped detail panel — with a light/dark shell. It supports drag-and-drop, native file/folder dialogs, sortable results, DR meter bars, and saves a log next to the analysed folder.
+The GUI binary is `crete-gui`. Its Modernist redesign lays the app out as horizontal bands — source bar, DSD strip, verdict band, DR meter-bar table + grouped detail panel — with a light/dark shell. It supports drag-and-drop, native file/folder dialogs, sortable results, and DR meter bars. Log saving is opt-in (Settings → "Save analysis log to disk"); by default results stay in the window only.
 
 - **DSD strip** — appears only for DSD sources and exposes the three decode axes (chain / filter / output rate), matching the CLI's `--dsd-*` flags; picking *Direct* auto-restricts filter and rate to the one valid combo.
 - **Parallel analysis** — an album's files are decoded and analysed across a thread pool (`hardware_concurrency`), preserving file order. Measurement is unchanged (bit-identical to sequential); it is purely faster (~5–6× on a typical album). DSD files still fan out per-channel inside each decode. The CLI uses the same pool since 0.10.1 (`-j` to cap it).
@@ -255,7 +255,7 @@ Since 0.11.0, Max Short-Term, LRA, and Min PSR share one short-term block grid (
 
 DSD bitstreams are decimated to PCM by **[libdsddpcm](https://codeberg.org/abksh/libdsddpcm) v0.2.1**, vendored under `third_party/libdsddpcm/` and statically linked. It is a clean-room, BSD-2-Clause kernel: linear-phase FIR only (constant group delay), **unity DC gain** (the +6 dB SACD makeup gain is *not* applied). crête keeps its own DSF/DFF container parsing and its one-thread-per-channel decode.
 
-> **This replaces the former `dsd_lut.hpp`** (LGPL, transcribed from foobar's `foo_input_sacd`). DSD numbers **change** versus crête ≤ 0.8.1 — different clean-room filters and a different default output rate — so DSD reference baselines must be regenerated.
+> **This replaces the former `dsd_lut.hpp`** (LGPL, transcribed from foobar's `foo_input_sacd`). DSD numbers **change** versus crête ≤ 0.8.1 — different clean-room filters and a different default output rate — so the DSD reference baselines were regenerated against MAAT DROffline (2026-07; see *DSD decimation → Validation*).
 
 ### Three axes: chain, filter, output rate
 
@@ -346,11 +346,13 @@ and an interface, no decoder code — so crête stays MIT.
 
 ## Pending work
 
+Most of this section is a resolved record (kept for provenance). As of 0.11.1 the only items still genuinely open are: a **cross-arch identity smoke check** (x86-64 vs aarch64 bit-identity), a **round-trip pytest case** (`.dsf` vs its exported WAV), and **DFF/AIFF test coverage**. None are release blockers.
+
 ### Reference-data hygiene — RESOLVED (2026-07-23)
 
 The harness repo re-measured all 11 QUALIFICATION albums (Thriller × 5 rates, East_Meets_West × 6 rates) fresh against MAAT DROffline MkII 2.2.3 (2026-07-22), and crête was re-validated against the new rows the following day — 11/11 green. Both former outliers are closed:
 
-- **`Min. PSR` flags** had three stacked causes, all resolved: a `+0.00` MAAT export sentinel in the old rows (now dropped at import), a too-coarse 1.0 s short-term sampling grid in crête (fixed in 0.11.0 — see FIX 11), and a genuine definitional difference — MAAT's Min. PSR was reverse-engineered (harness `tools/psr_discriminator/`) as a **0.5 dB/s decaying peak-hold** against 3 s short-term loudness, while crête implements the published AES eBrief 373 formula. crête stays spec-true; the harness reporting tolerance reflects the documented variance.
+- **`Min. PSR` flags** had three stacked causes, all resolved: a `+0.00` MAAT export sentinel in the old rows (now dropped at import), a too-coarse 1.0 s short-term sampling grid in crête (fixed in 0.11.0 — see FIX 11), and a genuine definitional difference — MAAT's Min. PSR was reverse-engineered (harness `tools/psr_discriminator/`) as a **0.5 dB/s decaying peak-hold** against 3 s short-term loudness, while crête implements the published AES eBrief 373 formula. A decode-vs-formula confirmation experiment (bit-exact FLAC→WAV through MAAT) then **closed the investigation**: the residual is a genuine formula difference, not a decode artifact, so no MAAT-compat mode is warranted. crête stays spec-true; the harness reporting tolerance reflects the documented variance.
 - **`EMW_96k` track 11** was a **MAAT DROffline decode bug on a valid FLAC**: the file's STREAMINFO MD5 verifies (crête decodes it bit-perfectly, matching the 5-rate consensus), yet MAAT deterministically mismeasures RMS/LRA/DR on that encoding — and measures a re-encode of the identical audio correctly. The corpus and references were re-recorded from the new render; the original file is kept as a minimal repro.
 
 ### Test harness — overhauled 2026-07, former pending items done
@@ -373,15 +375,14 @@ Standing caveats:
 
 ### Code
 
-- `audio_ffmpeg.hpp` header comment still describes the old "foobar Direct = `fir1_8`/`fir1_16`" model; the routing logic is correct, the comment is not.
-- `nlohmann/json` version split: MinIO seeds v3.12.0, the Makefile pins v3.11.3.
 - Round-trip guard: crête on a `.dsf` and crête on the WAV exported from it must agree (measured 2.9e-8, float32 mantissa). Not yet a pytest case.
 
 ### Not yet exercised
 
-- **DSD512.** Resolves correctly through the multistage chain (`fir1_64m`; enabled by the libdsddpcm v0.2.1 bump in 0.9.1), but there is no corpus and no reference data yet. DSD256 graduated 2026-07 — it now has a dedicated suite and corpus (`fir1_32` multistage). Direct is DSD64 → 44.1 kHz only, so it does not apply to these rates.
 - **DFF container.** Decoder path exists; no dedicated parity test against the DSF version of the same album.
 - **AIFF.** No test files.
+
+DSD512 graduated 2026-07: it now has a dedicated suite and MAAT reference data (`SoundLiaison_JMS_DSD512`, `fir1_64m` multistage, both 44.1 and 352.8 kHz out), joining DSD256 (`fir1_32`). Direct is DSD64 → 44.1 kHz only, so it does not apply to these rates.
 
 ### Closed — do not re-investigate
 
