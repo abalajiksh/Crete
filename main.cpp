@@ -49,7 +49,7 @@ extern "C" {
 
 // ── Version info ───────────────────────────────────────────────────────────
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.10.1"
+#define CRETE_VERSION "0.11.0"
 #endif
 
 static constexpr const char* PROGRAM_NAME    = "crête";
@@ -592,10 +592,14 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
         std::printf("%-12s\n", "Joint");
         std::cout << "  " << std::string(22 + 12 * (nch + 1), '-') << "\n";
 
+        // Standards tags mirror MAAT DROffline's convention: the governing
+        // standard follows the joint value; per-channel M/S are (non-ITU)
+        // informative variants (BS.1770 defines them for the summed program
+        // only). Legend printed once in the summary footer.
         std::printf("  %-22s", "Max True Peak");
         for (size_t c = 0; c < nch; ++c)
             std::printf("%-12.2f", t.ch_metrics[c].true_peak_dbtp);
-        std::printf("%.2f dB\n", t.max_true_peak_dbtp);
+        std::printf("%.2f dB (ITU)\n", t.max_true_peak_dbtp);
 
         std::printf("  %-22s", "Max Sample Peak");
         for (size_t c = 0; c < nch; ++c)
@@ -611,33 +615,33 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
         std::printf("  %-22s", "Max Momentary");
         for (size_t c = 0; c < nch; ++c)
             std::printf("%-12.2f", t.ch_metrics[c].max_momentary_lufs);
-        std::printf("%.2f LUFS\n", t.max_momentary_lufs);
+        std::printf("%.2f LUFS (ITU)\n", t.max_momentary_lufs);
 
         std::printf("  %-22s", "Max Short-Term");
         for (size_t c = 0; c < nch; ++c)
             std::printf("%-12.2f", t.ch_metrics[c].max_short_term_lufs);
-        std::printf("%.2f LUFS\n", t.max_short_term_lufs);
+        std::printf("%.2f LUFS (ITU)\n", t.max_short_term_lufs);
 
         std::printf("  %-22s", "Integrated");
         for (size_t c = 0; c < nch; ++c) std::printf("%-12s", "—");
-        std::printf("%.2f LUFS\n", t.integrated_lufs);
+        std::printf("%.2f LUFS (ITU)\n", t.integrated_lufs);
 
         std::printf("  %-22s", "DR (PMF)");
         for (size_t c = 0; c < nch; ++c)
             std::printf("%-12.2f", t.ch_metrics[c].dr_raw);
-        std::printf("DR%d\n", t.dr_score);
+        std::printf("DR%d (PMF)\n", t.dr_score);
 
         std::printf("  %-22s", "Min PSR");
         for (size_t c = 0; c < nch; ++c) std::printf("%-12s", "—");
-        std::printf("%.2f dB\n", t.psr_db);
+        std::printf("%.2f dB (AES)\n", t.psr_db);
 
         std::printf("  %-22s", "PLR");
         for (size_t c = 0; c < nch; ++c) std::printf("%-12s", "—");
-        std::printf("%.2f dB\n", t.plr_db);
+        std::printf("%.2f dB (AES)\n", t.plr_db);
 
         std::printf("  %-22s", "LRA");
         for (size_t c = 0; c < nch; ++c) std::printf("%-12s", "—");
-        std::printf("%.2f LU\n", t.lra_lu);
+        std::printf("%.2f LU (EBU)\n", t.lra_lu);
     }
 
     std::cout << "\n" << sep << "\nSummary\n" << sep << "\n\n";
@@ -659,6 +663,20 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
         std::cout << "Verdict:           " << dr::verdict_string(v) << "\n";
     }
     std::cout << sep << "\n";
+    std::cout <<
+        "Standards\n"
+        "  (ITU)  ITU-R BS.1770-4 — K-weighted loudness (LUFS) and 4x-oversampled\n"
+        "         true peak. Gating per EBU R 128.\n"
+        "  (EBU)  EBU Tech 3342 — Loudness Range (LRA), 3 s short-term distribution,\n"
+        "         10th-95th percentile with -20 LU relative gate.\n"
+        "  (AES)  AES loudness conventions — PLR (true peak minus integrated LUFS),\n"
+        "         Min PSR (window sample peak minus 3 s short-term loudness, minimum\n"
+        "         over the track).\n"
+        "  (PMF)  TT Dynamic Range, Pleasurize Music Foundation — peak-to-loudest-RMS\n"
+        "         metric matching dr.loudness-war.info.\n"
+        "  Per-channel Momentary/Short-Term columns are informative (non-ITU):\n"
+        "  BS.1770 defines these values for the summed program only.\n"
+        << sep << "\n";
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -674,6 +692,27 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
     j["folder_path"] = folder_path;
     j["album_dr"] = dr::album_dr(tracks);
     j["num_tracks"] = tracks.size();
+
+    // Self-documenting standards map: which spec governs each reported field.
+    // Mirrors MAAT DROffline's per-metric tags. Per-channel momentary/short-term
+    // are non-ITU informative variants (BS.1770 defines them for the summed
+    // program only).
+    j["standards"] = {
+        {"dr_score",             "TT Dynamic Range (PMF)"},
+        {"dr_raw",               "TT Dynamic Range (PMF)"},
+        {"peak_dbfs",            "sample peak (dBFS)"},
+        {"rms_dbfs",             "RMS (dBFS)"},
+        {"max_true_peak_dbtp",   "ITU-R BS.1770-4"},
+        {"integrated_lufs",      "ITU-R BS.1770-4 / EBU R 128"},
+        {"max_momentary_lufs",   "ITU-R BS.1770-4 (EBU 3341)"},
+        {"max_short_term_lufs",  "ITU-R BS.1770-4 (EBU 3341)"},
+        {"lra_lu",               "EBU Tech 3342"},
+        {"plr_db",               "AES (TP - integrated LUFS)"},
+        {"psr_db",               "AES (min window SPPM - short-term LUFS)"},
+        {"crest_factor_db",      "sample peak - RMS, per-channel mean"},
+        {"channel_metrics.max_momentary_lufs",  "non-ITU (per-channel, informative)"},
+        {"channel_metrics.max_short_term_lufs", "non-ITU (per-channel, informative)"},
+    };
 
     if (!tracks.empty()) {
         const auto& first = tracks[0];

@@ -56,6 +56,9 @@ static const int   DSD_RATES[]         = { 44100, 88200, 176400, 352800 };
 struct AppState {
     char path_buf[4096] = "";
 
+    // Log saving is opt-in: results live only in the session unless the user
+    // asks for a file (privacy default — nothing written to disk unasked).
+    bool save_log = false;
     int  output_mode = 0;
     char output_path[4096] = "";
     int  format_idx = 0;
@@ -324,7 +327,7 @@ static void analysis_worker(AppState* app) {
     results.reserve(n);
     for (int i = 0; i < n; ++i) if (ok[i]) results.push_back(std::move(slots[i]));
 
-    if (!results.empty() && !app->cancel_requested.load()) {
+    if (!results.empty() && !app->cancel_requested.load() && app->save_log) {
         std::string out_path = app->get_output_filepath();
         if (!out_path.empty()) {
             std::string log = generate_log(results, app->path_buf, app->format_idx);
@@ -549,30 +552,33 @@ static void detail_panel(AppState& app) {
     ImGui::EndGroup();
     theme::Rule(2.0f, 8.0f);
 
+    // Standards tags mirror MAAT DROffline: (ITU) BS.1770-4, (EBU) Tech 3342,
+    // (AES) loudness-ratio conventions, (PMF) TT Dynamic Range. Explained in
+    // the About tab.
     theme::SectionLabel("DYNAMICS");
-    std::snprintf(b,sizeof(b),"%.2f dB", t.psr_db);          theme::KeyValue("Min PSR", b);
-    std::snprintf(b,sizeof(b),"%.2f dB", t.plr_db);          theme::KeyValue("PLR", b);
-    std::snprintf(b,sizeof(b),"%.2f LU", t.lra_lu);          theme::KeyValue("LRA", b);
+    std::snprintf(b,sizeof(b),"%.2f dB", t.psr_db);          theme::KeyValue("Min PSR (AES)", b);
+    std::snprintf(b,sizeof(b),"%.2f dB", t.plr_db);          theme::KeyValue("PLR (AES)", b);
+    std::snprintf(b,sizeof(b),"%.2f LU", t.lra_lu);          theme::KeyValue("LRA (EBU)", b);
     std::snprintf(b,sizeof(b),"%.2f dB", t.crest_factor_db); theme::KeyValue("Crest factor", b);
 
     theme::SectionLabel("LOUDNESS");
-    std::snprintf(b,sizeof(b),"%.2f LUFS", t.integrated_lufs);    theme::KeyValue("Integrated", b);
-    std::snprintf(b,sizeof(b),"%.2f LUFS", t.max_momentary_lufs); theme::KeyValue("Max Momentary", b);
-    std::snprintf(b,sizeof(b),"%.2f LUFS", t.max_short_term_lufs);theme::KeyValue("Max Short-term", b);
+    std::snprintf(b,sizeof(b),"%.2f LUFS", t.integrated_lufs);    theme::KeyValue("Integrated (ITU)", b);
+    std::snprintf(b,sizeof(b),"%.2f LUFS", t.max_momentary_lufs); theme::KeyValue("Max Momentary (ITU)", b);
+    std::snprintf(b,sizeof(b),"%.2f LUFS", t.max_short_term_lufs);theme::KeyValue("Max Short-term (ITU)", b);
 
     theme::SectionLabel(nch>=2 ? "PEAKS · L / R" : "PEAKS");
     if (nch >= 2) {
         std::snprintf(b,sizeof(b),"%.2f / %.2f dB", t.ch_metrics[0].sample_peak_dbfs, t.ch_metrics[1].sample_peak_dbfs);
         theme::KeyValue("Sample Peak", b);
         std::snprintf(b,sizeof(b),"%.2f / %.2f dBTP", t.ch_metrics[0].true_peak_dbtp, t.ch_metrics[1].true_peak_dbtp);
-        theme::KeyValue("True Peak", b);
+        theme::KeyValue("True Peak (ITU)", b);
     } else {
         ImVec4 pc = t.is_clipping ? theme::P().accent : theme::P().ink;
         if (t.is_clipping) theme::KeyValue("Sample Peak", "over", &pc);
         else { std::snprintf(b,sizeof(b),"%.2f dB", t.peak_dbfs); theme::KeyValue("Sample Peak", b); }
-        std::snprintf(b,sizeof(b),"%.2f dBTP", t.max_true_peak_dbtp); theme::KeyValue("True Peak", b);
+        std::snprintf(b,sizeof(b),"%.2f dBTP", t.max_true_peak_dbtp); theme::KeyValue("True Peak (ITU)", b);
     }
-    std::snprintf(b,sizeof(b),"%.2f dBTP", t.max_true_peak_dbtp); theme::KeyValue("Max True Peak", b);
+    std::snprintf(b,sizeof(b),"%.2f dBTP", t.max_true_peak_dbtp); theme::KeyValue("Max True Peak (ITU)", b);
 }
 
 // ── Results (table + detail split) ──────────────────────────────────────────
@@ -674,15 +680,22 @@ static void side_panel(AppState& app) {
         theme::SectionLabel("APPEARANCE");
         if (ImGui::Checkbox("Dark shell", &app.dark_mode)) app.restyle_requested = true;
 
-        theme::SectionLabel("SAVE LOG TO");
-        ImGui::RadioButton("Analysis folder", &app.output_mode, 0);
-        ImGui::RadioButton("Custom folder",   &app.output_mode, 1);
-        if (app.output_mode == 1) {
-            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 40);
-            ImGui::InputText("##out", app.output_path, sizeof(app.output_path));
-            ImGui::SameLine();
-            if (ImGui::Button("…")) { auto f=nfd::open_folder("Select Output Folder");
-                if(!f.empty()) std::strncpy(app.output_path,f.c_str(),sizeof(app.output_path)-1); }
+        theme::SectionLabel("LOG FILE");
+        // Opt-in: default is analyze-only, nothing written to disk. The
+        // destination controls only appear once saving is enabled.
+        ImGui::Checkbox("Save analysis log to disk", &app.save_log);
+        if (!app.save_log) {
+            ImGui::TextDisabled("Results stay in this window only.");
+        } else {
+            ImGui::RadioButton("Analysis folder", &app.output_mode, 0);
+            ImGui::RadioButton("Custom folder",   &app.output_mode, 1);
+            if (app.output_mode == 1) {
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 40);
+                ImGui::InputText("##out", app.output_path, sizeof(app.output_path));
+                ImGui::SameLine();
+                if (ImGui::Button("…")) { auto f=nfd::open_folder("Select Output Folder");
+                    if(!f.empty()) std::strncpy(app.output_path,f.c_str(),sizeof(app.output_path)-1); }
+            }
         }
 
         theme::SectionLabel("ABOUT");
@@ -690,6 +703,25 @@ static void side_panel(AppState& app) {
         ImGui::TextWrapped("Zero-dependency dynamic range meter. TT Dynamic Range (PMF), "
             "EBU R128 integrated loudness, true peak, PLR/PSR/LRA and crest factor. "
             "Output compatible with dr.loudness-war.info.");
+        ImGui::Dummy(ImVec2(0,6));
+
+        theme::SectionLabel("MEASUREMENT STANDARDS");
+        ImGui::TextWrapped("(ITU) — ITU-R BS.1770-4: K-weighted loudness (LUFS) and "
+            "4x-oversampled true peak (dBTP). Integrated loudness gated per EBU R 128.");
+        ImGui::Dummy(ImVec2(0,4));
+        ImGui::TextWrapped("(EBU) — EBU Tech 3342: Loudness Range (LRA). Distribution of "
+            "3-second short-term loudness, 10th to 95th percentile with a -20 LU "
+            "relative gate.");
+        ImGui::Dummy(ImVec2(0,4));
+        ImGui::TextWrapped("(AES) — AES loudness conventions: PLR is true peak minus "
+            "integrated loudness; Min PSR is the smallest gap between a 3-second "
+            "window's sample peak and its short-term loudness.");
+        ImGui::Dummy(ImVec2(0,4));
+        ImGui::TextWrapped("(PMF) — TT Dynamic Range, Pleasurize Music Foundation: the DR "
+            "score, peak-to-loudest-RMS. Matches dr.loudness-war.info submissions.");
+        ImGui::Dummy(ImVec2(0,4));
+        ImGui::TextDisabled("Per-channel Momentary/Short-Term values are informative\n"
+            "(non-ITU): BS.1770 defines them for the summed program only.");
         ImGui::Dummy(ImVec2(0,6));
         ImGui::TextDisabled("Native: WAV · AIFF/AIFF-C · FLAC · DSF/DFF (DSD)");
         ImGui::TextDisabled("MIT License — Ashwin Balaji 2026");

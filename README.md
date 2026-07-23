@@ -8,7 +8,7 @@ crête also **detects MQA-encoded files** and reports them unconditionally: if y
 
 The default build has **zero dependencies**. An optional third build tier statically links a compact, LGPL-only FFmpeg to add lossy/ALAC decode support — see below.
 
-**Current version: 0.10.1**
+**Current version: 0.11.0**
 
 ---
 
@@ -119,6 +119,8 @@ crete-gui
 
 Browse for a file or folder (or drag-and-drop), pick an output format, click Analyze.
 
+Since 0.11.0 results stay in the window only by default — writing a log file is opt-in ("Save analysis log to disk" in Settings, with the analysis-folder/custom-folder destination choice appearing once enabled). The About panel documents the measurement standards behind each reported metric.
+
 ---
 
 ## Supported Formats
@@ -198,11 +200,11 @@ MAAT DROffline MkII–style pipe-delimited table. Twenty-six columns: per-channe
 
 ### Detail (`-f detail`)
 
-Per-track block view with all per-channel metrics in a vertical table — easier to read for single-track investigation than the wide `ext` format.
+Per-track block view with all per-channel metrics in a vertical table — easier to read for single-track investigation than the wide `ext` format. Since 0.11.0 each joint value carries its governing-standard tag, MAAT-style — `(ITU)` BS.1770-4, `(EBU)` Tech 3342, `(AES)` loudness-ratio conventions, `(PMF)` TT Dynamic Range — with a legend in the summary footer; per-channel Momentary/Short-Term columns are informative `(non-ITU)` variants.
 
 ### JSON (`-f json`, requires `make cli-json` or `make cli-json-ffmpeg`)
 
-Machine-readable output with every metric for every track, including the full per-channel `channel_metrics` array, and `dsd_mode` / `dsd_filter` / `dsd_out_rate` for DSD sources. Used by the pytest CI harness to compare against reference databases without scraping text output.
+Machine-readable output with every metric for every track, including the full per-channel `channel_metrics` array, and `dsd_mode` / `dsd_filter` / `dsd_out_rate` for DSD sources. Used by the pytest CI harness to compare against reference databases without scraping text output. Since 0.11.0 a top-level `standards` map documents which specification governs each reported field.
 
 ---
 
@@ -240,7 +242,9 @@ The result is clamped to be **≥ the sample peak**, which BS.1770 requires by d
 
 ### PLR / PSR / LRA / crest factor
 
-PLR uses `min(max_true_peak, 0) − LUFSi` to match MAAT's clamp behavior on over-full-scale material. PSR is computed per 3-second short-term window with a −50 LUFS floor and reported as the minimum. LRA follows BS.1770-4 after relative gating at −20 LU.
+PLR uses `min(max_true_peak, 0) − LUFSi` to match MAAT's clamp behavior on over-full-scale material. PSR follows AES eBrief 373 — the 3-second window's sample peak minus its BS.1770-4 short-term loudness, minimum over the track, with a −50 LUFS floor. LRA follows EBU Tech 3342 after relative gating at −20 LU.
+
+Since 0.11.0, Max Short-Term, LRA, and Min PSR share one short-term block grid (3 s window at the EBU 3341 ≥10 Hz meter rate, 0.1 s hop) computed once per track. Previously LRA and PSR sampled the same window on a private 1.0 s grid, which biased Min PSR high (the true minimum window could fall between hops) and thinned the LRA percentile distribution on sparse material. All other metrics are bit-identical across the change; crête passes the official EBU Tech 3341/3342 vector suites on the new grid.
 
 ---
 
@@ -339,14 +343,12 @@ and an interface, no decoder code — so crête stays MIT.
 
 ## Pending work
 
-### Reference-data hygiene — PCM QUALIFICATION re-recorded (2026-07-22)
+### Reference-data hygiene — RESOLVED (2026-07-23)
 
-The harness repo re-measured all 11 QUALIFICATION albums (Thriller × 5 rates, East_Meets_West × 6 rates) fresh against MAAT DROffline MkII 2.2.3, replacing the pre-overhaul `maat` rows wholesale. The old rows predated MAAT's Folder Log preset overhaul and were missing metrics; every album now carries the full 21-metric set (TPL/SPPM/RMS/M-S/LUFSi/DR/LRA/PLR/Min. PSR, L/R/joint) the DSD suites already had.
+The harness repo re-measured all 11 QUALIFICATION albums (Thriller × 5 rates, East_Meets_West × 6 rates) fresh against MAAT DROffline MkII 2.2.3 (2026-07-22), and crête was re-validated against the new rows the following day — 11/11 green. Both former outliers are closed:
 
-The two known issues below were symptoms of those stale rows. **crête has not yet been re-validated against the new rows** — a manual Jenkins QUALIFICATION run is the next step — so treat these as historical until that run reports clean:
-
-- **`Min. PSR` — 101/135 flagged, max Δ 7.83 dB.** The worst case, `EMW_88k` track 15, had a reference value of exactly **`+0.00`** — a failed or missing MAAT export from the old rows, not a measurement.
-- **`EMW_96k` track 11.** The only PCM track that appeared as an outlier across three unrelated metrics (RMS Δ 2.31, LRA Δ 2.94), and — since the FIX 9 bias was removed — the only negative DR mismatch in the corpus (crête DR16 / ref DR17).
+- **`Min. PSR` flags** had three stacked causes, all resolved: a `+0.00` MAAT export sentinel in the old rows (now dropped at import), a too-coarse 1.0 s short-term sampling grid in crête (fixed in 0.11.0 — see FIX 11), and a genuine definitional difference — MAAT's Min. PSR was reverse-engineered (harness `tools/psr_discriminator/`) as a **0.5 dB/s decaying peak-hold** against 3 s short-term loudness, while crête implements the published AES eBrief 373 formula. crête stays spec-true; the harness reporting tolerance reflects the documented variance.
+- **`EMW_96k` track 11** was a **MAAT DROffline decode bug on a valid FLAC**: the file's STREAMINFO MD5 verifies (crête decodes it bit-perfectly, matching the 5-rate consensus), yet MAAT deterministically mismeasures RMS/LRA/DR on that encoding — and measures a re-encode of the identical audio correctly. The corpus and references were re-recorded from the new render; the original file is kept as a minimal repro.
 
 ### Test harness — overhauled 2026-07, former pending items done
 

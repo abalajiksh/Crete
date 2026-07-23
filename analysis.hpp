@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -18,6 +19,21 @@ namespace dr {
 static constexpr double PI = 3.14159265358979323846;
 static constexpr double SILENCE_FLOOR_DB = -120.0;
 static constexpr double LUFS_FLOOR = -70.0;
+
+// FIX 11 (v0.10.x): one short-term grid for Max S / LRA / Min. PSR.
+// EBU 3341 specifies the short-term meter at a >= 10 Hz update rate; Max S
+// already ran at 0.1 s hop but LRA and Min. PSR sampled the same 3 s window
+// on their own coarser 1.0 s grid. The coarse grid biased Min. PSR high
+// (true minimum window falls between hops) and thinned the LRA percentile
+// distribution on sparse classical material — both showed up as systematic
+// flags against MAAT DROffline (Weekly #46/#47). All three metrics now share
+// one block grid computed once (identical accumulation order, no extra cost).
+// PSR_GATE_LUFS: windows quieter than this are excluded from Min. PSR
+// (quiet low-crest passages otherwise produce spurious minima; MAAT gates
+// these too — threshold tuned against MAAT references).
+static constexpr double ST_WINDOW_SEC  = 3.0;
+static constexpr double ST_HOP_SEC     = 0.1;
+static constexpr double PSR_GATE_LUFS  = -50.0;
 
 // ── Verdict classification ─────────────────────────────────────────────────
 enum class Verdict {
@@ -274,6 +290,53 @@ inline double max_block_loudness_multi(
     return max_lufs;
 }
 
+// FIX 11: shared short-term block powers (summed K-weighted mean-square per
+// 3 s window, one entry per hop). Same loop structure and accumulation order
+// as max_block_loudness_multi so Max S computed from this grid is bit-identical
+// to the previous direct computation. Empty result <=> track shorter than one
+// window (callers fall back / return their n<window value).
+inline std::vector<double> short_term_powers_multi(
+        const std::vector<std::vector<double>>& kw_channels,
+        size_t window, size_t hop) {
+    std::vector<double> powers;
+    if (kw_channels.empty()) return powers;
+    size_t n = kw_channels[0].size();
+    size_t nch = kw_channels.size();
+    if (n < window || window == 0 || hop == 0) return powers;
+    powers.reserve((n - window) / hop + 1);
+    for (size_t start = 0; start + window <= n; start += hop) {
+        double total = 0.0;
+        for (size_t c = 0; c < nch; ++c)
+            total += mean_square(&kw_channels[c][start], window);
+        powers.push_back(total);
+    }
+    return powers;
+}
+
+// FIX 11: sliding max of |x| over `window` at `hop` steps — one value per
+// block, aligned with short_term_powers_multi's grid. Monotonic deque, O(n),
+// exact (no accumulation): equals peak_of() over each window.
+inline std::vector<double> sliding_window_peaks(const double* x, size_t n,
+                                                size_t window, size_t hop) {
+    std::vector<double> out;
+    if (n < window || window == 0 || hop == 0) return out;
+    out.reserve((n - window) / hop + 1);
+    std::deque<size_t> dq;  // indices into x, |x| non-increasing front→back
+    size_t next_end = window;  // exclusive end of the next block's window
+    for (size_t i = 0; i < n; ++i) {
+        double v = std::abs(x[i]);
+        while (!dq.empty() && std::abs(x[dq.back()]) <= v) dq.pop_back();
+        dq.push_back(i);
+        if (i + 1 == next_end) {
+            while (dq.front() + window < next_end) dq.pop_front();
+            out.push_back(std::abs(x[dq.front()]));
+            next_end += hop;
+            if (next_end > n) break;
+        }
+    }
+    return out;
+}
+
 inline double compute_integrated_loudness_multi(
         const std::vector<std::vector<double>>& kw_channels,
         double sample_rate) {
@@ -307,24 +370,16 @@ inline double compute_integrated_loudness_multi(
     return to_lufs_from_power(vec_mean(above_rel));
 }
 
-inline double compute_lra(const std::vector<std::vector<double>>& kw_channels,
-                           double sample_rate) {
-    if (kw_channels.empty()) return 0.0;
-    size_t n = kw_channels[0].size();
-    size_t nch = kw_channels.size();
-    size_t window = static_cast<size_t>(3.0 * sample_rate);
-    size_t hop = static_cast<size_t>(1.0 * sample_rate);
-    if (n < window) return 0.0;
+// FIX 11: LRA now consumes the shared 0.1 s-hop short-term grid (was a
+// private 1.0 s-hop grid). EBU 3342 permits any overlap >= 2/3; the denser
+// grid matches the meter-rate distribution MAAT gates its percentiles on.
+inline double compute_lra(const std::vector<double>& st_powers) {
+    if (st_powers.empty()) return 0.0;
     struct Block { double power; double lufs; };
     std::vector<Block> blocks;
-    for (size_t start = 0; start + window <= n; start += hop) {
-        double total = 0.0;
-        for (size_t c = 0; c < nch; ++c)
-            total += mean_square(&kw_channels[c][start], window);
-        double lufs = to_lufs_from_power(total);
-        blocks.push_back({total, lufs});
-    }
-    if (blocks.empty()) return 0.0;
+    blocks.reserve(st_powers.size());
+    for (double p : st_powers)
+        blocks.push_back({p, to_lufs_from_power(p)});
     double abs_gate_power = std::pow(10.0, (-70.0 + 0.691) / 10.0);
     std::vector<Block> above_abs;
     for (const auto& b : blocks) if (b.power > abs_gate_power) above_abs.push_back(b);
@@ -348,28 +403,33 @@ inline double compute_lra(const std::vector<std::vector<double>>& kw_channels,
     return lerp_percentile(0.95) - lerp_percentile(0.10);
 }
 
+// FIX 11: Min. PSR (AES: max sample peak in window minus short-term loudness,
+// minimum over the track) now consumes the shared 0.1 s-hop grid — the 1.0 s
+// hop systematically missed the true minimum window (biased high vs MAAT).
+// Windows below PSR_GATE_LUFS are excluded (quiet low-crest passages produce
+// spurious minima). st_powers must come from short_term_powers_multi at the
+// same window/hop so the peak and loudness grids align 1:1.
 inline double compute_min_psr(
         const std::vector<std::vector<double>>& channels,
-        const std::vector<std::vector<double>>& kw_channels,
-        double sample_rate) {
-    if (channels.empty()) return 0.0;
+        const std::vector<double>& st_powers,
+        size_t window, size_t hop) {
+    if (channels.empty() || st_powers.empty()) return 0.0;
     size_t n = channels[0].size();
     size_t nch = channels.size();
-    size_t window = static_cast<size_t>(3.0 * sample_rate);
-    size_t hop = static_cast<size_t>(1.0 * sample_rate);
-    if (n < window) return 0.0;
+    // Joint per-window sample peak = elementwise max of per-channel sliding maxima.
+    std::vector<double> peaks = sliding_window_peaks(channels[0].data(), n, window, hop);
+    for (size_t c = 1; c < nch; ++c) {
+        auto p = sliding_window_peaks(channels[c].data(), n, window, hop);
+        for (size_t i = 0; i < peaks.size() && i < p.size(); ++i)
+            peaks[i] = std::max(peaks[i], p[i]);
+    }
+    size_t nblocks = std::min(peaks.size(), st_powers.size());
     double min_psr = 1e9;
     bool any_valid = false;
-    for (size_t start = 0; start + window <= n; start += hop) {
-        double seg_peak = 0.0;
-        for (size_t c = 0; c < nch; ++c)
-            seg_peak = std::max(seg_peak, peak_of(&channels[c][start], window));
-        double total_power = 0.0;
-        for (size_t c = 0; c < nch; ++c)
-            total_power += mean_square(&kw_channels[c][start], window);
-        double st_lufs = to_lufs_from_power(total_power);
-        if (st_lufs > -50.0 && seg_peak > 0.0) {
-            double psr = to_dbfs(seg_peak) - st_lufs;
+    for (size_t i = 0; i < nblocks; ++i) {
+        double st_lufs = to_lufs_from_power(st_powers[i]);
+        if (st_lufs > PSR_GATE_LUFS && peaks[i] > 0.0) {
+            double psr = to_dbfs(peaks[i]) - st_lufs;
             if (psr < min_psr) min_psr = psr;
             any_valid = true;
         }
@@ -516,8 +576,8 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     // FIX 8 (v0.6.x): hops tightened for EBU 3341 file-based Max M / Max S.
     size_t momentary_window  = static_cast<size_t>(0.4 * sr);
     size_t momentary_hop     = static_cast<size_t>(0.02 * sr);
-    size_t short_term_window = static_cast<size_t>(3.0 * sr);
-    size_t short_term_hop    = static_cast<size_t>(0.1 * sr);
+    size_t short_term_window = static_cast<size_t>(ST_WINDOW_SEC * sr);
+    size_t short_term_hop    = static_cast<size_t>(ST_HOP_SEC * sr);
     double ch_power_scale = static_cast<double>(nch);
     r.ch_metrics.resize(nch);
     double joint_tp = 0.0;
@@ -550,15 +610,24 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     }
     r.max_true_peak_dbtp = to_dbfs(joint_tp);
     r.max_momentary_lufs = max_block_loudness_multi(kw, momentary_window, momentary_hop);
-    r.max_short_term_lufs = max_block_loudness_multi(kw, short_term_window, short_term_hop);
+    // FIX 11: one short-term grid feeds Max S, LRA and Min. PSR. Empty grid
+    // (track < 3 s) falls back to the old whole-file Max S path; LRA/PSR
+    // return 0 there, as before.
+    auto st_powers = short_term_powers_multi(kw, short_term_window, short_term_hop);
+    if (st_powers.empty()) {
+        r.max_short_term_lufs = max_block_loudness_multi(kw, short_term_window, short_term_hop);
+    } else {
+        r.max_short_term_lufs = to_lufs_from_power(
+            *std::max_element(st_powers.begin(), st_powers.end()));
+    }
     r.integrated_lufs = compute_integrated_loudness_multi(kw, sr);
     r.plr_db = std::min(r.max_true_peak_dbtp, 0.0) - r.integrated_lufs;
     double sum_crest = 0.0;
     for (size_t c = 0; c < nch; ++c)
         sum_crest += r.ch_metrics[c].sample_peak_dbfs - r.ch_metrics[c].rms_dbfs;
     r.crest_factor_db = sum_crest / static_cast<double>(nch);
-    r.lra_lu = compute_lra(kw, sr);
-    r.psr_db = compute_min_psr(channels, kw, sr);
+    r.lra_lu = compute_lra(st_powers);
+    r.psr_db = compute_min_psr(channels, st_powers, short_term_window, short_term_hop);
     r.verdict = classify_dr(r.dr_score_raw);
     return r;
 }
