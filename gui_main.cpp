@@ -47,7 +47,7 @@ extern "C" {
 namespace fs = std::filesystem;
 
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.9.2"
+#define CRETE_VERSION "0.11.2"
 #endif
 static constexpr const char* PROGRAM_NAME    = "crête";
 static constexpr const char* PROGRAM_VERSION = CRETE_VERSION;
@@ -96,6 +96,7 @@ struct AppState {
     bool side_open = false;
     int  side_tab  = 0;   // 0 About/Settings, 1 DR Guide
     int  selected_track = 0;
+    std::string analyzed_path;   // path that produced the current results
 
     // Cached DSD probe — recomputed only when path_buf changes, so the folder
     // is not re-scanned from disk on every frame (source_is_dsd runs per-frame).
@@ -111,6 +112,9 @@ struct AppState {
         o.out_rate = DSD_RATES[dsd_rate_idx];
         // Direct chain is DSD64 -> 44100 / default only; force valid combo.
         if (o.mode == dsd::Mode::Direct) { o.filter = dsd::Filter::Default; o.out_rate = 44100; }
+        // Final-stage filter is honoured only at a 44.1 kHz output rate; above
+        // that the engine ignores it, so snapshot Default to keep the record honest.
+        else if (o.out_rate != 44100) { o.filter = dsd::Filter::Default; }
         return o;
     }
 
@@ -359,6 +363,7 @@ static void start_analysis(AppState* app) {
       app->results.clear(); app->error_log.clear(); app->analysis_done = false; }
     app->progress.store(0.0f); app->current_file.store(0);
     app->cancel_requested.store(false); app->is_analyzing.store(true); app->selected_track = 0;
+    app->analyzed_path = app->path_buf;            // remember what we analyzed
     app->active_dsd_opt = app->build_dsd_opts();   // snapshot options for the thread
     if (app->worker.joinable()) app->worker.join();
     app->worker = std::thread(analysis_worker, app);
@@ -367,23 +372,38 @@ static void cancel_analysis(AppState* app) { app->cancel_requested.store(true); 
 
 // ── Bands ────────────────────────────────────────────────────────────────────
 static void band_header(AppState& app) {
+    float top = ImGui::GetCursorPosY();
     ImGui::PushFont(theme::g_brand);
+    float brand_h = ImGui::GetTextLineHeight();
     ImGui::PushStyleColor(ImGuiCol_Text, theme::P().accent);
     ImGui::TextUnformatted("crête");
     ImGui::PopStyleColor(); ImGui::PopFont();
 
+    // Sit the kicker + version on the wordmark's baseline. Archivo's ascent is
+    // ~0.78 of the line height; same ratio for every size, so baseline =
+    // top + 0.78*h and each item's top = baseline - 0.78*its_h.
+    const float AR = 0.78f;
+    float body_h = ImGui::GetTextLineHeight();   // default font = g_body
+    float baseline = top + AR * brand_h;
     ImGui::SameLine(0, 14);
-    ImGui::AlignTextToFramePadding();
+    ImGui::SetCursorPosY(baseline - AR * body_h * 0.72f);   // kicker renders at 0.72 scale
     theme::Kicker("DYNAMIC RANGE METER");
     ImGui::SameLine(0, 12);
+    ImGui::SetCursorPosY(baseline - AR * body_h);
 #ifdef CRETE_HAS_FFMPEG
     ImGui::TextDisabled("v%s +ffmpeg", PROGRAM_VERSION);
 #else
     ImGui::TextDisabled("v%s", PROGRAM_VERSION);
 #endif
 
-    float btns = 190.0f;
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x - btns + ImGui::GetCursorPosX());
+    const ImGuiStyle& st = ImGui::GetStyle();
+    auto bw = [&](const char* t){ return ImGui::CalcTextSize(t).x + st.FramePadding.x * 2; };
+    float rightw = bw("DSD Guide") + bw("DR Guide") + bw("Settings") + st.ItemSpacing.x * 2;
+    ImGui::SameLine();
+    float hx = ImGui::GetContentRegionMax().x - rightw;
+    if (hx > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(hx);
+    if (theme::GhostButton("DSD Guide")) { app.side_open = !(app.side_open && app.side_tab==2); app.side_tab = 2; }
+    ImGui::SameLine();
     if (theme::GhostButton("DR Guide")) { app.side_open = !(app.side_open && app.side_tab==1); app.side_tab = 1; }
     ImGui::SameLine();
     if (theme::GhostButton("Settings")) { app.side_open = !(app.side_open && app.side_tab==0); app.side_tab = 0; }
@@ -392,9 +412,13 @@ static void band_header(AppState& app) {
 
 static void band_source(AppState& app, bool analyzing) {
     theme::Kicker("SOURCE");
-    float btn = 88, fmt_w = 260, analyze_w = 120;
-    float reserve = btn*2 + fmt_w + analyze_w + 8*4;
-    ImGui::SetNextItemWidth(std::max(160.0f, ImGui::GetContentRegionAvail().x - reserve));
+    const float btn = 88, analyze_w = 120;
+    const float sp = ImGui::GetStyle().ItemSpacing.x;
+    // The path field flexes to eat all slack, so File/Folder/Analyze always sit
+    // flush at the right edge — no manual right-align, no overlap when narrow.
+    float reserve = btn * 2 + analyze_w + sp * 3;
+    float field_w = std::max(140.0f, ImGui::GetContentRegionAvail().x - reserve);
+    ImGui::SetNextItemWidth(field_w);
     ImGui::InputTextWithHint("##path", "Drop a folder or choose a file…", app.path_buf, sizeof(app.path_buf));
     ImGui::SameLine();
     if (ImGui::Button("File…", ImVec2(btn,0))) { auto f=nfd::open_file("Select Audio File");
@@ -403,15 +427,14 @@ static void band_source(AppState& app, bool analyzing) {
     if (ImGui::Button("Folder…", ImVec2(btn,0))) { auto f=nfd::open_folder("Select Album Folder");
         if(!f.empty()) std::strncpy(app.path_buf,f.c_str(),sizeof(app.path_buf)-1); }
 
-    ImGui::SameLine(0, 16);
-    theme::Segmented("fmt", FORMAT_LABELS, 3, &app.format_idx);
-
     ImGui::SameLine();
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - analyze_w);
     if (!analyzing) {
         bool empty = (app.path_buf[0]=='\0');
+        // Re-analyze only when the current path is exactly what produced results;
+        // pick a new file/folder and it drops back to Analyze.
+        bool same = app.analysis_done && app.analyzed_path == app.path_buf;
         if (empty) ImGui::BeginDisabled();
-        if (theme::PrimaryButton(app.analysis_done ? "Re-analyze" : "Analyze", ImVec2(analyze_w,0)))
+        if (theme::PrimaryButton(same ? "Re-analyze" : "Analyze", ImVec2(analyze_w,0)))
             start_analysis(&app);
         if (empty) ImGui::EndDisabled();
     } else {
@@ -437,17 +460,23 @@ static void band_dsd(AppState& app) {
     ImGui::SameLine(); ImGui::TextDisabled("· DSF / DFF");
 
     bool direct = (app.dsd_mode_idx == 1);
+    // Engine rules (main.cpp / dsd::): Direct is DSD64 -> 44.1k only, and the
+    // final-stage filter is honoured only at a 44.1k output rate.
+    if (direct) { app.dsd_rate_idx = 0; app.dsd_filter_idx = 0; }
+    bool rate_441 = (app.dsd_rate_idx == 0);
+
     ImGui::SameLine(0, 20); theme::Kicker("CHAIN"); ImGui::SameLine();
     theme::Segmented("dsdmode", DSD_MODE_LABELS, 2, &app.dsd_mode_idx);
 
     ImGui::SameLine(0, 16); theme::Kicker("FILTER"); ImGui::SameLine();
-    if (direct) app.dsd_filter_idx = 0;
-    theme::Segmented("dsdfilt", DSD_FILTER_LABELS, 3, &app.dsd_filter_idx, direct ? 0b110u : 0u);
+    // Direct: default only. Multistage above 44.1k: filter ignored entirely.
+    unsigned filt_mask = direct ? 0b110u : (rate_441 ? 0u : 0b111u);
+    theme::Segmented("dsdfilt", DSD_FILTER_LABELS, 3, &app.dsd_filter_idx, filt_mask);
 
     ImGui::SameLine(0, 16); theme::Kicker("RATE"); ImGui::SameLine();
-    if (direct) app.dsd_rate_idx = 0;
     theme::Segmented("dsdrate", DSD_RATE_LABELS, 4, &app.dsd_rate_idx, direct ? 0b1110u : 0u);
-    ImGui::SameLine(0, 6); ImGui::TextDisabled("kHz");
+    ImGui::SameLine(0, 6);
+    ImGui::TextDisabled(rate_441 ? "kHz" : "kHz · filter n/a");
     ImGui::Dummy(ImVec2(0, 8));
     theme::Rule(2.0f);
 }
@@ -606,6 +635,7 @@ static void band_results(AppState& app) {
     ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
         ImGuiTableFlags_Sortable | ImGuiTableFlags_Reorderable | ImGuiTableFlags_BordersInnerH;
     int ncols = (app.format_idx==2) ? 7 : 7; // DR TRACK PEAK RMS LUFS PLR DUR
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10, 3));
     if (ImGui::BeginTable("Results", ncols, flags)) {
         ImGui::TableSetupColumn("DR", ImGuiTableColumnFlags_WidthFixed|ImGuiTableColumnFlags_DefaultSort, 120);
         ImGui::TableSetupColumn("TRACK", ImGuiTableColumnFlags_WidthStretch);
@@ -640,7 +670,10 @@ static void band_results(AppState& app) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
             char sid[24]; std::snprintf(sid,sizeof(sid),"##r%d",i);
-            if (ImGui::Selectable(sid, i==app.selected_track, ImGuiSelectableFlags_SpanAllColumns))
+            // Full row-height selectable so the highlight fills the whole row.
+            if (ImGui::Selectable(sid, i==app.selected_track,
+                    ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
+                    ImVec2(0, ImGui::GetFrameHeight())))
                 app.selected_track = i;
             ImGui::SameLine(0,0);
             theme::DrMeterBar(t.dr_score);
@@ -655,19 +688,20 @@ static void band_results(AppState& app) {
                 ImGui::PopStyleColor();
             }
 
-            ImGui::TableSetColumnIndex(2);
+            ImGui::TableSetColumnIndex(2); ImGui::AlignTextToFramePadding();
             if (t.is_clipping) { ImGui::PushStyleColor(ImGuiCol_Text, theme::P().accent); ImGui::TextUnformatted("over"); ImGui::PopStyleColor(); }
             else { std::snprintf(b,sizeof(b),"%.2f",t.peak_dbfs); ImGui::TextUnformatted(b); }
-            ImGui::TableSetColumnIndex(3); std::snprintf(b,sizeof(b),"%.1f",t.rms_dbfs); ImGui::TextUnformatted(b);
-            ImGui::TableSetColumnIndex(4); std::snprintf(b,sizeof(b),"%.1f",t.integrated_lufs); ImGui::TextUnformatted(b);
-            ImGui::TableSetColumnIndex(5); std::snprintf(b,sizeof(b),"%.1f",t.plr_db); ImGui::TextUnformatted(b);
-            ImGui::TableSetColumnIndex(6);
+            ImGui::TableSetColumnIndex(3); ImGui::AlignTextToFramePadding(); std::snprintf(b,sizeof(b),"%.1f",t.rms_dbfs); ImGui::TextUnformatted(b);
+            ImGui::TableSetColumnIndex(4); ImGui::AlignTextToFramePadding(); std::snprintf(b,sizeof(b),"%.1f",t.integrated_lufs); ImGui::TextUnformatted(b);
+            ImGui::TableSetColumnIndex(5); ImGui::AlignTextToFramePadding(); std::snprintf(b,sizeof(b),"%.1f",t.plr_db); ImGui::TextUnformatted(b);
+            ImGui::TableSetColumnIndex(6); ImGui::AlignTextToFramePadding();
             ImGui::PushStyleColor(ImGuiCol_Text, theme::P().muted);
             ImGui::TextUnformatted(format_duration(t.duration_secs).c_str());
             ImGui::PopStyleColor();
         }
         ImGui::EndTable();
     }
+    ImGui::PopStyleVar();
     ImGui::EndChild();
 
     ImGui::SameLine(0, 0);
@@ -686,11 +720,14 @@ static void side_panel(AppState& app) {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::P().surface);
     ImGui::BeginChild("side", ImVec2(360, 0), true);
 
-    const char* tabs[] = { "Settings", "DR Guide" };
-    theme::Segmented("sidetabs", tabs, 2, &app.side_tab);
+    const char* tabs[] = { "Settings", "DR Guide", "DSD Guide" };
+    theme::Segmented("sidetabs", tabs, 3, &app.side_tab);
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - 24 + ImGui::GetCursorPosX());
     if (theme::GhostButton("×")) app.side_open = false;
     theme::Rule(2.0f);
+    // Wrap everything in this panel at the content edge — several rows use
+    // TextDisabled, which does not wrap on its own and would clip off-panel.
+    ImGui::PushTextWrapPos(0.0f);
 
     if (app.side_tab == 0) {
         theme::SectionLabel("APPEARANCE");
@@ -712,6 +749,18 @@ static void side_panel(AppState& app) {
                 if (ImGui::Button("…")) { auto f=nfd::open_folder("Select Output Folder");
                     if(!f.empty()) std::strncpy(app.output_path,f.c_str(),sizeof(app.output_path)-1); }
             }
+
+            theme::SectionLabel("LOG FORMAT");
+            theme::Segmented("fmt", FORMAT_LABELS, 3, &app.format_idx);
+            static const char* FMT_DESC[] = {
+                "Standard — dr.loudness-war.info submission format.",
+                "foobar — foobar2000 DR-meter layout.",
+                "Extended — every metric, plus album verdict."
+            };
+            ImGui::Dummy(ImVec2(0,2));
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::P().muted);
+            ImGui::TextWrapped("%s", FMT_DESC[app.format_idx]);
+            ImGui::PopStyleColor();
         }
 
         theme::SectionLabel("ABOUT");
@@ -764,7 +813,7 @@ static void side_panel(AppState& app) {
         ImGui::TextDisabled("Native: WAV · AIFF/AIFF-C · FLAC · DSF/DFF (DSD)");
         ImGui::TextDisabled("MIT License — Ashwin Balaji 2026");
         ImGui::TextDisabled("Archivo: SIL Open Font License 1.1");
-    } else {
+    } else if (app.side_tab == 1) {
         theme::SectionLabel("WHAT DR MEANS");
         ImGui::TextWrapped("The Dynamic Range (DR) value is the gap between the loudest and "
             "average levels. Higher = more contrast between loud and quiet passages.");
@@ -785,7 +834,71 @@ static void side_panel(AppState& app) {
         ImGui::TextWrapped("Audio is split into 3-second blocks; RMS and peak are computed per "
             "block (power-summed across channels). Silent blocks are dropped. DR is taken from "
             "the top 20%% loudest blocks, per channel, then averaged.");
+    } else {
+        theme::SectionLabel("DSD DECIMATION");
+        ImGui::TextWrapped("DSD bitstreams are decimated to PCM by libdsddpcm v0.2.1 — "
+            "vendored under third_party/libdsddpcm/ and statically linked. A clean-room, "
+            "BSD-2-Clause kernel: linear-phase FIR only (constant group delay), unity DC "
+            "gain (the +6 dB SACD makeup gain is not applied). crête keeps its own DSF/DFF "
+            "container parsing and one-thread-per-channel decode.");
+
+        theme::SectionLabel("OUTPUT RATE");
+        ImGui::TextWrapped("44.1 kHz (default) · 88.2 · 176.4 · 352.8.");
+
+        theme::SectionLabel("CHAIN");
+        ImGui::PushFont(theme::g_head); ImGui::TextUnformatted("Multistage"); ImGui::PopFont();
+        ImGui::TextWrapped("Default. LUT decimation to 8fs, then a halving cascade — brickwall "
+            "at Nyquist at 44.1 kHz output. The measurement-grade path; valid for "
+            "DSD64/128/256/512 at every output rate.");
+        ImGui::Dummy(ImVec2(0,4));
+        ImGui::PushFont(theme::g_head); ImGui::TextUnformatted("Direct"); ImGui::PopFont();
+        ImGui::TextWrapped("A single wide FIR with a gentle ~30 kHz corner (passes an "
+            "attenuated top octave). DSD64 → 44.1 kHz only; unsupported at any other rate.");
+
+        theme::SectionLabel("FILTER");
+        ImGui::TextWrapped("The ranked final 88.2 → 44.1 kHz stage. Honoured only at a 44.1 kHz "
+            "output rate; higher rates accept the default filter only.");
+        ImGui::Dummy(ImVec2(0,4));
+        struct FRow { const char* n; const char* d; };
+        FRow frows[] = {
+            {"default", "Equiripple (Parks–McClellan) · 383 taps · ~154 dB stopband. The golden default."},
+            {"firls",   "Least-squares · 767 taps · cross-method check."},
+            {"kaiser",  "Kaiser window (α≈150) · 4095 taps · reference / maximum decode, higher latency."},
+        };
+        for (auto& f : frows) {
+            ImGui::PushFont(theme::g_head); ImGui::TextUnformatted(f.n); ImGui::PopFont();
+            ImGui::TextWrapped("%s", f.d);
+            ImGui::Dummy(ImVec2(0,3));
+        }
+
+        theme::SectionLabel("SUPPORT MATRIX");
+        struct MRow { const char* head; const char* body; };
+        MRow mrows[] = {
+            {"Multistage · 44.1k",       "DSD64/128/256/512 · any filter"},
+            {"Multistage · 88.2–352.8k", "DSD64/128/256/512 · default filter only"},
+            {"Direct · 44.1k",           "DSD64 only · default only"},
+            {"Direct · 88.2–352.8k",     "Unsupported"},
+        };
+        for (auto& m : mrows) {
+            ImGui::PushFont(theme::g_head); ImGui::TextUnformatted(m.head); ImGui::PopFont();
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::P().muted);
+            ImGui::TextWrapped("%s", m.body);
+            ImGui::PopStyleColor();
+            ImGui::Dummy(ImVec2(0,3));
+        }
+
+        theme::SectionLabel("SUPPORTED RATES");
+        ImGui::TextWrapped("DSD64, DSD128, DSD256 and DSD512 only. DSD1024 and above are "
+            "rejected with a clear error — the library's input enum tops out at DSD512. "
+            "Unsupported chain / filter / rate combinations fail fast with an explanatory "
+            "message.");
+        ImGui::Dummy(ImVec2(0,4));
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::P().muted);
+        ImGui::TextWrapped("crete --version prints the resolved chain, decimation, tap count "
+            "and group delay for the current settings.");
+        ImGui::PopStyleColor();
     }
+    ImGui::PopTextWrapPos();
     ImGui::EndChild();
     ImGui::PopStyleColor();
 }
@@ -860,6 +973,7 @@ int main(int, char**) {
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1180, 780,
         SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE|SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { fprintf(stderr, "SDL_CreateWindow error: %s\n", SDL_GetError()); return 1; }
+    SDL_SetWindowMinimumSize(window, 940, 620);  // keep the band layout from crushing
 
     SDL_GLContext gl_ctx = SDL_GL_CreateContext(window);
     SDL_GL_MakeCurrent(window, gl_ctx);

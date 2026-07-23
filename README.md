@@ -8,7 +8,7 @@ crête also **detects MQA-encoded files** and reports them unconditionally: if y
 
 The default build has **zero dependencies**. An optional third build tier statically links a compact, LGPL-only FFmpeg to add lossy/ALAC decode support — see below.
 
-**Current version: 0.11.1**
+**Current version: 0.11.2**
 
 ---
 
@@ -28,7 +28,7 @@ Three CLI build tiers, one GUI:
 
 ```bash
 make                    # optimized build, no JSON output
-make VERSION=0.11.1     # custom version stamp
+make VERSION=0.11.2     # custom version stamp
 make debug              # debug build with sanitizers
 make install            # install to /usr/local/bin
 ```
@@ -118,7 +118,7 @@ Since 0.10.1 the CLI analyses an album's files **in parallel** (one worker per c
 crete-gui
 ```
 
-Browse for a file or folder (or drag-and-drop), pick an output format, click Analyze.
+Browse for a file or folder (or drag-and-drop) and click Analyze. The log output format lives in Settings → Log Format; a DSD Guide side panel documents the decimation chain, filters, and support matrix.
 
 Since 0.11.0 results stay in the window only by default — writing a log file is opt-in ("Save analysis log to disk" in Settings, with the analysis-folder/custom-folder destination choice appearing once enabled). The About panel documents the measurement standards behind each reported metric.
 

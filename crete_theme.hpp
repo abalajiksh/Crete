@@ -224,9 +224,12 @@ inline void KeyValue(const char* label, const char* value,
     ImGui::TextUnformatted(label);
     ImGui::PopStyleColor();
     ImGui::SameLine();
-    float w = ImGui::CalcTextSize(value).x;
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - w);
+    // Measure in the SAME font the value renders in (g_head) — otherwise the
+    // value overshoots the right edge and its trailing units get clipped.
     ImGui::PushFont(g_head);
+    float w = ImGui::CalcTextSize(value).x;
+    float x = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - w;
+    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), x));
     ImGui::PushStyleColor(ImGuiCol_Text, value_col ? *value_col : P().ink);
     ImGui::TextUnformatted(value);
     ImGui::PopStyleColor();
@@ -236,6 +239,7 @@ inline void KeyValue(const char* label, const char* value,
 
 // The DR meter-bar table cell: big "DRnn" + a fill bar (accent when < DR8).
 inline void DrMeterBar(int dr, float bar_w = 54.0f) {
+    ImGui::AlignTextToFramePadding();
     ImGui::PushFont(g_head);
     ImGui::Text("DR%d", dr);
     ImGui::PopFont();
