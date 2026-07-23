@@ -15,6 +15,12 @@
 #include "file_dialog.hpp"
 #include "crete_theme.hpp"
 
+#ifdef CRETE_HAS_FFMPEG
+extern "C" {
+#include <libavutil/avutil.h>
+}
+#endif
+
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl3.h"
@@ -125,7 +131,13 @@ struct AppState {
                         files.push_back(e.path().string());
                 std::sort(files.begin(), files.end());
                 if (files.empty()) { std::lock_guard<std::mutex> lk(mtx);
-                    error_log += "No supported audio files (.wav .flac .aif .dsf .dff) in folder.\n"; }
+#ifdef CRETE_HAS_FFMPEG
+                    error_log += "No supported audio files (.wav .flac .aif .dsf .dff + "
+                                 "ffmpeg: .m4a .mp3 .aac .opus .ogg .wma .wv .ape .mpc .tak ...) in folder.\n";
+#else
+                    error_log += "No supported audio files (.wav .flac .aif .dsf .dff) in folder.\n";
+#endif
+                }
             } else { std::lock_guard<std::mutex> lk(mtx); error_log += "Path not found: " + p + "\n"; }
         } catch (const std::exception& e) {
             std::lock_guard<std::mutex> lk(mtx); error_log += "Error scanning path: " + std::string(e.what()) + "\n";
@@ -364,7 +376,11 @@ static void band_header(AppState& app) {
     ImGui::AlignTextToFramePadding();
     theme::Kicker("DYNAMIC RANGE METER");
     ImGui::SameLine(0, 12);
+#ifdef CRETE_HAS_FFMPEG
+    ImGui::TextDisabled("v%s +ffmpeg", PROGRAM_VERSION);
+#else
     ImGui::TextDisabled("v%s", PROGRAM_VERSION);
+#endif
 
     float btns = 190.0f;
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - btns + ImGui::GetCursorPosX());
@@ -699,11 +715,33 @@ static void side_panel(AppState& app) {
         }
 
         theme::SectionLabel("ABOUT");
+#ifdef CRETE_HAS_FFMPEG
+        ImGui::PushFont(theme::g_head);
+        ImGui::Text("%s %s  [+ffmpeg-compact %s]", PROGRAM_NAME, PROGRAM_VERSION, av_version_info());
+        ImGui::PopFont();
+#else
         ImGui::PushFont(theme::g_head); ImGui::Text("%s %s", PROGRAM_NAME, PROGRAM_VERSION); ImGui::PopFont();
+#endif
         ImGui::TextWrapped("Zero-dependency dynamic range meter. TT Dynamic Range (PMF), "
             "EBU R128 integrated loudness, true peak, PLR/PSR/LRA and crest factor. "
             "Output compatible with dr.loudness-war.info.");
         ImGui::Dummy(ImVec2(0,6));
+#ifdef CRETE_HAS_FFMPEG
+        theme::SectionLabel("FFMPEG DECODE (COMPACT, LGPL-ONLY)");
+        ImGui::TextWrapped("This build statically links a compact, decode-only FFmpeg. "
+            "Native formats (WAV, AIFF, FLAC, DSF/DFF) always use crête's own "
+            "validated decoders; FFmpeg adds the following codecs:");
+        ImGui::Dummy(ImVec2(0,2));
+        // Mirrors DECODERS in scripts/build_ffmpeg_compact.sh and the extension
+        // whitelist in audio.hpp is_ffmpeg_extra_format().
+        ImGui::TextDisabled("ALAC · AAC (incl. LATM) · MP3 · Opus · Vorbis");
+        ImGui::TextDisabled("WMA v1/v2 · WMA Pro · WMA Lossless");
+        ImGui::TextDisabled("WavPack · Monkey's Audio (APE) · Musepack (SV7/SV8) · TAK");
+        ImGui::Dummy(ImVec2(0,2));
+        ImGui::TextWrapped("Accepted extensions: .m4a .mp4 .m4b .aac .mp3 .opus "
+            ".ogg .oga .mka .webm .wma .wv .ape .mpc .tak");
+        ImGui::Dummy(ImVec2(0,6));
+#endif
 
         theme::SectionLabel("MEASUREMENT STANDARDS");
         ImGui::TextWrapped("(ITU) — ITU-R BS.1770-4: K-weighted loudness (LUFS) and "

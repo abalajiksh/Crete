@@ -8,7 +8,7 @@ crête also **detects MQA-encoded files** and reports them unconditionally: if y
 
 The default build has **zero dependencies**. An optional third build tier statically links a compact, LGPL-only FFmpeg to add lossy/ALAC decode support — see below.
 
-**Current version: 0.11.0**
+**Current version: 0.11.1**
 
 ---
 
@@ -22,6 +22,7 @@ Three CLI build tiers, one GUI:
 | `make cli-json` | `crete` | nlohmann/json header (auto-fetched) | `-f json` machine-readable output |
 | `make cli-json-ffmpeg` | `crete-ffmpeg` | compact static FFmpeg (see below) | ALAC / MP3 / AAC / Opus decode |
 | `make gui` | `crete-gui` | SDL2, OpenGL, Dear ImGui | drag-and-drop GUI |
+| `make gui-ffmpeg` | `crete-gui-ffmpeg` | SDL2 + compact static FFmpeg | GUI with ALAC / MP3 / AAC / Opus decode |
 
 ### CLI (zero dependencies)
 
@@ -120,6 +121,8 @@ crete-gui
 Browse for a file or folder (or drag-and-drop), pick an output format, click Analyze.
 
 Since 0.11.0 results stay in the window only by default — writing a log file is opt-in ("Save analysis log to disk" in Settings, with the analysis-folder/custom-folder destination choice appearing once enabled). The About panel documents the measurement standards behind each reported metric.
+
+`make gui-ffmpeg` builds `crete-gui-ffmpeg`, the GUI with the same compact LGPL-only FFmpeg tier as `crete-ffmpeg`: folder scans, drag-and-drop, and the file dialogs additionally accept `.m4a .mp4 .m4b .aac .mp3 .opus .ogg .oga .mka .webm .wma .wv .ape .mpc .tak`, with the same strict routing (native formats always use crête's own decoders; DSD is never routed through FFmpeg). The header shows `+ffmpeg`, and the About panel lists the linked FFmpeg version and every extra codec (ALAC, AAC, MP3, Opus, Vorbis, WMA v1/v2/Pro/Lossless, WavPack, APE, Musepack, TAK).
 
 ---
 

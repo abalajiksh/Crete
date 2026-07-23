@@ -56,7 +56,13 @@ inline std::string open_file(const char* title = "Select Audio File") {
     ofn.lStructSize = sizeof(ofn);
     ofn.lpstrTitle = title;
     ofn.lpstrFilter =
+#ifdef CRETE_HAS_FFMPEG
+        "Audio Files\0*.wav;*.flac;*.aif;*.aiff;*.dsf;*.dff;"
+        "*.m4a;*.mp4;*.m4b;*.aac;*.mp3;*.opus;*.ogg;*.oga;"
+        "*.mka;*.webm;*.wma;*.wv;*.ape;*.mpc;*.tak\0"
+#else
         "Audio Files\0*.wav;*.flac;*.aif;*.aiff;*.dsf;*.dff\0"
+#endif
         "All Files\0*.*\0";
     ofn.lpstrFile = filename;
     ofn.nMaxFile = MAX_PATH;
@@ -68,21 +74,34 @@ inline std::string open_file(const char* title = "Select Audio File") {
     return exec_cmd(
         "osascript -e 'set f to POSIX path of (choose file with prompt \""
         + std::string(title) +
+#ifdef CRETE_HAS_FFMPEG
+        "\" of type {\"wav\",\"flac\",\"aif\",\"aiff\",\"dsf\",\"dff\","
+        "\"m4a\",\"mp4\",\"m4b\",\"aac\",\"mp3\",\"opus\",\"ogg\",\"oga\","
+        "\"mka\",\"webm\",\"wma\",\"wv\",\"ape\",\"mpc\",\"tak\"})' 2>/dev/null");
+#else
         "\" of type {\"wav\",\"flac\",\"aif\",\"aiff\",\"dsf\",\"dff\"})' 2>/dev/null");
+#endif
 
 #else
     // Linux: try zenity, then kdialog
+#ifdef CRETE_HAS_FFMPEG
+    const char* pattern = "*.wav *.flac *.aif *.aiff *.dsf *.dff "
+        "*.m4a *.mp4 *.m4b *.aac *.mp3 *.opus *.ogg *.oga "
+        "*.mka *.webm *.wma *.wv *.ape *.mpc *.tak";
+#else
+    const char* pattern = "*.wav *.flac *.aif *.aiff *.dsf *.dff";
+#endif
     if (has_command("zenity")) {
         return exec_cmd(
             "zenity --file-selection"
             " --title='" + std::string(title) + "'"
-            " --file-filter='Audio files|*.wav *.flac *.aif *.aiff *.dsf *.dff'"
+            " --file-filter='Audio files|" + std::string(pattern) + "'"
             " --file-filter='All files|*'"
             " 2>/dev/null");
     }
     if (has_command("kdialog")) {
         return exec_cmd(
-            "kdialog --getopenfilename ~ 'Audio files (*.wav *.flac *.aif *.aiff *.dsf *.dff)'"
+            "kdialog --getopenfilename ~ 'Audio files (" + std::string(pattern) + ")'"
             " 2>/dev/null");
     }
     return "";

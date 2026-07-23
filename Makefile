@@ -9,6 +9,8 @@
 #   make cli-json-ffmpeg  CLI + JSON + compact FFmpeg (the binary the pytest
 #                         harness needs: speaks JSON *and* decodes extra formats)
 #   make gui              Build GUI app (requires SDL2 + OpenGL + Dear ImGui)
+#   make gui-ffmpeg       GUI + bundled compact FFmpeg (binary: crete-gui-ffmpeg;
+#                         decodes ALAC/MP3/AAC/... — About lists the codecs)
 #   make all              Build cli-json + gui
 #   make debug            Debug CLI with sanitizers (no JSON)
 #   make debug-json       Debug CLI with sanitizers + JSON
@@ -57,7 +59,7 @@ CXXFLAGS   = -std=c++17 -Wall -Wextra -Wpedantic $(FP_DETERMINISM)
 CFLAGS     = -std=c99 -O2 -Wall -Wextra $(FP_DETERMINISM)
 LDFLAGS    =
 
-VERSION   ?= 0.11.0
+VERSION   ?= 0.11.1
 CXXFLAGS  += -DCRETE_VERSION='"$(VERSION)"'
 
 PREFIX    ?= /usr/local
@@ -130,6 +132,9 @@ CLI_HEADERS = analysis.hpp audio.hpp dsd_decode.hpp mqa_detect.hpp cue.hpp \
 IMGUI_DIR  = third_party/imgui
 GUI_SRC    = gui_main.cpp
 GUI_TARGET = crete-gui$(EXE_EXT)
+# Same no-overwrite convention as the CLI tiers: the FFmpeg-enabled GUI gets
+# its own binary name.
+GUI_FFMPEG_TARGET = crete-gui-ffmpeg$(EXE_EXT)
 
 IMGUI_SRCS = $(IMGUI_DIR)/imgui.cpp \
              $(IMGUI_DIR)/imgui_draw.cpp \
@@ -197,6 +202,22 @@ debug-gui: $(GUI_TARGET)
 $(GUI_TARGET): $(GUI_SRC) $(IMGUI_OBJS) analysis.hpp audio.hpp dsd_decode.hpp file_dialog.hpp $(LIBDSDDPCM_OBJ)
 	$(CXX) $(GUI_CXXFLAGS) -o $@ $(GUI_SRC) $(IMGUI_OBJS) $(LIBDSDDPCM_OBJ) $(GUI_LDFLAGS)
 
+# ── GUI + compact FFmpeg (ALAC/MP3/AAC/... decode; binary: crete-gui-ffmpeg) ─
+# Note: the ImGui objects are shared with the plain gui build; the FFmpeg
+# defines are harmless to them but switching between `gui` and `gui-ffmpeg`
+# recompiles them (target-specific GUI_CXXFLAGS propagate to prerequisites).
+gui-ffmpeg: GUI_CXXFLAGS += -O2 -DNDEBUG -DCRETE_HAS_FFMPEG $(FFMPEG_CFLAGS)
+gui-ffmpeg: GUI_LDFLAGS  += $(FFMPEG_LDLIBS)
+gui-ffmpeg: $(GUI_FFMPEG_TARGET)
+
+debug-gui-ffmpeg: GUI_CXXFLAGS += -O0 -g -fsanitize=address,undefined -DCRETE_HAS_FFMPEG $(FFMPEG_CFLAGS)
+debug-gui-ffmpeg: GUI_LDFLAGS  += -fsanitize=address,undefined $(FFMPEG_LDLIBS)
+debug-gui-ffmpeg: $(GUI_FFMPEG_TARGET)
+
+$(GUI_FFMPEG_TARGET): $(GUI_SRC) $(IMGUI_OBJS) analysis.hpp audio.hpp audio_ffmpeg.hpp dsd_decode.hpp file_dialog.hpp $(LIBDSDDPCM_OBJ)
+	@$(FFMPEG_PRECHECK)
+	$(CXX) $(GUI_CXXFLAGS) -o $@ $(GUI_SRC) $(IMGUI_OBJS) $(LIBDSDDPCM_OBJ) $(GUI_LDFLAGS)
+
 # ── ImGui object files ──────────────────────────────────────────────────────
 $(BUILD_DIR)/%.o: $(IMGUI_DIR)/%.cpp
 	@mkdir -p $(dir $@)
@@ -225,9 +246,12 @@ install-json: release-json
 install-gui: gui
 	install -Dm755 $(GUI_TARGET) $(DESTDIR)$(PREFIX)/bin/crete-gui$(EXE_EXT)
 
+install-gui-ffmpeg: gui-ffmpeg
+	install -Dm755 $(GUI_FFMPEG_TARGET) $(DESTDIR)$(PREFIX)/bin/crete-gui-ffmpeg$(EXE_EXT)
+
 # ── Clean ───────────────────────────────────────────────────────────────────
 clean:
-	rm -f crete crete.exe crete-gui crete-gui.exe crete-ffmpeg crete-ffmpeg.exe \
+	rm -f crete crete.exe crete-gui crete-gui.exe crete-ffmpeg crete-ffmpeg.exe crete-gui-ffmpeg crete-gui-ffmpeg.exe \
 	      dsd2wav dsd2wav.exe
 	rm -rf $(BUILD_DIR)
 
@@ -318,6 +342,6 @@ ffmpeg-info:
 .PHONY: all cli cli-json cli-ffmpeg cli-json-ffmpeg \
         release release-json release-ffmpeg release-json-ffmpeg \
         debug debug-json debug-ffmpeg debug-json-ffmpeg \
-        gui debug-gui clean distclean \
-        install install-json install-gui \
+        gui gui-ffmpeg debug-gui debug-gui-ffmpeg clean distclean \
+        install install-json install-gui install-gui-ffmpeg \
         setup-imgui setup-nlohmann setup-ffmpeg ffmpeg-info
