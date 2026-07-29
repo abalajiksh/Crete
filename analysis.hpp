@@ -475,50 +475,71 @@ inline TTDRResult compute_tt_dr(
         return result;
     }
     size_t n_blocks = n / block_size;
-    struct BlockData { double joint_rms; std::vector<double> ch_peaks; };
+    struct BlockData { double joint_rms; std::vector<double> ch_peaks, ch_rms; };
     std::vector<BlockData> block_data;
     block_data.reserve(n_blocks);
     for (size_t b = 0; b < n_blocks; ++b) {
         size_t start = b * block_size;
         BlockData bd;
         bd.ch_peaks.resize(nch, 0.0);
+        bd.ch_rms.resize(nch, 0.0);
         double sum_sq = 0.0;
         for (size_t ch = 0; ch < nch; ++ch) {
-            double ch_pk = 0.0;
+            double ch_pk = 0.0, ch_sum_sq = 0.0;
             for (size_t i = start; i < start + block_size; ++i) {
                 double s = channels[ch][i];
                 double a = std::abs(s);
                 if (a > ch_pk) ch_pk = a;
-                sum_sq += s * s;
-            }
+                ch_sum_sq += s * s;
+                sum_sq    += s * s;   // kept in the original accumulation order so
+            }                         // joint_rms (and the block gate) stay bit-identical
             bd.ch_peaks[ch] = ch_pk;
+            // PMF "x2" RMS convention: sqrt(2 * mean(x^2)).  Identical to joint_rms
+            // when the channels carry equal energy, so absolute calibration is unchanged.
+            bd.ch_rms[ch] = std::sqrt(2.0 * ch_sum_sq / static_cast<double>(block_size));
         }
         bd.joint_rms = std::sqrt(sum_sq / static_cast<double>(block_size));
         if (bd.joint_rms > 1e-3) block_data.push_back(std::move(bd));
     }
     if (block_data.empty()) { result.dr = 0.0; return result; }
     size_t nb = block_data.size();
-    std::vector<size_t> indices(nb);
-    std::iota(indices.begin(), indices.end(), 0);
-    std::sort(indices.begin(), indices.end(),
-              [&](size_t a, size_t b) { return block_data[a].joint_rms > block_data[b].joint_rms; });
     size_t n_top = std::max<size_t>(1, std::min<size_t>(nb,
             static_cast<size_t>(std::floor(nb * 0.2))));
-    double sum_rms = 0.0;
-    for (size_t i = 0; i < n_top; ++i) sum_rms += block_data[indices[i]].joint_rms;
-    double avg_rms = sum_rms / static_cast<double>(n_top);
-    if (avg_rms <= 0.0) { result.dr = 0.0; return result; }
 
-    // Per-channel DR: 2nd-highest block peak of THIS channel, minus the joint
-    // top-20% RMS.  Validated against foobar2000 DR Meter v1.0.8 (I Robot,
-    // DSD64, both decimation modes): max |delta| 0.44 dB, errors anti-correlated
-    // between L and R, mean ~0.  This part was already correct.
+    // Per-channel DR: 2nd-highest block peak of THIS channel, minus THIS channel's
+    // own top-20% RMS -- the TT DR / PMF definition.
+    //
+    // FIX 12 (v0.11.3): this used to subtract a single JOINT top-20% RMS shared by
+    // every channel, so L and R could differ only through the peak term.  That
+    // blended the channels together.  The error cancelled in the mean -- Weekly #53
+    // showed mean-of-L/R matching MAAT to a 0.01 dB median, 0.39 dB max -- but split
+    // wrongly per channel (up to 2.37 dB, with the L-R spread frequently opposite in
+    // sign to MAAT's), and collapsed to L == R *exactly* whenever both channels
+    // happened to share a 2nd-highest block peak: RAM_CD2 "18. GL" read 8.64/8.64
+    // against MAAT's 6.94/9.91, LeeRitenour "Dreamcatcher" 6.35/6.35 against
+    // 5.72/6.77.  A per-channel metric cannot return bit-identical values for two
+    // different channels; a shared RMS term can, and did.
+    //
+    // The old form was validated against foobar2000 DR Meter v1.0.8, whose own
+    // per-channel errors were likewise anti-correlated with mean ~0 -- so the
+    // artefact was accepted as correct.  foobar is a retired oracle (MAAT only).
+    //
+    // Block SET, block gate and n_top are deliberately unchanged (still joint-RMS
+    // gated); only the RMS term and its top-20% selection became per-channel.
     for (size_t ch = 0; ch < nch; ++ch) {
-        std::vector<double> ch_peaks(nb);
-        for (size_t i = 0; i < nb; ++i) ch_peaks[i] = block_data[i].ch_peaks[ch];
+        std::vector<double> ch_peaks(nb), ch_rms(nb);
+        for (size_t i = 0; i < nb; ++i) {
+            ch_peaks[i] = block_data[i].ch_peaks[ch];
+            ch_rms[i]   = block_data[i].ch_rms[ch];
+        }
         std::sort(ch_peaks.begin(), ch_peaks.end(), std::greater<double>());
+        std::sort(ch_rms.begin(),   ch_rms.end(),   std::greater<double>());
         double ch_peak2 = (nb >= 2) ? ch_peaks[1] : ch_peaks[0];
-        result.dr_per_ch[ch] = to_dbfs(ch_peak2) - to_dbfs(avg_rms);
+        double sum_rms = 0.0;
+        for (size_t i = 0; i < n_top; ++i) sum_rms += ch_rms[i];
+        double ch_avg_rms = sum_rms / static_cast<double>(n_top);
+        result.dr_per_ch[ch] = (ch_avg_rms > 0.0)
+            ? to_dbfs(ch_peak2) - to_dbfs(ch_avg_rms) : 0.0;
     }
 
     // FIX 9: DR (PMF) is the MEAN of the per-channel DR values.
@@ -537,10 +558,13 @@ inline TTDRResult compute_tt_dr(
     // the old joint form missed 9 of 20 track/mode pairs (all +1); the mean
     // matches 20/20 in both Direct and Multistage.
     //
-    // Suspected to be the same root cause as the rate-independent "Likoo" +2
-    // offset and the Pulp Fiction / Pixies T11 DR mismatches — all show the
-    // identical always-high, never-low signature.  Re-run the PCM qualification
-    // suite against MAAT to confirm.
+    // Weekly #53 answered the "re-run to confirm" note that stood here: FIX 9
+    // reduced the always-high signature but did not clear it -- 31 of 34 remaining
+    // integer mismatches were still crête-high (29x +1, 2x +2, 3x -1).  The
+    // rate-independent "Likoo" offset turned out NOT to be a joint-DR problem at
+    // all: it is the per-channel RMS blend fixed above (DR LEFT +1.14, DR RIGHT
+    // -1.05 at all six sample rates, mean 0.04).  Whether the residual joint bias
+    // survives FIX 12 is what the next weekly measures.
     double sum_dr = 0.0;
     for (size_t ch = 0; ch < nch; ++ch) sum_dr += result.dr_per_ch[ch];
     result.dr = sum_dr / static_cast<double>(nch);
@@ -634,8 +658,13 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
 
 inline int album_dr(const std::vector<TrackResult>& tracks) {
     if (tracks.empty()) return 0;
+    // FIX 12 (v0.11.3): average the RAW per-track DR and round ONCE.  This was
+    // round(mean(round(dr))) -- double rounding, which desynchronised the album
+    // score from MAAT even when every individual track's integer DR matched:
+    // Weekly #53 had GramParsons_MQA16 at 10 v 9 (0/9 track mismatches) and
+    // BoneyM_Venus_DSD128@352800 at 14 v 13 (0/10 track mismatches).
     double sum = 0.0;
-    for (const auto& t : tracks) sum += t.dr_score;
+    for (const auto& t : tracks) sum += t.dr_score_raw;
     return static_cast<int>(std::round(sum / tracks.size()));
 }
 

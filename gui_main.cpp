@@ -47,7 +47,7 @@ extern "C" {
 namespace fs = std::filesystem;
 
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.11.2"
+#define CRETE_VERSION "0.11.3"
 #endif
 static constexpr const char* PROGRAM_NAME    = "crête";
 static constexpr const char* PROGRAM_VERSION = CRETE_VERSION;

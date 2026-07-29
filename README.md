@@ -8,7 +8,7 @@ crête also **detects MQA-encoded files** and reports them unconditionally: if y
 
 The default build has **zero dependencies**. An optional third build tier statically links a compact, LGPL-only FFmpeg to add lossy/ALAC decode support — see below.
 
-**Current version: 0.11.2**
+**Current version: 0.11.3**
 
 ---
 
@@ -28,7 +28,7 @@ Three CLI build tiers, one GUI:
 
 ```bash
 make                    # optimized build, no JSON output
-make VERSION=0.11.2     # custom version stamp
+make VERSION=0.11.3     # custom version stamp
 make debug              # debug build with sanitizers
 make install            # install to /usr/local/bin
 ```
@@ -346,7 +346,22 @@ and an interface, no decoder code — so crête stays MIT.
 
 ## Pending work
 
-Most of this section is a resolved record (kept for provenance). As of 0.11.1 the only items still genuinely open are: a **cross-arch identity smoke check** (x86-64 vs aarch64 bit-identity), a **round-trip pytest case** (`.dsf` vs its exported WAV), and **DFF/AIFF test coverage**. None are release blockers.
+Most of this section is a resolved record (kept for provenance). As of 0.11.3 the items still genuinely open are: **FIX 12 corpus re-validation** (below), the **DSD output-rate parity decision** (below), a **cross-arch identity smoke check** (x86-64 vs aarch64 bit-identity), a **round-trip pytest case** (`.dsf` vs its exported WAV), and **DFF/AIFF test coverage**. None are release blockers.
+
+### FIX 12 — per-channel DR and album rounding (0.11.3, awaiting re-validation)
+
+Weekly #53 passed 141/141 with no catastrophic breach, but the DR deltas underneath exposed two real defects, both now fixed:
+
+- **Per-channel DR shared a single joint RMS across channels**, so `DR LEFT` and `DR RIGHT` could differ only through the peak term. The error cancelled in the mean — mean-of-L/R matched MAAT to a **0.01 dB median** — but split wrongly per channel (up to **2.37 dB**, spread often opposite in sign), and collapsed to `DR LEFT == DR RIGHT` bit-identically whenever both channels shared a 2nd-highest block peak. Each channel now uses its own top-20% RMS, per the TT DR / PMF definition. Block set, gate and top-20% count are unchanged.
+- **Album DR rounded twice** (`round(mean(round(track_dr)))`), which desynchronised the album score from MAAT even when every individual track matched. It now averages the raw per-track DR and rounds once.
+
+Both are covered by `scripts/check_fix12.sh`, a zero-dependency synthetic self-check with analytically known truth (no corpus required). **The full corpus has not yet been re-measured against these fixes** — treat the per-channel DR reference rows as pending until the next weekly reports.
+
+Note: joint DR is the mean of the per-channel values, so correcting the RMS term shifts joint DR slightly **upward** on channel-asymmetric material (zero shift when L and R carry equal energy). This is the PMF definition, but it is the opposite direction from the residual integer-DR bias, and the corpus run is what settles it.
+
+### DSD output-rate parity — decision pending
+
+DSD DR is output-rate dependent: at 352.8 kHz the retained ultrasonic noise-shaping inflates the 2nd-highest block peak far more than it inflates RMS, so DR reads +1…+3 higher than at 44.1 kHz. crête and MAAT agree on the direction but not the magnitude. At the shipping default (`--dsd-out-rate 44100`) album DR is clean across all 8 DSD albums; both album-level mismatches in Weekly #53 occurred only at 352.8 kHz. Either 44.1 kHz gets documented as the parity-guaranteed rate, or the ultrasonic peak handling needs investigation — until then, no 352.8 kHz parity claim.
 
 ### Reference-data hygiene — RESOLVED (2026-07-23)
 
