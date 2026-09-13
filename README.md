@@ -8,7 +8,7 @@ crête also **detects MQA-encoded files** and reports them unconditionally: if y
 
 The default build has **zero dependencies**. An optional third build tier statically links a compact, LGPL-only FFmpeg to add lossy/ALAC decode support — see below.
 
-**Current version: 0.11.3**
+**Current version: 0.12.0**
 
 ---
 
@@ -28,7 +28,7 @@ Three CLI build tiers, one GUI:
 
 ```bash
 make                    # optimized build, no JSON output
-make VERSION=0.11.3     # custom version stamp
+make VERSION=0.12.0     # custom version stamp
 make debug              # debug build with sanitizers
 make install            # install to /usr/local/bin
 ```
@@ -242,6 +242,46 @@ K-weighting (BS.1770-4) implemented via hardcoded biquad coefficients from libeb
 4× polyphase FIR (12 taps per phase) per channel; joint result is the max across channels.
 
 The result is clamped to be **≥ the sample peak**, which BS.1770 requires by definition (the reconstructed continuous waveform passes through every sample). The interpolation FIR is designed for audio-band content and attenuates energy near Nyquist, so without the clamp the oversampled peak can land *below* the sample peak on signals with heavy ultrasonic content. This never occurs on PCM or on DSD Direct; it does occur on **DSD Multistage**, whose 80-tap `fir1_8` leaves enough of DSD's shaped noise floor in place to trigger it (5 violations on I Robot, worst −0.143 dB). The clamp is a no-op wherever TP ≥ SP already, so the EBU 3341 true-peak battery is unaffected.
+
+### Channel layouts — mono, stereo, 5.1, 7.1
+
+crête measures every channel a decoder hands it and assumes the canonical WAVE / ITU
+interleave order (`channels.hpp`, shared by the CLI, the JSON and the GUI so they cannot
+describe a layout differently):
+
+| ch | layout | order |
+|----|--------|-------|
+| 1 | mono | M |
+| 2 | stereo | L R |
+| 3 / 4 / 5 | 3.0 / quad / 5.0 | L R C · L R Ls Rs · L R C Ls Rs |
+| 6 | 5.1 | L R C **LFE** Ls Rs |
+| 8 | 7.1 | L R C **LFE** Lss Rss Lrs Rrs |
+
+Layouts outside this list are measured per channel but carry no speaker semantics: no LFE
+is assumed and every channel is scored at unity weight.
+
+**Loudness** follows ITU-R BS.1770-4 channel weighting: front channels (L, R, C) unity,
+surrounds +1.5 dB, **LFE excluded**. BS.1770-4 tabulates weights only to 5.1; the 7.1 rears
+take the same +1.5 dB as the sides, as EBU and broadcast meters do. Mono and stereo weights
+are all unity, so the weighted sum is *bit-identical* to the unweighted code it replaced —
+the stereo corpus is untouched by construction, not by measurement. Cross-checked against
+ffmpeg's `ebur128` on a 5.1 master: I −13.57 vs −13.6 LUFS, LRA 8.22 vs 8.2 LU.
+
+**Dynamic range.** TT DR / dr.loudness-war.info define no procedure beyond stereo, so crête
+states its rule rather than implying one. `DR (PMF)` is the **mean of the scored channels**,
+whose two-channel case *is* the stereo rule (FIX 9), with the **LFE excluded** — a
+band-limited effects channel has a nearly flat crest factor, so folding it in would measure
+bass management rather than the music. Two companions are reported alongside it, never in
+place of it:
+
+- **Front L/R DR** (`dr_front_raw`) — mean of L and R alone, the figure directly comparable
+  with the stereo release of the same master.
+- **Lowest scored channel** (`worst_channel`) — what a mastering check wants flagged, since
+  a mean cannot fall below its worst member.
+
+The LFE is measured in full — its own peak, RMS and DR are reported (bracketed in
+`-f detail`, `scored: false` in JSON) — and scored in nothing. Joint peak, overall RMS and
+the 3 s block gate likewise run over the scored channels only.
 
 ### PLR / PSR / LRA / crest factor
 

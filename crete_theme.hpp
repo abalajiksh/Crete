@@ -255,6 +255,25 @@ inline void DrMeterBar(int dr, float bar_w = 54.0f) {
     ImGui::Dummy(ImVec2(bar_w, ImGui::GetTextLineHeight()));
 }
 
+// A per-channel DR bar for the detail panel's channel matrix. Fill is DR/18,
+// accent when this channel is the lowest-scoring one, and drawn in lineStrong
+// (not ink) for a channel excluded from scoring, e.g. the LFE.
+inline void ChannelMeterBar(float dr_raw, bool excluded, bool worst) {
+    float w = ImGui::GetContentRegionAvail().x;
+    if (w < 8.0f) w = 8.0f;
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    const float h = 5.0f;
+    float y = p.y + (ImGui::GetFrameHeight() - h) * 0.5f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + w, y + h), u32(P().line));
+    float f = dr_raw / 18.0f;   // ImClamp lives in imgui_internal.h; stay public
+    if (f < 0.0f) f = 0.0f; else if (f > 1.0f) f = 1.0f;
+    if (f > 0.0f)
+        dl->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + w * f, y + h),
+                          u32(excluded ? P().lineStrong : (worst ? P().accent : P().ink)));
+    ImGui::Dummy(ImVec2(w, ImGui::GetFrameHeight()));
+}
+
 // Flush segmented control (buttons butted together; active = accent fill).
 // `disabled_mask` bit i disables option i. Returns true if selection changed.
 inline bool Segmented(const char* id, const char* const* opts, int n, int* cur,

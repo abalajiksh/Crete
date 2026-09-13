@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "channels.hpp"
 #include "mqa_detect.hpp"
 
 namespace dr {
@@ -68,6 +69,12 @@ struct ChannelMetrics {
     int    dr_score            = 0;
     double max_momentary_lufs  = LUFS_FLOOR;
     double max_short_term_lufs = LUFS_FLOOR;
+    // Layout role. `scored` is false only for the LFE of a 5.1 / 7.1 layout:
+    // a band-limited .1 track has an almost flat crest factor and would drag a
+    // track's DR toward its own value for no musical reason. It is still
+    // measured and reported in full -- excluded from aggregates, not hidden.
+    bool   is_lfe              = false;
+    bool   scored              = true;
 };
 
 // ── Per-track analysis result ──────────────────────────────────────────────
@@ -84,6 +91,14 @@ struct TrackResult {
     double      dr_score_raw   = 0.0;
     std::vector<double> dr_per_channel;
     size_t      tt_block_count = 0;
+
+    // Multichannel extras. On mono/stereo dr_front_raw == dr_score_raw and
+    // worst_channel is simply the lower-DR channel, so nothing new is implied
+    // for the two layouts the PMF procedure actually defines.
+    double      dr_front_raw   = 0.0;   // DR of the front L/R pair alone --
+                                        // the figure comparable with the
+                                        // stereo release of the same master
+    int         worst_channel  = -1;    // index of the lowest-DR scored channel
 
     double      peak_dbfs      = SILENCE_FLOOR_DB;
     double      rms_dbfs       = SILENCE_FLOOR_DB;
@@ -267,23 +282,45 @@ inline double max_block_loudness_single(const double* kw, size_t n,
     return max_lufs;
 }
 
+// ── BS.1770 channel weighting ──────────────────────────────────────────────
+// The summed-program loudness measurements (Max M, Max S, Integrated, and the
+// LRA / Min. PSR grids derived from them) weight each channel per ITU-R
+// BS.1770-4: front channels unity, surrounds +1.5 dB, LFE excluded.  See
+// channels.hpp for the table and the layout assumptions behind it.
+//
+// An EMPTY weights vector means all-unity, and every weighted loop below reads
+// `weights.empty() ? 1.0 : weights[c]` and multiplies.  Multiplication by
+// exactly 1.0 is exact in IEEE 754, so mono and stereo -- whose weights are all
+// unity -- produce bit-identical results to the unweighted code this replaced.
+// The entire MAAT-validated stereo corpus is therefore untouched by definition,
+// not by measurement.
+inline std::vector<double> bs1770_weights(size_t nch) {
+    std::vector<double> w(nch);
+    for (size_t c = 0; c < nch; ++c)
+        w[c] = chan::bs1770_weight(static_cast<unsigned>(nch), c);
+    return w;
+}
+
 inline double max_block_loudness_multi(
         const std::vector<std::vector<double>>& kw_channels,
-        size_t window, size_t hop) {
+        size_t window, size_t hop,
+        const std::vector<double>& weights = std::vector<double>()) {
     if (kw_channels.empty()) return LUFS_FLOOR;
     size_t n = kw_channels[0].size();
     size_t nch = kw_channels.size();
     if (n < window) {
         double total_power = 0.0;
         for (size_t c = 0; c < nch; ++c)
-            total_power += mean_square(kw_channels[c].data(), n);
+            total_power += (weights.empty() ? 1.0 : weights[c])
+                         * mean_square(kw_channels[c].data(), n);
         return to_lufs_from_power(total_power);
     }
     double max_lufs = LUFS_FLOOR;
     for (size_t start = 0; start + window <= n; start += hop) {
         double total_power = 0.0;
         for (size_t c = 0; c < nch; ++c)
-            total_power += mean_square(&kw_channels[c][start], window);
+            total_power += (weights.empty() ? 1.0 : weights[c])
+                         * mean_square(&kw_channels[c][start], window);
         double lufs = to_lufs_from_power(total_power);
         if (lufs > max_lufs) max_lufs = lufs;
     }
@@ -297,7 +334,8 @@ inline double max_block_loudness_multi(
 // window (callers fall back / return their n<window value).
 inline std::vector<double> short_term_powers_multi(
         const std::vector<std::vector<double>>& kw_channels,
-        size_t window, size_t hop) {
+        size_t window, size_t hop,
+        const std::vector<double>& weights = std::vector<double>()) {
     std::vector<double> powers;
     if (kw_channels.empty()) return powers;
     size_t n = kw_channels[0].size();
@@ -307,7 +345,8 @@ inline std::vector<double> short_term_powers_multi(
     for (size_t start = 0; start + window <= n; start += hop) {
         double total = 0.0;
         for (size_t c = 0; c < nch; ++c)
-            total += mean_square(&kw_channels[c][start], window);
+            total += (weights.empty() ? 1.0 : weights[c])
+                   * mean_square(&kw_channels[c][start], window);
         powers.push_back(total);
     }
     return powers;
@@ -339,7 +378,8 @@ inline std::vector<double> sliding_window_peaks(const double* x, size_t n,
 
 inline double compute_integrated_loudness_multi(
         const std::vector<std::vector<double>>& kw_channels,
-        double sample_rate) {
+        double sample_rate,
+        const std::vector<double>& weights = std::vector<double>()) {
     if (kw_channels.empty()) return LUFS_FLOOR;
     size_t n = kw_channels[0].size();
     size_t nch = kw_channels.size();
@@ -348,14 +388,16 @@ inline double compute_integrated_loudness_multi(
     if (n < block_samples) {
         double total_power = 0.0;
         for (size_t c = 0; c < nch; ++c)
-            total_power += mean_square(kw_channels[c].data(), n);
+            total_power += (weights.empty() ? 1.0 : weights[c])
+                         * mean_square(kw_channels[c].data(), n);
         return to_lufs_from_power(total_power);
     }
     std::vector<double> block_powers;
     for (size_t start = 0; start + block_samples <= n; start += hop) {
         double total = 0.0;
         for (size_t c = 0; c < nch; ++c)
-            total += mean_square(&kw_channels[c][start], block_samples);
+            total += (weights.empty() ? 1.0 : weights[c])
+                   * mean_square(&kw_channels[c][start], block_samples);
         block_powers.push_back(total);
     }
     double abs_gate = std::pow(10.0, (-70.0 + 0.691) / 10.0);
@@ -416,9 +458,13 @@ inline double compute_min_psr(
     if (channels.empty() || st_powers.empty()) return 0.0;
     size_t n = channels[0].size();
     size_t nch = channels.size();
-    // Joint per-window sample peak = elementwise max of per-channel sliding maxima.
+    // Joint per-window sample peak = elementwise max of per-channel sliding
+    // maxima, over the SCORED channels only: an LFE thump is not a programme
+    // peak, and letting one set Min. PSR would read as crest the listener
+    // never hears. No-op for mono/stereo, which have no LFE.
     std::vector<double> peaks = sliding_window_peaks(channels[0].data(), n, window, hop);
     for (size_t c = 1; c < nch; ++c) {
+        if (chan::is_lfe(static_cast<unsigned>(nch), c)) continue;
         auto p = sliding_window_peaks(channels[c].data(), n, window, hop);
         for (size_t i = 0; i < peaks.size() && i < p.size(); ++i)
             peaks[i] = std::max(peaks[i], p[i]);
@@ -439,6 +485,8 @@ inline double compute_min_psr(
 
 struct TTDRResult {
     double dr;
+    double dr_front = 0.0;      // mean DR of the front L/R pair alone
+    int    worst_ch = -1;       // index of the lowest-DR scored channel
     std::vector<double> dr_per_ch;
     size_t blocks;
     double overall_rms_dbfs;
@@ -450,6 +498,7 @@ inline TTDRResult compute_tt_dr(
         const std::vector<std::vector<double>>& channels,
         double sample_rate, double block_seconds = 3.0) {
     size_t nch = channels.size();
+    const unsigned unch = static_cast<unsigned>(nch);
     size_t n = channels[0].size();
     size_t block_size = static_cast<size_t>(block_seconds * sample_rate);
     TTDRResult result;
@@ -457,7 +506,17 @@ inline TTDRResult compute_tt_dr(
     result.dr_per_ch.resize(nch, 0.0);
     double track_peak = 0.0;
     double total_sum_sq = 0.0;
+    // Every JOINT figure below -- track peak, overall RMS, the 3 s block gate
+    // and the final DR -- is taken over the SCORED channels, i.e. everything
+    // but the LFE (chan::is_lfe; mono and stereo have none, so their
+    // accumulation order and results are untouched). The LFE still gets its
+    // own peak, RMS and DR computed in full for display; it simply never
+    // enters an aggregate. A .1 track is a band-limited effects channel: its
+    // crest factor is nearly flat and its level is mix-dependent, so folding
+    // it into the programme's dynamic range measures the mixer's bass
+    // management, not the music.
     for (size_t ch = 0; ch < nch; ++ch) {
+        if (chan::is_lfe(unch, ch)) continue;
         for (size_t i = 0; i < n; ++i) {
             double s = channels[ch][i];
             track_peak = std::max(track_peak, std::abs(s));
@@ -472,6 +531,9 @@ inline TTDRResult compute_tt_dr(
         if (rms <= 0.0) { result.dr = 0.0; return result; }
         result.dr = to_dbfs(track_peak) - to_dbfs(rms);
         for (size_t ch = 0; ch < nch; ++ch) result.dr_per_ch[ch] = result.dr;
+        result.dr_front = result.dr;
+        for (size_t ch = 0; ch < nch; ++ch)
+            if (!chan::is_lfe(unch, ch)) { result.worst_ch = static_cast<int>(ch); break; }
         return result;
     }
     size_t n_blocks = n / block_size;
@@ -485,14 +547,16 @@ inline TTDRResult compute_tt_dr(
         bd.ch_rms.resize(nch, 0.0);
         double sum_sq = 0.0;
         for (size_t ch = 0; ch < nch; ++ch) {
+            const bool lfe = chan::is_lfe(unch, ch);
             double ch_pk = 0.0, ch_sum_sq = 0.0;
             for (size_t i = start; i < start + block_size; ++i) {
                 double s = channels[ch][i];
                 double a = std::abs(s);
                 if (a > ch_pk) ch_pk = a;
                 ch_sum_sq += s * s;
-                sum_sq    += s * s;   // kept in the original accumulation order so
-            }                         // joint_rms (and the block gate) stay bit-identical
+                if (!lfe) sum_sq += s * s;   // guarded in place, not hoisted: the
+            }                                // running order of joint_rms (and so
+                                             // the block gate) stays bit-identical
             bd.ch_peaks[ch] = ch_pk;
             // PMF "x2" RMS convention: sqrt(2 * mean(x^2)).  Identical to joint_rms
             // when the channels carry equal energy, so absolute calibration is unchanged.
@@ -565,9 +629,41 @@ inline TTDRResult compute_tt_dr(
     // all: it is the per-channel RMS blend fixed above (DR LEFT +1.14, DR RIGHT
     // -1.05 at all six sample rates, mean 0.04).  Whether the residual joint bias
     // survives FIX 12 is what the next weekly measures.
+    //
+    // MULTICHANNEL (v0.12.0): the mean runs over the SCORED channels, so 5.1
+    // reads mean(L,R,C,Ls,Rs) and the LFE is left out.  This is the direct
+    // generalisation of the rule above -- stereo is its two-channel case and
+    // is arithmetically unchanged -- chosen because TT DR / dr.loudness-war
+    // defines no multichannel procedure at all.  Two companion figures are
+    // computed rather than substituted for it:
+    //
+    //   dr_front  mean(L,R): the number directly comparable with the stereo
+    //             release of the same master, since it is measured over the
+    //             same two channels.
+    //   worst_ch  the lowest-DR scored channel, which is what a mastering
+    //             check actually wants to see flagged -- a mean cannot fall
+    //             below its worst member, so a single crushed surround would
+    //             otherwise be averaged away by four healthy channels.
+    //
+    // Reporting all three keeps the headline comparable, the verdict honest
+    // and neither one invented: crete states which rule produced which number
+    // instead of picking one and calling it "the" multichannel DR.
     double sum_dr = 0.0;
-    for (size_t ch = 0; ch < nch; ++ch) sum_dr += result.dr_per_ch[ch];
-    result.dr = sum_dr / static_cast<double>(nch);
+    size_t n_scored = 0;
+    double worst = 0.0;
+    for (size_t ch = 0; ch < nch; ++ch) {
+        if (chan::is_lfe(unch, ch)) continue;
+        sum_dr += result.dr_per_ch[ch];
+        ++n_scored;
+        if (result.worst_ch < 0 || result.dr_per_ch[ch] < worst) {
+            worst = result.dr_per_ch[ch];
+            result.worst_ch = static_cast<int>(ch);
+        }
+    }
+    result.dr = (n_scored > 0) ? sum_dr / static_cast<double>(n_scored) : 0.0;
+    result.dr_front = (nch >= 2)
+        ? 0.5 * (result.dr_per_ch[0] + result.dr_per_ch[1])
+        : result.dr_per_ch[0];
     return result;
 }
 
@@ -591,6 +687,8 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     r.dr_score_raw   = tt.dr;
     r.dr_score       = static_cast<int>(std::round(tt.dr));
     r.dr_per_channel = tt.dr_per_ch;
+    r.dr_front_raw   = tt.dr_front;
+    r.worst_channel  = tt.worst_ch;
     r.tt_block_count = tt.blocks;
     r.peak_dbfs      = tt.overall_peak_dbfs;
     r.rms_dbfs       = tt.overall_rms_dbfs;
@@ -603,10 +701,15 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     size_t short_term_window = static_cast<size_t>(ST_WINDOW_SEC * sr);
     size_t short_term_hop    = static_cast<size_t>(ST_HOP_SEC * sr);
     double ch_power_scale = static_cast<double>(nch);
+    // BS.1770 summing weights for this layout; all-unity (and therefore a
+    // no-op) for mono and stereo. See bs1770_weights() above.
+    const std::vector<double> weights = bs1770_weights(nch);
     r.ch_metrics.resize(nch);
     double joint_tp = 0.0;
     for (size_t c = 0; c < nch; ++c) {
         auto& cm = r.ch_metrics[c];
+        cm.is_lfe = chan::is_lfe(static_cast<unsigned>(nch), c);
+        cm.scored = !cm.is_lfe;
         const auto& samp = channels[c];
         double sp = peak_of(samp.data(), n);
         cm.sample_peak_dbfs = to_dbfs(sp);
@@ -633,18 +736,21 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
             kw[c].data(), n, short_term_window, short_term_hop, ch_power_scale);
     }
     r.max_true_peak_dbtp = to_dbfs(joint_tp);
-    r.max_momentary_lufs = max_block_loudness_multi(kw, momentary_window, momentary_hop);
+    r.max_momentary_lufs = max_block_loudness_multi(kw, momentary_window,
+                                                    momentary_hop, weights);
     // FIX 11: one short-term grid feeds Max S, LRA and Min. PSR. Empty grid
     // (track < 3 s) falls back to the old whole-file Max S path; LRA/PSR
     // return 0 there, as before.
-    auto st_powers = short_term_powers_multi(kw, short_term_window, short_term_hop);
+    auto st_powers = short_term_powers_multi(kw, short_term_window,
+                                             short_term_hop, weights);
     if (st_powers.empty()) {
-        r.max_short_term_lufs = max_block_loudness_multi(kw, short_term_window, short_term_hop);
+        r.max_short_term_lufs = max_block_loudness_multi(kw, short_term_window,
+                                                         short_term_hop, weights);
     } else {
         r.max_short_term_lufs = to_lufs_from_power(
             *std::max_element(st_powers.begin(), st_powers.end()));
     }
-    r.integrated_lufs = compute_integrated_loudness_multi(kw, sr);
+    r.integrated_lufs = compute_integrated_loudness_multi(kw, sr, weights);
     r.plr_db = std::min(r.max_true_peak_dbtp, 0.0) - r.integrated_lufs;
     double sum_crest = 0.0;
     for (size_t c = 0; c < nch; ++c)

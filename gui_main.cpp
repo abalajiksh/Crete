@@ -47,7 +47,7 @@ extern "C" {
 namespace fs = std::filesystem;
 
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.11.3"
+#define CRETE_VERSION "0.12.0"
 #endif
 static constexpr const char* PROGRAM_NAME    = "crête";
 static constexpr const char* PROGRAM_VERSION = CRETE_VERSION;
@@ -457,7 +457,12 @@ static void band_dsd(AppState& app) {
     ImGui::PushStyleColor(ImGuiCol_Text, p.accentInk);
     ImGui::PushFont(theme::g_head); ImGui::TextUnformatted("DSD SOURCE"); ImGui::PopFont();
     ImGui::PopStyleColor();
-    ImGui::SameLine(); ImGui::TextDisabled("· DSF / DFF");
+    ImGui::SameLine();
+    if (!app.results.empty() && app.results.front().channels > 2)
+        ImGui::TextDisabled("· DSF / DFF · %s",
+                            chan::layout_short(app.results.front().channels).c_str());
+    else
+        ImGui::TextDisabled("· DSF / DFF");
 
     bool direct = (app.dsd_mode_idx == 1);
     // Engine rules (main.cpp / dsd::): Direct is DSD64 -> 44.1k only, and the
@@ -513,6 +518,13 @@ static void band_verdict(AppState& app) {
     std::snprintf(b4,sizeof(b4),"%s",format_duration(dur).c_str());
     ImVec4 tpc = (maxtp > -0.1) ? theme::P().accent : theme::P().ink;
     ImGui::AlignTextToFramePadding();
+    // Layout belongs in the headline: DR12 on 5.1 is not DR12 on stereo, and a
+    // folder holding both is a fact worth showing rather than averaging over.
+    unsigned nch0 = app.results.empty() ? 0u : app.results.front().channels;
+    bool mixed_layout = false;
+    for (auto& t : app.results) if (t.channels != nch0) mixed_layout = true;
+    stat(mixed_layout ? "MIXED" : chan::layout_short(nch0).c_str(), "LAYOUT");
+    ImGui::SameLine(0,22);
     stat(b1,"FILES");           ImGui::SameLine(0,22);
     stat(b2,"AVG LUFS");        ImGui::SameLine(0,22);
     stat(b3,"MAX dBTP",&tpc);   ImGui::SameLine(0,22);
@@ -550,6 +562,91 @@ static void empty_state(AppState&) {
     ImGui::TextDisabled("%s", chips);
 }
 
+// ── Per-channel matrix ──────────────────────────────────────────────────────
+// One row per channel: its own DR bar, DR value and true peak. Scales from a
+// single mono row to 8 (7.1) with no change of layout. Speaker names and the
+// LFE rule come from channels.hpp, the same table the CLI and JSON read, so
+// the two front-ends cannot describe a layout differently.
+static const char* channel_note(unsigned nch) {
+    if (nch <= 1)
+        return "Mono source: no inter-channel comparison, so no width or "
+               "correlation metrics. Peak, PSR and RMS are read once.";
+    if (nch == 2)
+        return "DR (PMF) is the mean of the two channel DRs — the TT DR rule. "
+               "Peaks are reported per channel.";
+    if (nch == 8)
+        return "DR (PMF) is the mean of the scored channels; the LFE is measured "
+               "but never scored. Loudness is BS.1770 channel-weighted (front "
+               "unity, surrounds +1.5 dB, LFE excluded). Native 7.1 music masters "
+               "are rare — most 7.1 files are film beds or Atmos renders.";
+    return "DR (PMF) is the mean of the scored channels; the LFE is measured but "
+           "never scored. Loudness is BS.1770 channel-weighted (front unity, "
+           "surrounds +1.5 dB, LFE excluded). The accent bar marks the lowest "
+           "scored channel, which a mean cannot fall below.";
+}
+
+static void channel_matrix(const dr::TrackResult& t) {
+    const int nch = (int)t.ch_metrics.size();
+    if (nch <= 0) return;
+    const int worst = t.worst_channel;   // computed by the engine, not re-derived
+    char b[48];
+
+    ImGui::Dummy(ImVec2(0, 4));
+    theme::Kicker("PER-CHANNEL");
+    std::string lay = chan::layout_detail(t.channels);
+    float lw = ImGui::CalcTextSize(lay.c_str()).x;
+    ImGui::SameLine(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - lw);
+    ImVec4 acc = theme::P().accent;
+    theme::Kicker(lay.c_str(), &acc);
+    theme::Rule(2.0f, 2.0f);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(8, 3));
+    if (ImGui::BeginTable("chmatrix", 4, ImGuiTableFlags_BordersInnerH)) {
+        ImGui::TableSetupColumn("CH",        ImGuiTableColumnFlags_WidthFixed, 44);
+        ImGui::TableSetupColumn("DR",        ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("##drval",   ImGuiTableColumnFlags_WidthFixed, 34);
+        ImGui::TableSetupColumn("TRUE PEAK", ImGuiTableColumnFlags_WidthFixed, 76);
+        ImGui::TableHeadersRow();
+
+        for (int i = 0; i < nch; ++i) {
+            const bool excluded   = !t.ch_metrics[i].scored;
+            const bool sets_floor = (i == worst && chan::scored_count(t.channels) > 1);
+            const ImVec4 lab = excluded ? theme::P().muted : theme::P().ink;
+            ImGui::TableNextRow();
+
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::PushFont(theme::g_head);
+            ImGui::PushStyleColor(ImGuiCol_Text, lab);
+            ImGui::TextUnformatted(chan::label(t.channels, i).c_str());
+            ImGui::PopStyleColor(); ImGui::PopFont();
+
+            ImGui::TableSetColumnIndex(1);
+            theme::ChannelMeterBar((float)t.ch_metrics[i].dr_raw, excluded, sets_floor);
+
+            ImGui::TableSetColumnIndex(2);
+            ImGui::AlignTextToFramePadding();
+            ImGui::PushStyleColor(ImGuiCol_Text, lab);
+            std::snprintf(b, sizeof(b), "%.1f", t.ch_metrics[i].dr_raw);
+            ImGui::TextUnformatted(b);
+            ImGui::PopStyleColor();
+
+            ImGui::TableSetColumnIndex(3);
+            ImGui::AlignTextToFramePadding();
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::P().muted);
+            std::snprintf(b, sizeof(b), "%.2f", t.ch_metrics[i].true_peak_dbtp);
+            ImGui::TextUnformatted(b);
+            ImGui::PopStyleColor();
+        }
+        ImGui::EndTable();
+    }
+    ImGui::PopStyleVar();
+
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::P().muted);
+    ImGui::TextWrapped("%s", channel_note(t.channels));
+    ImGui::PopStyleColor();
+}
+
 // ── Detail panel (grouped, not a dense grid) ────────────────────────────────
 static void detail_panel(AppState& app) {
     if (app.results.empty()) return;
@@ -563,9 +660,9 @@ static void detail_panel(AppState& app) {
     ImVec4 acc = theme::P().accent;
     theme::Kicker("SELECTED TRACK", &acc);
     ImGui::PushFont(theme::g_head); ImGui::TextWrapped("%s", name.c_str()); ImGui::PopFont();
-    ImGui::TextDisabled("%02d · %u ch · %s %u-bit / %u Hz · %s",
-        app.selected_track+1, t.channels, t.codec.c_str(), t.bit_depth, t.sample_rate,
-        format_duration(t.duration_secs).c_str());
+    ImGui::TextDisabled("%02d · %s · %s %u-bit / %u Hz · %s",
+        app.selected_track+1, chan::layout_short(t.channels).c_str(), t.codec.c_str(),
+        t.bit_depth, t.sample_rate, format_duration(t.duration_secs).c_str());
 
     // MQA warning — a listener measuring DR is entitled to know the source is
     // lossy MQA, not lossless. Deterministic datasync only (see mqa_detect.hpp).
@@ -592,9 +689,27 @@ static void detail_panel(AppState& app) {
     ImGui::SameLine(0,14);
     ImGui::BeginGroup();
     theme::Kicker("DYNAMIC RANGE · PMF");
-    if (nch >= 2) ImGui::Text("L  %.1f   /   R  %.1f", t.ch_metrics[0].dr_raw, t.ch_metrics[1].dr_raw);
-    else if (nch == 1) ImGui::Text("Mono  %.1f", t.ch_metrics[0].dr_raw);
+    if (nch == 1) {
+        ImGui::Text("Mono  %.1f", t.ch_metrics[0].dr_raw);
+    } else if (nch == 2) {
+        ImGui::Text("L  %.1f   /   R  %.1f", t.ch_metrics[0].dr_raw, t.ch_metrics[1].dr_raw);
+    } else {
+        // Multichannel: say which channels made the number and give the two
+        // companions the CLI prints, so the GUI can never imply a rule the
+        // engine does not use.
+        ImGui::TextDisabled("Mean of %u scored channels%s",
+                            chan::scored_count(t.channels),
+                            chan::has_lfe(t.channels) ? " · LFE excluded" : "");
+        ImGui::Text("Front L/R  %.1f", t.dr_front_raw);
+        if (t.worst_channel >= 0)
+            ImGui::TextDisabled("lowest %s  %.1f",
+                                chan::label(t.channels, t.worst_channel).c_str(),
+                                t.ch_metrics[t.worst_channel].dr_raw);
+    }
     ImGui::EndGroup();
+    theme::Rule(2.0f, 8.0f);
+
+    channel_matrix(t);
     theme::Rule(2.0f, 8.0f);
 
     // Standards tags mirror MAAT DROffline: (ITU) BS.1770-4, (EBU) Tech 3342,
@@ -607,12 +722,18 @@ static void detail_panel(AppState& app) {
     std::snprintf(b,sizeof(b),"%.2f dB", t.crest_factor_db); theme::KeyValue("Crest factor", b);
 
     theme::SectionLabel("LOUDNESS");
+    if (t.channels > 2) {
+        std::string lm = chan::loudness_mode(t.channels);
+        float lmw = ImGui::CalcTextSize(lm.c_str()).x;
+        ImGui::SameLine(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - lmw);
+        ImVec4 fnt = theme::P().faint; theme::Kicker(lm.c_str(), &fnt);
+    }
     std::snprintf(b,sizeof(b),"%.2f LUFS", t.integrated_lufs);    theme::KeyValue("Integrated (ITU)", b);
     std::snprintf(b,sizeof(b),"%.2f LUFS", t.max_momentary_lufs); theme::KeyValue("Max Momentary (ITU)", b);
     std::snprintf(b,sizeof(b),"%.2f LUFS", t.max_short_term_lufs);theme::KeyValue("Max Short-term (ITU)", b);
 
-    theme::SectionLabel(nch>=2 ? "PEAKS · L / R" : "PEAKS");
-    if (nch >= 2) {
+    theme::SectionLabel(nch > 2 ? "PEAKS · ACROSS CHANNELS" : (nch == 2 ? "PEAKS · L / R" : "PEAKS"));
+    if (nch == 2) {
         std::snprintf(b,sizeof(b),"%.2f / %.2f dB", t.ch_metrics[0].sample_peak_dbfs, t.ch_metrics[1].sample_peak_dbfs);
         theme::KeyValue("Sample Peak", b);
         std::snprintf(b,sizeof(b),"%.2f / %.2f dBTP", t.ch_metrics[0].true_peak_dbtp, t.ch_metrics[1].true_peak_dbtp);
@@ -635,11 +756,17 @@ static void band_results(AppState& app) {
     ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
         ImGuiTableFlags_Sortable | ImGuiTableFlags_Reorderable | ImGuiTableFlags_BordersInnerH;
     int ncols = (app.format_idx==2) ? 7 : 7; // DR TRACK PEAK RMS LUFS PLR DUR
+    // Multichannel: every per-track column is an across-channel aggregate, so
+    // the PEAK header says so and a footer rule spells out the scoring rule.
+    const unsigned tbl_nch = app.results.empty() ? 2u : app.results.front().channels;
+    const bool tbl_multi = tbl_nch > 2;
+    const float footer_h = tbl_multi ? 34.0f : 0.0f;
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10, 3));
-    if (ImGui::BeginTable("Results", ncols, flags)) {
+    if (ImGui::BeginTable("Results", ncols, flags, ImVec2(0, avail_h - footer_h))) {
         ImGui::TableSetupColumn("DR", ImGuiTableColumnFlags_WidthFixed|ImGuiTableColumnFlags_DefaultSort, 120);
         ImGui::TableSetupColumn("TRACK", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("PEAK", ImGuiTableColumnFlags_WidthFixed, 78);
+        ImGui::TableSetupColumn(tbl_multi ? "PEAK (MAX)" : "PEAK",
+                                ImGuiTableColumnFlags_WidthFixed, 78);
         ImGui::TableSetupColumn("RMS", ImGuiTableColumnFlags_WidthFixed, 74);
         ImGui::TableSetupColumn("LUFS", ImGuiTableColumnFlags_WidthFixed, 66);
         ImGui::TableSetupColumn("PLR", ImGuiTableColumnFlags_WidthFixed, 58);
@@ -702,6 +829,15 @@ static void band_results(AppState& app) {
         ImGui::EndTable();
     }
     ImGui::PopStyleVar();
+    if (tbl_multi) {
+        theme::Rule(2.0f, 4.0f);
+        if (chan::has_lfe(tbl_nch)) { theme::Tag("LFE EXCLUDED"); ImGui::SameLine(0, 10); }
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::P().muted);
+        ImGui::TextWrapped("DR is the mean of the scored channels · LUFS is BS.1770 "
+                           "channel-weighted · peaks are across-channel maxima");
+        ImGui::PopStyleColor();
+    }
     ImGui::EndChild();
 
     ImGui::SameLine(0, 0);

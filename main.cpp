@@ -49,7 +49,7 @@ extern "C" {
 
 // ── Version info ───────────────────────────────────────────────────────────
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.11.3"
+#define CRETE_VERSION "0.12.0"
 #endif
 
 static constexpr const char* PROGRAM_NAME    = "crête";
@@ -577,13 +577,16 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
 
         std::printf("  Format:              %s %u-bit / %u Hz\n",
                     t.codec.c_str(), t.bit_depth, t.sample_rate);
+        std::printf("  Layout:              %s\n",
+                    chan::layout_detail(t.channels).c_str());
         std::printf("  Duration:            %s\n\n",
                     format_duration(t.duration_secs).c_str());
 
+        // Speaker names come from the shared layout table so the CLI, the JSON
+        // and the GUI cannot drift apart. See channels.hpp.
+        const unsigned unch = static_cast<unsigned>(nch);
         auto ch_label = [&](size_t c) -> std::string {
-            if (nch == 1) return "Mono";
-            if (nch == 2) return (c == 0) ? "Left" : "Right";
-            return "Ch" + std::to_string(c + 1);
+            return chan::label_long(unch, c);
         };
 
         std::printf("  %-22s", "");
@@ -627,8 +630,16 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
         std::printf("%.2f LUFS (ITU)\n", t.integrated_lufs);
 
         std::printf("  %-22s", "DR (PMF)");
-        for (size_t c = 0; c < nch; ++c)
-            std::printf("%-12.2f", t.ch_metrics[c].dr_raw);
+        for (size_t c = 0; c < nch; ++c) {
+            // Brackets mark a channel that is measured but not scored (LFE).
+            if (t.ch_metrics[c].scored) {
+                std::printf("%-12.2f", t.ch_metrics[c].dr_raw);
+            } else {
+                char br[16];
+                std::snprintf(br, sizeof(br), "[%.2f]", t.ch_metrics[c].dr_raw);
+                std::printf("%-12s", br);
+            }
+        }
         std::printf("DR%d (PMF)\n", t.dr_score);
 
         std::printf("  %-22s", "Min PSR");
@@ -642,6 +653,22 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
         std::printf("  %-22s", "LRA");
         for (size_t c = 0; c < nch; ++c) std::printf("%-12s", "—");
         std::printf("%.2f LU (EBU)\n", t.lra_lu);
+
+        // Multichannel needs its aggregation rule stated next to the number:
+        // TT DR defines no procedure beyond stereo, so the reader is entitled
+        // to know which channels produced the headline and which did not.
+        if (nch > 2) {
+            std::printf("\n  DR (PMF) = mean of the %u scored channel%s%s.\n",
+                        chan::scored_count(unch),
+                        chan::scored_count(unch) == 1 ? "" : "s",
+                        chan::has_lfe(unch) ? " — LFE measured, not scored" : "");
+            std::printf("  Front L/R DR:        %.2f   (the figure comparable "
+                        "with a stereo master)\n", t.dr_front_raw);
+            if (t.worst_channel >= 0)
+                std::printf("  Lowest scored:       %.2f   (%s)\n",
+                            t.ch_metrics[t.worst_channel].dr_raw,
+                            chan::label_long(unch, t.worst_channel).c_str());
+        }
     }
 
     std::cout << "\n" << sep << "\nSummary\n" << sep << "\n\n";
@@ -655,9 +682,13 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
 
         const auto& first = tracks[0];
         std::cout << "\nSamplerate:        " << first.sample_rate << " Hz\n";
-        std::cout << "Channels:          " << first.channels << "\n";
+        std::cout << "Channels:          " << first.channels
+                  << " (" << chan::layout_detail(first.channels) << ")\n";
         std::cout << "Bits per sample:   " << first.bit_depth << "\n";
         std::cout << "Codec:             " << first.codec << "\n";
+        if (first.channels > 2)
+            std::cout << "Loudness summing:  "
+                      << chan::loudness_mode(first.channels) << "\n";
 
         auto v = dr::classify_dr(static_cast<double>(dr::album_dr(tracks)));
         std::cout << "Verdict:           " << dr::verdict_string(v) << "\n";
@@ -677,6 +708,21 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
         "  Per-channel Momentary/Short-Term columns are informative (non-ITU):\n"
         "  BS.1770 defines these values for the summed program only.\n"
         << sep << "\n";
+    if (!tracks.empty() && tracks[0].channels > 2) {
+        std::cout <<
+            "Multichannel\n"
+            "  TT DR / dr.loudness-war.info define no procedure beyond stereo, so\n"
+            "  crete states its rule rather than implying one: DR (PMF) is the mean\n"
+            "  of the scored channels, whose two-channel case IS the stereo rule.\n"
+            "  The front L/R DR (comparable with a stereo master) and the lowest\n"
+            "  scored channel are reported alongside it, never in place of it.\n"
+            "  The LFE is measured in full and scored in nothing: a band-limited\n"
+            "  effects channel has a nearly flat crest factor, so folding it in\n"
+            "  would measure bass management rather than the music.\n"
+            "  Loudness follows BS.1770-4 channel weighting: front channels unity,\n"
+            "  surrounds +1.5 dB, LFE excluded.\n"
+            << sep << "\n";
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -712,12 +758,19 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         {"crest_factor_db",      "sample peak - RMS, per-channel mean"},
         {"channel_metrics.max_momentary_lufs",  "non-ITU (per-channel, informative)"},
         {"channel_metrics.max_short_term_lufs", "non-ITU (per-channel, informative)"},
+        {"dr_front_raw",         "TT DR of the front L/R pair (crete, multichannel)"},
+        {"worst_channel",        "lowest-DR scored channel index (crete, multichannel)"},
+        {"channel_layout",       "WAVE/ITU channel order (crete)"},
+        {"loudness_summing",     "ITU-R BS.1770-4 channel weighting"},
     };
 
     if (!tracks.empty()) {
         const auto& first = tracks[0];
         j["sample_rate"] = first.sample_rate;
         j["channels"] = first.channels;
+        j["channel_layout"] = chan::layout_short(first.channels);
+        j["scored_channels"] = chan::scored_count(first.channels);
+        j["loudness_summing"] = chan::loudness_mode(first.channels);
         j["bit_depth"] = first.bit_depth;
         j["codec"] = first.codec;
         if (first.codec == "DSD") {
@@ -777,14 +830,26 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
             jt["mqa"] = jm;
         }
 
+        jt["channel_layout"]  = chan::layout_short(t.channels);
+        jt["scored_channels"] = chan::scored_count(t.channels);
+        // Multichannel companions to dr_score_raw. On mono/stereo dr_front_raw
+        // equals dr_score_raw and worst_channel is just the lower-DR channel,
+        // so consumers can read them unconditionally.
+        jt["dr_front_raw"]    = t.dr_front_raw;
+        jt["worst_channel"]   = t.worst_channel;
+
         json jch = json::array();
         size_t nch = t.ch_metrics.size();
         for (size_t c = 0; c < nch; ++c) {
             const auto& cm = t.ch_metrics[c];
             json jc;
-            if (nch == 1)      jc["label"] = "Mono";
-            else if (nch == 2) jc["label"] = (c == 0) ? "Left" : "Right";
-            else               jc["label"] = "Ch" + std::to_string(c + 1);
+            // label_long keeps the historical "Mono"/"Left"/"Right" spellings
+            // for 1- and 2-channel files, so the existing JSON schema is
+            // unchanged for every consumer that predates multichannel.
+            jc["label"]  = chan::label_long(static_cast<unsigned>(nch), c);
+            jc["short_label"] = chan::label(static_cast<unsigned>(nch), c);
+            jc["is_lfe"] = cm.is_lfe;
+            jc["scored"] = cm.scored;
 
             jc["sample_peak_dbfs"] = cm.sample_peak_dbfs;
             jc["true_peak_dbtp"] = cm.true_peak_dbtp;
