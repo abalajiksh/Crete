@@ -47,7 +47,7 @@ extern "C" {
 namespace fs = std::filesystem;
 
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.12.0"
+#define CRETE_VERSION "0.12.1"
 #endif
 static constexpr const char* PROGRAM_NAME    = "crête";
 static constexpr const char* PROGRAM_VERSION = CRETE_VERSION;
@@ -760,7 +760,12 @@ static void band_results(AppState& app) {
     // the PEAK header says so and a footer rule spells out the scoring rule.
     const unsigned tbl_nch = app.results.empty() ? 2u : app.results.front().channels;
     const bool tbl_multi = tbl_nch > 2;
-    const float footer_h = tbl_multi ? 34.0f : 0.0f;
+    // Reserve the footer's REAL height, not a guess. The band is a Rule plus a
+    // Tag and a wrapped caption that takes two lines at narrow table widths;
+    // the original 34 px cut it off against the window bottom even maximised.
+    const float footer_h = tbl_multi
+        ? ImGui::GetFrameHeight() + ImGui::GetTextLineHeightWithSpacing() * 2.0f + 12.0f
+        : 0.0f;
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10, 3));
     if (ImGui::BeginTable("Results", ncols, flags, ImVec2(0, avail_h - footer_h))) {
         ImGui::TableSetupColumn("DR", ImGuiTableColumnFlags_WidthFixed|ImGuiTableColumnFlags_DefaultSort, 120);

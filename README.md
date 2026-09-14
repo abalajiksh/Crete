@@ -8,7 +8,7 @@ crête also **detects MQA-encoded files** and reports them unconditionally: if y
 
 The default build has **zero dependencies**. An optional third build tier statically links a compact, LGPL-only FFmpeg to add lossy/ALAC decode support — see below.
 
-**Current version: 0.12.0**
+**Current version: 0.12.1**
 
 ---
 
@@ -28,7 +28,7 @@ Three CLI build tiers, one GUI:
 
 ```bash
 make                    # optimized build, no JSON output
-make VERSION=0.12.0     # custom version stamp
+make VERSION=0.12.1     # custom version stamp
 make debug              # debug build with sanitizers
 make install            # install to /usr/local/bin
 ```
