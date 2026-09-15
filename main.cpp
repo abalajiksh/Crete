@@ -60,6 +60,7 @@ static constexpr const char* PROGRAM_VERSION = CRETE_VERSION;
 // output rate). Set once from --dsd-* flags in main(); read by print_json() so
 // a JSON result always records how its DSD numbers were produced.
 static dsd::Options g_dsd_opt;
+static dr::RmsMean  g_rms_mean = dr::RmsMean::Quadratic;
 static constexpr const char* PROGRAM_DESC    = "TT Dynamic Range Meter (zero-dependency)";
 
 namespace fs = std::filesystem;
@@ -773,6 +774,7 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         j["loudness_summing"] = chan::loudness_mode(first.channels);
         j["bit_depth"] = first.bit_depth;
         j["codec"] = first.codec;
+        j["dr_rms_mean"] = dr::rms_mean_name(g_rms_mean);
         if (first.codec == "DSD") {
             j["dsd_mode"]     = dsd::mode_name(g_dsd_opt.mode);
             j["dsd_filter"]   = dsd::filter_name(g_dsd_opt.filter);
@@ -890,6 +892,11 @@ void print_usage(const char* argv0) {
               << "      json   — machine-readable JSON (all metrics)\n"
 #endif
               << "  -o, --output <file>            Write output to file\n"
+              << "  --dr-mean <quadratic|arithmetic>  Top-20% RMS averaging (default: quadratic)\n"
+              << "      quadratic  — sqrt(mean(rms^2)), averages POWER. The PMF procedure,\n"
+              << "                   and what MAAT and foobar2000 DR Meter both do.\n"
+              << "      arithmetic — sum(rms)/n, averages AMPLITUDE. What crete shipped up\n"
+              << "                   to 0.12.1; biases DR high. For A/B only.\n"
               << "  --dsd-mode <direct|multistage> DSD decimation chain (default: multistage)\n"
               << "      multistage — brickwall at Nyquist (measurement-grade). Works for\n"
               << "                   DSD64/128/256/512 at every output rate.\n"
@@ -986,6 +993,13 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Unknown format: " << fmt << "\n";
                 return 1;
             }
+        } else if (arg == "--dr-mean" && i+1 < argc) {
+            try {
+                g_rms_mean = dr::rms_mean_from_string(argv[++i]);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << "\n";
+                return 1;
+            }
         } else if (arg == "--dsd-mode" && i+1 < argc) {
             try {
                 g_dsd_opt.mode = dsd::mode_from_string(argv[++i]);
@@ -1077,7 +1091,7 @@ int main(int argc, char* argv[]) {
                     progress(basename);
                     slots[gi].push_back(dr::analyze_track(
                         ad.channels, ad.sample_rate, ad.bit_depth,
-                        ad.codec, basename));
+                        ad.codec, basename, g_rms_mean));
                     slots[gi].back().mqa = minfo;
                 } else {
                     size_t total_samples = ad.channels.empty()
@@ -1122,7 +1136,7 @@ int main(int argc, char* argv[]) {
 
                         slots[gi].push_back(dr::analyze_track(
                             slice, ad.sample_rate, ad.bit_depth,
-                            ad.codec, track_name));
+                            ad.codec, track_name, g_rms_mean));
                         slots[gi].back().mqa = minfo;
                     }
                 }

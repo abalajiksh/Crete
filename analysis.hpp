@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <deque>
 #include <numeric>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -35,6 +36,32 @@ static constexpr double LUFS_FLOOR = -70.0;
 static constexpr double ST_WINDOW_SEC  = 3.0;
 static constexpr double ST_HOP_SEC     = 0.1;
 static constexpr double PSR_GATE_LUFS  = -50.0;
+
+// ── Top-20% RMS averaging (TT DR / PMF) ────────────────────────────────────
+// How compute_tt_dr() averages the loudest 20% of 3 s block RMS values.
+//
+// Quadratic (default): sqrt(mean(rms^2)) -- averages POWER. This is what the
+//   PMF procedure specifies, and what MAAT DROffline and foobar2000 DR Meter
+//   both do (2026-09-15 cross-check: the two agree with each other to a mean
+//   0.006 dB over 264 per-channel values; see CLAUDE.md).
+// Arithmetic: sum(rms)/n -- averages AMPLITUDE. What crete shipped up to and
+//   including 0.12.1. By AM <= QM this is always biased low, so DR is always
+//   biased high, by an amount that grows with block-to-block RMS variance:
+//   ~0.03 dB on dense stereo L/R, up to 1.47 dB on sparse channels (LFE/C).
+//   Retained so the corpus can be measured both ways, not for new work.
+enum class RmsMean { Quadratic, Arithmetic };
+
+inline const char* rms_mean_name(RmsMean m) {
+    return m == RmsMean::Arithmetic ? "arithmetic" : "quadratic";
+}
+
+// Throws std::runtime_error on an unknown name (caller reports and exits).
+inline RmsMean rms_mean_from_string(const std::string& s) {
+    if (s == "quadratic"  || s == "qm" || s == "pmf") return RmsMean::Quadratic;
+    if (s == "arithmetic" || s == "am" || s == "legacy") return RmsMean::Arithmetic;
+    throw std::runtime_error("unknown --dr-mean '" + s +
+                             "' (expected quadratic|arithmetic)");
+}
 
 // ── Verdict classification ─────────────────────────────────────────────────
 enum class Verdict {
@@ -496,7 +523,8 @@ struct TTDRResult {
 
 inline TTDRResult compute_tt_dr(
         const std::vector<std::vector<double>>& channels,
-        double sample_rate, double block_seconds = 3.0) {
+        double sample_rate, double block_seconds = 3.0,
+        RmsMean rms_mean = RmsMean::Quadratic) {
     size_t nch = channels.size();
     const unsigned unch = static_cast<unsigned>(nch);
     size_t n = channels[0].size();
@@ -599,9 +627,19 @@ inline TTDRResult compute_tt_dr(
         std::sort(ch_peaks.begin(), ch_peaks.end(), std::greater<double>());
         std::sort(ch_rms.begin(),   ch_rms.end(),   std::greater<double>());
         double ch_peak2 = (nb >= 2) ? ch_peaks[1] : ch_peaks[0];
-        double sum_rms = 0.0;
-        for (size_t i = 0; i < n_top; ++i) sum_rms += ch_rms[i];
-        double ch_avg_rms = sum_rms / static_cast<double>(n_top);
+        // Quadratic mean (PMF): average the POWER of the top blocks.  The
+        // arithmetic branch keeps its original accumulation order verbatim so
+        // --dr-mean arithmetic reproduces <= 0.12.1 bit-for-bit.
+        double ch_avg_rms;
+        if (rms_mean == RmsMean::Arithmetic) {
+            double sum_rms = 0.0;
+            for (size_t i = 0; i < n_top; ++i) sum_rms += ch_rms[i];
+            ch_avg_rms = sum_rms / static_cast<double>(n_top);
+        } else {
+            double sum_sq_rms = 0.0;
+            for (size_t i = 0; i < n_top; ++i) sum_sq_rms += ch_rms[i] * ch_rms[i];
+            ch_avg_rms = std::sqrt(sum_sq_rms / static_cast<double>(n_top));
+        }
         result.dr_per_ch[ch] = (ch_avg_rms > 0.0)
             ? to_dbfs(ch_peak2) - to_dbfs(ch_avg_rms) : 0.0;
     }
@@ -669,7 +707,8 @@ inline TTDRResult compute_tt_dr(
 
 inline TrackResult analyze_track(const std::vector<std::vector<double>>& channels,
                                   uint32_t sample_rate, uint32_t bit_depth,
-                                  const std::string& codec, const std::string& filename) {
+                                  const std::string& codec, const std::string& filename,
+                                  RmsMean rms_mean = RmsMean::Quadratic) {
     TrackResult r;
     r.filename     = filename;
     r.sample_rate  = sample_rate;
@@ -683,7 +722,7 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     size_t nch = channels.size();
     size_t n = channels[0].size();
     double sr = static_cast<double>(sample_rate);
-    auto tt = compute_tt_dr(channels, sample_rate);
+    auto tt = compute_tt_dr(channels, sample_rate, 3.0, rms_mean);
     r.dr_score_raw   = tt.dr;
     r.dr_score       = static_cast<int>(std::round(tt.dr));
     r.dr_per_channel = tt.dr_per_ch;
