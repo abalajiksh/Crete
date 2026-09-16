@@ -155,7 +155,20 @@ Since 0.11.0 results stay in the window only by default — writing a log file i
 | DTS / DTS-HD MA | `.mkv`, `.dts` | Core + lossless MA extension |
 | E-AC-3 / AC-3 | `.mkv`, `.mp4`, `.eac3`, `.ec3`, `.ac3` | Lossy disc audio. **Channel bed only** |
 
-`.mkv` and `.mp4` are video containers; crête picks the best audio stream and ignores video and subtitles, so music Blu-ray rips work directly.
+`.mkv` and `.mp4` are video containers; crête ignores video and subtitles, so music Blu-ray rips work directly.
+
+#### Choosing the audio stream
+
+A music Blu-ray commonly ships the same album several times over. One DSOTM remux carries six audio streams — LPCM 5.1 96 kHz, DTS-HD MA 5.1, TrueHD 7.1 Atmos, an AC-3 core, and stereo LPCM and DTS-HD MA — and **these are different mixes with different DR**, not different encodings of one mix.
+
+With no `--stream`, crête takes FFmpeg's own pick, which ranks by bitrate and channel count. That is a reasonable default but it is not the container's "default" flag and it is not stable across remuxes of the same content: on the file above it selects the 13.8 Mbps LPCM track, while on a 60-second copy of the same six streams it selects the TrueHD one. So whenever a file holds more than one audio stream, crête **says which one it measured**:
+
+```
+Warning: album.mkv has 6 audio streams; measured stream 2 (PCM_S24LE, 6 ch, 96000 Hz). Use --stream N to choose.
+```
+
+`--stream N` pins it, using the index `ffprobe -show_streams` prints. The chosen index and the stream count also appear in the detail output and in JSON (`stream_index`, `audio_stream_count`), so a measurement is reproducible from its own record. Single-stream files are unaffected — no warning, and no extra JSON keys.
+
 
 In zero-dependency builds these formats are rejected with a hint to use `crete-ffmpeg` (or transcode: `ffmpeg -i input.m4a -c:a flac output.flac`).
 
@@ -413,7 +426,7 @@ and an interface, no decoder code — so crête stays MIT.
 
 Most of this section is a resolved record (kept for provenance). Closed since: **FIX 12 corpus re-validation** (validated — per-channel DR flags collapsed from 83/77 to 8/5), and the **DSD output-rate parity decision** (settled — 44.1 kHz is the parity-guaranteed rate, see below).
 
-As of 0.13.0 the items still genuinely open are: a **cross-arch identity smoke check** (x86-64 vs aarch64 bit-identity — the regression test for the `-ffp-contract=off` guarantee, which is currently an untested claim), a **round-trip pytest case** (`.dsf` vs its exported WAV), **DFF/AIFF test coverage**, and **reference data for the disc-audio formats** (TrueHD / DTS-HD / E-AC-3 decode, but no MAAT baselines yet — 7.1 references need a four-stem split that the reference tooling does not do). None are release blockers.
+As of 0.13.0 the items still genuinely open are: a **cross-arch identity smoke check** (x86-64 vs aarch64 bit-identity — the regression test for the `-ffp-contract=off` guarantee, which is currently an untested claim), **wider DFF parity coverage** (the suite exists and gates the DSF/DFF decoders, but only one album has a DFF capture), **AIFF test coverage** (no test files), and **reference data for the disc-audio formats** (TrueHD / DTS-HD MA / E-AC-3 decode, but no MAAT baselines yet). None are release blockers.
 
 ### FIX 12 — per-channel DR and album rounding (0.11.3, awaiting re-validation)
 
@@ -461,11 +474,11 @@ Standing caveats:
 
 ### Code
 
-- Round-trip guard: crête on a `.dsf` and crête on the WAV exported from it must agree (measured 2.9e-8, float32 mantissa). Not yet a pytest case.
+- ~~Round-trip guard: crête on a `.dsf` and crête on the WAV exported from it must agree. Not yet a pytest case.~~ — **done**, `test_dsd_roundtrip.py` on Thriller_DSD64. Order statistics agree to 4.5e-07 dB (under the 5.18e-07 float32 mantissa bound), energy averages to 2.9e-10, decoded sample counts exactly.
 
 ### Not yet exercised
 
-- **DFF container.** Decoder path exists; no dedicated parity test against the DSF version of the same album.
+- **DFF container.** `test_dsd_parity.py` gates DSF against DFF on Café Blue, with a two-tier threshold model (sample-invariant metrics at 0.01 dB as the decoder gate; window-phase metrics relaxed, since DSF and DFF rips can split a track boundary by a CD frame). Only that one album has a DFF capture — the other three entries in its registry are commented out awaiting rips.
 - **AIFF.** No test files.
 
 DSD512 graduated 2026-07: it now has a dedicated suite and MAAT reference data (`SoundLiaison_JMS_DSD512`, `fir1_64m` multistage, both 44.1 and 352.8 kHz out), joining DSD256 (`fir1_32`). Direct is DSD64 → 44.1 kHz only, so it does not apply to these rates.

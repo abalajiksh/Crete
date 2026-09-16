@@ -16,7 +16,7 @@
 //
 // Usage:
 //   dsd2wav [options] <file_or_folder...>
-//     --dsd-mode <direct|multistage>   decimation chain (default: direct)
+//     --dsd-mode <direct|multistage>   decimation chain (default: multistage)
 //     -o, --outdir <dir>               output directory (default: ./pcm_out)
 //     --bits <f32|i24>                 sample format (default: f32)
 //     -q, --quiet

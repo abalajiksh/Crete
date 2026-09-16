@@ -41,7 +41,9 @@ extern "C" {
 
 namespace audio {
 
-inline AudioData decode_with_ffmpeg(const std::string& path) {
+// want_stream: the container's audio-stream index to decode (as ffprobe prints
+// it), or -1 to let FFmpeg choose.
+inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream = -1) {
     AudioData ad;
 
     // ── Open container ──────────────────────────────────────────────────
@@ -53,11 +55,48 @@ inline AudioData decode_with_ffmpeg(const std::string& path) {
     if (avformat_find_stream_info(fmt, nullptr) < 0)
         throw std::runtime_error("FFmpeg: no stream info in " + path);
 
-    // ── Pick best audio stream + decoder ────────────────────────────────
-    const AVCodec* dec = nullptr;
-    int stream_idx = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, &dec, 0);
-    if (stream_idx < 0 || !dec)
+    // ── Choose the audio stream ─────────────────────────────────────────
+    // A music Blu-ray rip commonly carries several mixes of the same album --
+    // LPCM 5.1, DTS-HD MA 5.1, TrueHD 7.1, an AC-3 core, stereo variants --
+    // and they are NOT the same measurement. av_find_best_stream() ranks by
+    // bitrate and channel count, which need not agree with the container's
+    // default disposition: on a 6-audio-stream DSOTM remux it returns the
+    // 13.8 Mbps LPCM track, not the default-flagged TrueHD. That choice is
+    // defensible but it must not be invisible, so the count and the chosen
+    // index are recorded on AudioData and --stream overrides them.
+    int n_audio = 0;
+    for (unsigned i = 0; i < fmt->nb_streams; ++i)
+        if (fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) ++n_audio;
+    if (n_audio == 0)
         throw std::runtime_error("FFmpeg: no audio stream in " + path);
+
+    const AVCodec* dec = nullptr;
+    int stream_idx;
+
+    if (want_stream >= 0) {
+        if (want_stream >= static_cast<int>(fmt->nb_streams))
+            throw std::runtime_error(
+                "--stream " + std::to_string(want_stream) + ": " + path +
+                " has only " + std::to_string(fmt->nb_streams) + " stream(s)");
+        if (fmt->streams[want_stream]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO)
+            throw std::runtime_error(
+                "--stream " + std::to_string(want_stream) + ": not an audio "
+                "stream in " + path);
+        stream_idx = want_stream;
+        dec = avcodec_find_decoder(fmt->streams[stream_idx]->codecpar->codec_id);
+        if (!dec)
+            throw std::runtime_error(
+                "FFmpeg: no decoder for stream " + std::to_string(stream_idx) +
+                " in " + path);
+    } else {
+        stream_idx = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, &dec, 0);
+        if (stream_idx < 0 || !dec)
+            throw std::runtime_error("FFmpeg: no audio stream in " + path);
+    }
+
+    ad.stream_index       = stream_idx;
+    ad.audio_stream_count = n_audio;
+
     AVStream* st = fmt->streams[stream_idx];
 
     AVCodecContext* ctx = avcodec_alloc_context3(dec);

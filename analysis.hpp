@@ -154,6 +154,14 @@ struct TrackResult {
     // Reported unconditionally — a listener measuring DR is entitled to know
     // the source is MQA and not lossless. See mqa_detect.hpp.
     mqa::Info   mqa;
+
+    // Which container audio stream this track was decoded from. Populated by
+    // the caller, like mqa above, because it is a file-level property of the
+    // decode rather than anything analyze_track computes. -1 means the file
+    // held exactly one stream (every native format), so there was no choice
+    // to report. See audio::AudioData.
+    int         stream_index       = -1;
+    int         audio_stream_count = 1;
 };
 
 // ── Helper functions ───────────────────────────────────────────────────────

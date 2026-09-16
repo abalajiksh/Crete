@@ -35,6 +35,17 @@ struct AudioData {
     uint32_t bit_depth   = 0;
     std::string codec;
 
+    // Which audio stream this came from, for containers that carry several.
+    // A music Blu-ray rip routinely holds six (LPCM / DTS-HD MA / TrueHD /
+    // AC-3 stereo and surround mixes of the same album), and FFmpeg's
+    // av_find_best_stream() silently picks ONE by bitrate and channel count
+    // -- not necessarily the default-disposition track. Reporting the choice
+    // is what makes it auditable; --stream is what makes it selectable.
+    // stream_index is the container's own index (matching ffprobe's index=),
+    // or -1 for a native decode, where the file IS the stream.
+    int stream_index        = -1;
+    int audio_stream_count  = 1;
+
     size_t num_channels() const { return channels.size(); }
     size_t num_samples()  const { return channels.empty() ? 0 : channels[0].size(); }
 };
@@ -989,7 +1000,7 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf,
 
 #ifdef CRETE_HAS_FFMPEG
 // Defined in audio_ffmpeg.hpp (included at the end of this header).
-inline AudioData decode_with_ffmpeg(const std::string& path);
+inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream);
 #endif
 
 // Formats crête decodes natively. These are the validated paths (vs MAAT for
@@ -1009,8 +1020,11 @@ inline bool is_ffmpeg_extra_format(const std::string& ext) {
         || ext == ".mka" || ext == ".webm" || ext == ".wma"
         || ext == ".wv"  || ext == ".ape"  || ext == ".mpc" || ext == ".tak"
         // Disc audio. .mkv is a video container, but so is .mp4 above, and
-        // av_find_best_stream() picks the audio stream and ignores the rest --
-        // music Blu-ray rips are routinely .mkv. The rest are raw elementary
+        // the FFmpeg backend picks an audio stream and ignores video and
+        // subtitles -- music Blu-ray rips are routinely .mkv. Such a rip often
+        // carries SEVERAL audio streams (different mixes of the same album);
+        // decode_with_ffmpeg reports the count and honours --stream. The rest
+        // are raw elementary
         // streams matching the demuxers enabled in build_ffmpeg_compact.sh.
         // NOTE: these carry the channel BED only. Atmos/DTS:X objects are not
         // rendered by FFmpeg; see the profile note in that script.
@@ -1027,8 +1041,13 @@ inline bool is_supported_format(const std::string& path) {
     return is_native_format(ext) || is_ffmpeg_extra_format(ext);
 }
 
+// want_stream: container audio-stream index to decode, or -1 for "let FFmpeg
+// choose". Only meaningful for the FFmpeg-routed container formats; the native
+// decoders each read a file that holds exactly one stream, so asking for a
+// specific index there is a user error rather than a silent no-op.
 inline AudioData decode_file(const std::string& path,
-                             const dsd::Options& dsd_opt = {}) {
+                             const dsd::Options& dsd_opt = {},
+                             int want_stream = -1) {
     auto ext = get_extension(path);
 
 #ifdef CRETE_HAS_FFMPEG
@@ -1036,8 +1055,13 @@ inline AudioData decode_file(const std::string& path,
     // DSD (.dsf/.dff) is intentionally excluded — FFmpeg's DSD decimation
     // differs from foo_input_sacd's chains and would break DSD parity.
     if (!is_native_format(ext))
-        return decode_with_ffmpeg(path);
+        return decode_with_ffmpeg(path, want_stream);
 #endif
+
+    if (want_stream >= 0)
+        throw std::runtime_error(
+            "--stream applies only to multi-stream containers; " + ext +
+            " is decoded natively and holds a single audio stream");
 
     auto buf = read_file(path);
 

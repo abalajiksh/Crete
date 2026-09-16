@@ -60,6 +60,10 @@ static constexpr const char* PROGRAM_VERSION = CRETE_VERSION;
 // output rate). Set once from --dsd-* flags in main(); read by print_json() so
 // a JSON result always records how its DSD numbers were produced.
 static dsd::Options g_dsd_opt;
+
+// Container audio-stream index to decode, or -1 for "let FFmpeg choose".
+// Only multi-stream containers (.mkv/.mp4 Blu-ray rips) can honour it.
+static int g_stream = -1;
 static dr::RmsMean  g_rms_mean = dr::RmsMean::Quadratic;
 static constexpr const char* PROGRAM_DESC    = "TT Dynamic Range Meter (zero-dependency)";
 
@@ -687,6 +691,10 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
                   << " (" << chan::layout_detail(first.channels) << ")\n";
         std::cout << "Bits per sample:   " << first.bit_depth << "\n";
         std::cout << "Codec:             " << first.codec << "\n";
+        if (first.audio_stream_count > 1)
+            std::cout << "Audio stream:      " << first.stream_index
+                      << " of " << first.audio_stream_count
+                      << " in container\n";
         if (first.channels > 2)
             std::cout << "Loudness summing:  "
                       << chan::loudness_mode(first.channels) << "\n";
@@ -775,6 +783,10 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         j["bit_depth"] = first.bit_depth;
         j["codec"] = first.codec;
         j["dr_rms_mean"] = dr::rms_mean_name(g_rms_mean);
+        if (first.audio_stream_count > 1) {
+            j["audio_stream_count"] = first.audio_stream_count;
+            j["stream_index"]       = first.stream_index;
+        }
         if (first.codec == "DSD") {
             j["dsd_mode"]     = dsd::mode_name(g_dsd_opt.mode);
             j["dsd_filter"]   = dsd::filter_name(g_dsd_opt.filter);
@@ -792,6 +804,10 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         jt["bit_depth"] = t.bit_depth;
         jt["channels"] = t.channels;
         jt["duration_secs"] = t.duration_secs;
+        if (t.audio_stream_count > 1) {
+            jt["audio_stream_count"] = t.audio_stream_count;
+            jt["stream_index"]       = t.stream_index;
+        }
 
         jt["dr_score"] = t.dr_score;
         jt["dr_raw"] = t.dr_score_raw;
@@ -905,6 +921,12 @@ void print_usage(const char* argv0) {
               << "  --dsd-filter <default|firls|kaiser>  Final-stage filter (default: default)\n"
               << "                   Honoured only at --dsd-out-rate 44100; ignored otherwise.\n"
               << "  --dsd-out-rate <44100|88200|176400|352800>  DSD output rate (default: 44100)\n"
+              << "  --stream <N>                   Audio stream index to decode in a multi-\n"
+              << "                                 stream container (.mkv/.mp4 disc rips).\n"
+              << "                                 Index as `ffprobe -show_streams` prints it.\n"
+              << "                                 Default: FFmpeg's own choice, which ranks by\n"
+              << "                                 bitrate/channels and is reported when the\n"
+              << "                                 file holds more than one audio stream.\n"
               << "  -j, --jobs <N>                 Parallel file workers (default: all cores;\n"
               << "                                 1 = sequential). Does not change any numbers.\n"
               << "  -q, --quiet                    Suppress progress output\n"
@@ -1021,6 +1043,15 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             g_dsd_opt.out_rate = r;
+        } else if (arg == "--stream" && i+1 < argc) {
+            char* end = nullptr;
+            long v = std::strtol(argv[++i], &end, 10);
+            if (!end || *end || v < 0 || v > 1000000) {
+                std::cerr << "Error: --stream must be a non-negative stream index"
+                             " (as shown by `ffprobe -show_streams`)\n";
+                return 1;
+            }
+            g_stream = static_cast<int>(v);
         } else if ((arg == "-o" || arg == "--output") && i+1 < argc) {
             output_file = argv[++i];
         } else {
@@ -1081,7 +1112,23 @@ int main(int argc, char* argv[]) {
             std::string ext_str  = fs::path(g.audio_path).extension().string();
 
             try {
-                auto ad = audio::decode_file(g.audio_path, g_dsd_opt);
+                auto ad = audio::decode_file(g.audio_path, g_dsd_opt, g_stream);
+
+                // Several audio streams and no explicit choice: say which one
+                // was measured. A Blu-ray rip's LPCM 5.1, DTS-HD MA 5.1 and
+                // TrueHD 7.1 tracks are different mixes with different DR, so
+                // silently metering whichever FFmpeg ranks highest would make
+                // the number unreproducible without this line.
+                if (g_stream < 0 && ad.audio_stream_count > 1) {
+                    errlog[gi] += "Warning: " + basename + " has "
+                        + std::to_string(ad.audio_stream_count)
+                        + " audio streams; measured stream "
+                        + std::to_string(ad.stream_index)
+                        + " (" + ad.codec + ", "
+                        + std::to_string(ad.num_channels()) + " ch, "
+                        + std::to_string(ad.sample_rate)
+                        + " Hz). Use --stream N to choose.\n";
+                }
 
                 // File-level MQA check, stamped onto every track from this decode.
                 const mqa::Info minfo =
@@ -1093,6 +1140,8 @@ int main(int argc, char* argv[]) {
                         ad.channels, ad.sample_rate, ad.bit_depth,
                         ad.codec, basename, g_rms_mean));
                     slots[gi].back().mqa = minfo;
+                    slots[gi].back().stream_index       = ad.stream_index;
+                    slots[gi].back().audio_stream_count = ad.audio_stream_count;
                 } else {
                     size_t total_samples = ad.channels.empty()
                                            ? 0 : ad.channels[0].size();
@@ -1138,6 +1187,8 @@ int main(int argc, char* argv[]) {
                             slice, ad.sample_rate, ad.bit_depth,
                             ad.codec, track_name, g_rms_mean));
                         slots[gi].back().mqa = minfo;
+                    slots[gi].back().stream_index       = ad.stream_index;
+                    slots[gi].back().audio_stream_count = ad.audio_stream_count;
                     }
                 }
             } catch (const std::exception& e) {
