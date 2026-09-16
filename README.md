@@ -182,6 +182,19 @@ The difference is large and easy to miss: on one JOC 5.1 bed, leaving DRC on mov
 
 FFmpeg has no Atmos or DTS:X renderer. It decodes the underlying **channel bed** — TrueHD 7.1, or E-AC-3 5.1 for Dolby Digital Plus + Atmos — and discards the object metadata. crête's numbers for such a file are the bed's numbers, which is exactly what a non-Atmos playback chain delivers, and *not* what an Atmos renderer would produce. Do not read a bed measurement as an Atmos measurement.
 
+#### Counting the LFE toward DR
+
+crête's DR (PMF) for a 5.1 or 7.1 file is the mean of the **scored** channels — everything but the LFE. A `.1` track is a band-limited effects channel whose crest factor is nearly flat and whose level is mix-dependent, so averaging it into the programme's dynamic range measures the mixer's bass management rather than the music. TT DR defines nothing past stereo, so this is a chosen rule, and crête says which rule produced which number rather than presenting one as *the* multichannel DR.
+
+foobar2000's DR Meter chooses the other way. `--dr-lfe include` (GUI: **Settings → SCORING**) matches it, so the two can be compared directly:
+
+| DSOTM 5.1 96 kHz | DR raw | scored | lowest |
+|---|---|---|---|
+| `--dr-lfe exclude` (default) | 11.9772 | 5 | Ls |
+| `--dr-lfe include` | 11.8606 | 6 | LFE |
+
+It affects **TT DR only**: the DR mean, the joint sample peak and overall RMS behind it, the 3 s block gate and `worst_channel`. Integrated loudness, Max M/S, LRA and Min. PSR do not move at all — BS.1770 weights the LFE at zero by ITU-R BS.1770-4, which is a standard rather than a preference. Mono and stereo have no LFE, so the option is a no-op there and no stereo measurement can change.
+
 ### Cue sheet support
 
 When a folder contains a `.cue` file, crête:
