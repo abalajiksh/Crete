@@ -457,7 +457,13 @@ and an interface, no decoder code — so crête stays MIT.
 
 Most of this section is a resolved record (kept for provenance). Closed since: **FIX 12 corpus re-validation** (validated — per-channel DR flags collapsed from 83/77 to 8/5), and the **DSD output-rate parity decision** (settled — 44.1 kHz is the parity-guaranteed rate, see below).
 
-As of 0.13.1 the items still genuinely open are: a **cross-arch identity smoke check** (x86-64 vs aarch64 bit-identity — the regression test for the `-ffp-contract=off` guarantee, which is currently an untested claim), an **external oracle for the disc-audio formats** (TrueHD / DTS-HD MA / AC-3 decode is gated against crête's own recorded values and against the LPCM carrier of the same master, but nothing outside crête), and two measurement residuals: the **already-low per-channel DR tail** and the **East_Meets_West LRA flags**. None are release blockers.
+Three further items closed in 0.13.1:
+
+- **Cross-arch identity** — measured on both CI agents, 8/8 each. The two Linux agents produce *identical* deltas against the same baseline, so the x86-64 vs aarch64 claim behind `-ffp-contract=off` now has real files behind it instead of being an untested assertion. Gated weekly. (A separate, genuinely platform-level finding fell out of it: Linux and macOS differ by one ULP on `20·log10(x)`, identically on both architectures — `libm` rounding, not FP contraction. A macOS-produced JSON cannot be equality-compared against a Linux one.)
+- **The already-low per-channel DR tail** — root-caused, not merely characterised. crête's 3 s block set discards the trailing partial block and gates blocks at `joint_rms > 1e-3`; the PMF reference implementation does neither. Both shrink the block count and so `n_top = floor(nb × 0.2)`, keeping fewer and louder top blocks — a structural *low* bias. `--dr-blocks reference` closes it (mean |Δ| 0.0598 → 0.0355 against foobar, 0.0628 → 0.0339 against MAAT, bias to ≈0), and is **off by default** pending a full corpus run. See *TT Dynamic Range*.
+- **The East_Meets_West LRA flags** — not a crête defect. crête passes all six EBU Tech 3342 compliance vectors (10.00 / 5.00 / 20.00 / 15.00 / 4.98 / 15.01 LU against nominal 10/5/20/15/5/15, ±1 LU tolerance), and its LRA is rate-invariant to ≤0.06 LU. MAAT's own LRA moves by up to **2.77 LU** across sample rates of the same album — more than the entire crête-vs-MAAT disagreement — while the short-term loudness it is derived from moves ≤0.01 LU. crête agrees with MAAT better than MAAT agrees with itself.
+
+As of 0.13.1 the one item still genuinely open is an **external oracle for the disc-audio formats**: TrueHD / DTS-HD MA / AC-3 decode is gated against crête's own recorded values and against the LPCM carrier of the same master, but against nothing outside crête. Not a release blocker.
 
 ### FIX 12 — per-channel DR and album rounding (0.11.3, awaiting re-validation)
 
