@@ -47,8 +47,20 @@ inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream = -
     AudioData ad;
 
     // ── Open container ──────────────────────────────────────────────────
+    // FFmpeg's defaults (5 MB probe, 0 analyzeduration) are not enough for a
+    // Blu-ray rip: with six audio streams interleaved, the probe can run out
+    // before it has seen a TrueHD frame, and the stream is then reported with
+    // an UNSPECIFIED sample format -- which fails at resampler setup rather
+    // than at open, so it looks like a crete bug. Observed on a 60 s copy of a
+    // six-stream DSOTM remux: stream 0 (TrueHD 7.1) probed as sample_fmt=-1.
+    // These are ceilings, not mandates, so small files still probe briefly.
+    AVDictionary* fmt_opts = nullptr;
+    av_dict_set(&fmt_opts, "probesize",       "100000000", 0);   // 100 MB
+    av_dict_set(&fmt_opts, "analyzeduration", "100000000", 0);   // 100 s
+    struct FOptGuard { AVDictionary** p; ~FOptGuard() { if (*p) av_dict_free(p); } } fog{&fmt_opts};
+
     AVFormatContext* fmt = nullptr;
-    if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0)
+    if (avformat_open_input(&fmt, path.c_str(), nullptr, &fmt_opts) < 0)
         throw std::runtime_error("FFmpeg: cannot open " + path);
     struct FmtGuard { AVFormatContext** p; ~FmtGuard() { if (*p) avformat_close_input(p); } } fg{&fmt};
 
@@ -146,15 +158,29 @@ inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream = -
     av_channel_layout_copy(&out_layout, &ctx->ch_layout);
     struct LayoutGuard { AVChannelLayout* p; ~LayoutGuard() { av_channel_layout_uninit(p); } } lg{&out_layout};
 
+    // Configured lazily from the FIRST DECODED FRAME rather than from
+    // ctx->sample_fmt. The frame's format is what the decoder actually
+    // produced; the context's is what the probe predicted, and the probe can
+    // legitimately answer AV_SAMPLE_FMT_NONE (see the probesize note above).
+    // For every already-validated path -- FLAC, ALAC, MP3, Opus -- the two
+    // agree, so this changes nothing there; it only removes the dependency on
+    // the prediction being available.
     SwrContext* swr = nullptr;
-    if (swr_alloc_set_opts2(&swr,
-            &out_layout,     AV_SAMPLE_FMT_DBLP, in_rate,
-            &ctx->ch_layout, ctx->sample_fmt,    in_rate,
-            0, nullptr) < 0 || !swr)
-        throw std::runtime_error("FFmpeg: swr alloc failed");
     struct SwrGuard { SwrContext** p; ~SwrGuard() { if (*p) swr_free(p); } } sg{&swr};
-    if (swr_init(swr) < 0)
-        throw std::runtime_error("FFmpeg: swr init failed");
+
+    auto ensure_swr = [&](AVSampleFormat in_fmt) {
+        if (swr) return;
+        if (in_fmt == AV_SAMPLE_FMT_NONE)
+            throw std::runtime_error("FFmpeg: decoder produced an unknown "
+                                     "sample format in " + path);
+        if (swr_alloc_set_opts2(&swr,
+                &out_layout,     AV_SAMPLE_FMT_DBLP, in_rate,
+                &ctx->ch_layout, in_fmt,             in_rate,
+                0, nullptr) < 0 || !swr)
+            throw std::runtime_error("FFmpeg: swr alloc failed");
+        if (swr_init(swr) < 0)
+            throw std::runtime_error("FFmpeg: swr init failed");
+    };
 
     // ── AudioData header ────────────────────────────────────────────────
     {
@@ -181,6 +207,8 @@ inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream = -
     std::vector<uint8_t*>            out_planes(nch);
 
     auto drain = [&](const AVFrame* f) {
+        if (f) ensure_swr(static_cast<AVSampleFormat>(f->format));
+        if (!swr) return;          // flush before any frame decoded: nothing buffered
         int in_samples = f ? f->nb_samples : 0;
         int cap = swr_get_out_samples(swr, in_samples);
         if (cap < in_samples) cap = in_samples;
