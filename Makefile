@@ -63,7 +63,16 @@ VERSION   ?= 0.13.0
 CXXFLAGS  += -DCRETE_VERSION='"$(VERSION)"'
 
 PREFIX    ?= /usr/local
-BUILD_DIR  = build
+
+# Object dir is namespaced per toolchain. Native and cross builds share the same
+# source tree, and $(LIBDSDDPCM_OBJ)/$(IMGUI_OBJS) are plain .o paths — so an
+# unnamespaced `build/` means `make cli CROSS=x86_64-w64-mingw32-` silently
+# overwrites the NATIVE dsddpcm.o with a PE/COFF object, and the next native
+# link fails or picks up a foreign object. Keying on $(CROSS) keeps the trees
+# apart; `clean` still removes all of them.
+BUILD_ROOT = build
+BUILD_ID   = $(if $(CROSS),$(CROSS:%-=%),native)
+BUILD_DIR  = $(BUILD_ROOT)/$(BUILD_ID)
 
 # ── Vendored libdsddpcm (DSD -> PCM decode kernel, BSD-2-Clause) ─────────────
 # Committed under third_party/ (see .gitignore), compiled as a C object and
@@ -253,7 +262,7 @@ install-gui-ffmpeg: gui-ffmpeg
 clean:
 	rm -f crete crete.exe crete-gui crete-gui.exe crete-ffmpeg crete-ffmpeg.exe crete-gui-ffmpeg crete-gui-ffmpeg.exe \
 	      dsd2wav dsd2wav.exe
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_ROOT)
 
 distclean: clean
 	rm -rf third_party/nlohmann
