@@ -8,7 +8,7 @@ crête also **detects MQA-encoded files** and reports them unconditionally: if y
 
 The default build has **zero dependencies**. An optional third build tier statically links a compact, LGPL-only FFmpeg to add lossy/ALAC decode support — see below.
 
-**Current version: 0.12.1**
+**Current version: 0.13.0**
 
 ---
 
@@ -28,7 +28,7 @@ Three CLI build tiers, one GUI:
 
 ```bash
 make                    # optimized build, no JSON output
-make VERSION=0.12.1     # custom version stamp
+make VERSION=0.13.0     # custom version stamp
 make debug              # debug build with sanitizers
 make install            # install to /usr/local/bin
 ```
@@ -103,12 +103,16 @@ crete --dsd-mode direct     /path/to/dsd/           # DSD64 -> 44.1 kHz only
 crete --dsd-filter kaiser   /path/to/dsd/           # final-stage filter (44.1 kHz out only)
 crete --dsd-out-rate 352800 /path/to/dsd/           # 44100 (default) |88200|176400|352800
 
+crete --dr-mean arithmetic  /path/to/album/         # legacy <=0.12.1 DR averaging (A/B only)
+
 crete-ffmpeg /path/to/album/           # cli-json-ffmpeg build: adds ALAC/MP3/AAC/Opus
 ```
 
 `--dsd-mode` (chain), `--dsd-filter` (final-stage filter), and `--dsd-out-rate` select the DSD→PCM decode; none affect PCM formats. `crete --version` prints the resolved chain, decimation, tap count, and group delay for each DSD rate at the current settings. See *DSD decimation* below for the support matrix.
 
-In `-f json`, DSD tracks carry `"dsd_mode"`, `"dsd_filter"`, and `"dsd_out_rate"` fields recording exactly how the numbers were produced — an unlabelled DSD result is not interpretable.
+`--dr-mean` selects how the loudest 20 % of blocks are averaged when computing DR: `quadratic` (default, the PMF procedure) or `arithmetic` (what crête shipped up to 0.12.1). It applies to every format, not just DSD. See *TT Dynamic Range* below.
+
+In `-f json`, every result carries `"dr_rms_mean"`, and DSD tracks additionally carry `"dsd_mode"`, `"dsd_filter"`, and `"dsd_out_rate"` — recording exactly how the numbers were produced. An unlabelled DSD result is not interpretable.
 
 Since 0.10.1 the CLI analyses an album's files **in parallel** (one worker per core by default), same as the GUI: results are order-preserving and bit-identical to a sequential run — `-j` only changes wall-clock time, never a number. Use `-j N` to cap workers (e.g. `-j 2` for high-rate DSD output on memory-constrained hosts, since each in-flight file holds its full decoded float64 buffer — see the memory note under *Cue sheet support*), or `-j 1` for a strictly sequential run.
 
@@ -220,8 +224,8 @@ Per channel:
 1. Split audio into **3-second non-overlapping blocks**.
 2. Compute **RMS** (power-summed across channels) and **peak** per block.
 3. Discard silent blocks (joint RMS < −60 dBFS).
-4. Sort blocks by joint RMS, descending; take the **top 20 %** (`floor(0.2 · N)`) and average their RMS.
-5. **DR(channel) = 20 · log₁₀(2nd-highest peak of that channel / mean top-20 % joint RMS)**.
+4. Sort **that channel's own** block RMS values, descending; take the **top 20 %** (`floor(0.2 · N)`) and combine them with the **quadratic mean** — `sqrt(mean(rms²))`, i.e. averaging *power*, not amplitude.
+5. **DR(channel) = 20 · log₁₀(2nd-highest peak of that channel / that channel's top-20 % RMS)**.
 
 Then:
 
@@ -232,6 +236,12 @@ The 2nd-highest peak (rather than the highest) follows the foobar2000 DR Meter v
 > **Step 6 is not cosmetic.** Until v0.8.1, DR (PMF) was computed as a separate *joint* measurement — the 2nd-highest of the per-block **joint** peaks (`max` over channels) minus the same top-20 % RMS. Because `max` over channels is ≥ either channel's own peak and both paths subtract the same RMS, that construction guaranteed `DR (PMF) ≥ max(DR_LEFT, DR_RIGHT)` **structurally**: it could never fall below either channel. This produced the long-standing "crête reads +1, never −1" bias against both MAAT and foobar.
 >
 > Taking the channel mean instead matches foobar2000 DR Meter v1.0.8 on **20/20** I Robot track/mode pairs (Direct and Multistage), drops PCM `DR (PMF)` max Δ vs MAAT from **3.00 → 1.00 dB** and flagged tracks from **32/153 → 13/135**, and closes the rate-independent "Likoo +2 at every rate" discrepancy. The residual is now symmetric rounding noise rather than a one-sided bias.
+
+> **Step 4 changed in v0.13.0.** Up to 0.12.1 the top-20 % blocks were combined with an *arithmetic* mean of RMS **amplitudes**. The PMF procedure averages **power**. Since AM ≤ QM, the old form was always biased low, so DR was always biased **high** — by an amount that grows with block-to-block RMS variance: ~0.03 dB on dense stereo, up to 1.47 dB on sparse channels (LFE, centre, surrounds).
+>
+> It was found by cross-checking a 5.1 corpus against foobar2000 DR Meter v1.0.8 and MAAT DROffline simultaneously. Over 264 per-channel values the two references agree with **each other** to a mean of 0.006 dB (median 0.000, 162 exact) while crête sat 0.095 from both — so the residual was crête's, not reference noise. Switching to the quadratic mean removes the bias (mean Δ +0.056 → −0.011) and improves per-channel DR accuracy against MAAT by **27–38 %** across the corpus.
+>
+> `--dr-mean arithmetic` reproduces ≤ 0.12.1 bit-for-bit, for A/B work and for re-reading old reference data.
 
 ### EBU R128 integrated loudness
 
