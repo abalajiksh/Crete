@@ -151,8 +151,23 @@ Since 0.11.0 results stay in the window only by default — writing a log file i
 | MP3    | `.mp3`    | Lossy — measured values reflect the decoded lossy signal |
 | AAC    | `.m4a`, `.aac` | Lossy |
 | Opus   | `.opus`, `.ogg` | Lossy |
+| TrueHD / MLP | `.mkv`, `.thd` | Lossless disc audio, up to 7.1. **Channel bed only** — see below |
+| DTS / DTS-HD MA | `.mkv`, `.dts` | Core + lossless MA extension |
+| E-AC-3 / AC-3 | `.mkv`, `.mp4`, `.eac3`, `.ec3`, `.ac3` | Lossy disc audio. **Channel bed only** |
+
+`.mkv` and `.mp4` are video containers; crête picks the best audio stream and ignores video and subtitles, so music Blu-ray rips work directly.
 
 In zero-dependency builds these formats are rejected with a hint to use `crete-ffmpeg` (or transcode: `ffmpeg -i input.m4a -c:a flac output.flac`).
+
+#### Dolby DRC is disabled
+
+AC-3 and E-AC-3 carry Dolby dynamic-range-control metadata, and FFmpeg's decoder **applies it by default**. That is right for a player and wrong for a meter — DRC is a playback-time compressor driven by authoring metadata, so measuring it means measuring a rendition that is not on the disc. crête pins `drc_scale=0` (and `heavy_compr`, `target_level`) so it measures the encoded audio.
+
+The difference is large and easy to miss: on one JOC 5.1 bed, leaving DRC on moved **peak by 6.2 dB** (−0.75 → −6.91), RMS by 3.9 dB and integrated loudness by 4.0 LU — while DR itself moved only 0.24, because DR is peak-minus-RMS and DRC scales both. If you compare crête against a player's readout, this is usually why they differ.
+
+#### Object audio (Atmos, DTS:X) — the bed is measured, the objects are not
+
+FFmpeg has no Atmos or DTS:X renderer. It decodes the underlying **channel bed** — TrueHD 7.1, or E-AC-3 5.1 for Dolby Digital Plus + Atmos — and discards the object metadata. crête's numbers for such a file are the bed's numbers, which is exactly what a non-Atmos playback chain delivers, and *not* what an Atmos renderer would produce. Do not read a bed measurement as an Atmos measurement.
 
 ### Cue sheet support
 
@@ -396,7 +411,9 @@ and an interface, no decoder code — so crête stays MIT.
 
 ## Pending work
 
-Most of this section is a resolved record (kept for provenance). As of 0.11.3 the items still genuinely open are: **FIX 12 corpus re-validation** (below), the **DSD output-rate parity decision** (below), a **cross-arch identity smoke check** (x86-64 vs aarch64 bit-identity), a **round-trip pytest case** (`.dsf` vs its exported WAV), and **DFF/AIFF test coverage**. None are release blockers.
+Most of this section is a resolved record (kept for provenance). Closed since: **FIX 12 corpus re-validation** (validated — per-channel DR flags collapsed from 83/77 to 8/5), and the **DSD output-rate parity decision** (settled — 44.1 kHz is the parity-guaranteed rate, see below).
+
+As of 0.13.0 the items still genuinely open are: a **cross-arch identity smoke check** (x86-64 vs aarch64 bit-identity — the regression test for the `-ffp-contract=off` guarantee, which is currently an untested claim), a **round-trip pytest case** (`.dsf` vs its exported WAV), **DFF/AIFF test coverage**, and **reference data for the disc-audio formats** (TrueHD / DTS-HD / E-AC-3 decode, but no MAAT baselines yet — 7.1 references need a four-stem split that the reference tooling does not do). None are release blockers.
 
 ### FIX 12 — per-channel DR and album rounding (0.11.3, awaiting re-validation)
 
@@ -409,9 +426,13 @@ Both are covered by `scripts/check_fix12.sh`, a zero-dependency synthetic self-c
 
 Note: joint DR is the mean of the per-channel values, so correcting the RMS term shifts joint DR slightly **upward** on channel-asymmetric material (zero shift when L and R carry equal energy). This is the PMF definition, but it is the opposite direction from the residual integer-DR bias, and the corpus run is what settles it.
 
-### DSD output-rate parity — decision pending
+### DSD output-rate parity — 44.1 kHz is the parity-guaranteed rate
 
-DSD DR is output-rate dependent: at 352.8 kHz the retained ultrasonic noise-shaping inflates the 2nd-highest block peak far more than it inflates RMS, so DR reads +1…+3 higher than at 44.1 kHz. crête and MAAT agree on the direction but not the magnitude. At the shipping default (`--dsd-out-rate 44100`) album DR is clean across all 8 DSD albums; both album-level mismatches in Weekly #53 occurred only at 352.8 kHz. Either 44.1 kHz gets documented as the parity-guaranteed rate, or the ultrasonic peak handling needs investigation — until then, no 352.8 kHz parity claim.
+DSD DR is output-rate dependent: at 352.8 kHz the retained ultrasonic noise-shaping inflates the 2nd-highest block peak far more than it inflates RMS, so DR reads +1…+3 higher than at 44.1 kHz. crête and MAAT agree on the direction but not the magnitude.
+
+**The shipping default, `--dsd-out-rate 44100`, is the rate crête's parity claims apply to.** At that rate album DR is clean across all 8 DSD albums, and in the most recent weekly the continuous per-track DR comparison flags nothing on any 44.1 kHz DSD album. Every DSD album-level mismatch on record occurs only at 352.8 kHz. **Results at 88.2 / 176.4 / 352.8 kHz are offered for analysis, not parity** — treat them as a different measurement, not a more precise one.
+
+The cause is quantified rather than assumed. Band-limiting a 352.8 kHz decode to 20 Hz–20 kHz removes roughly **78 %** of the inflation (3.05 dB of a 3.92 dB gap on one measured track) and returns the affected tracks to their 44.1 kHz integer DR — which is simply a worse-quality version of what decimating to 44.1 kHz already does, with libdsddpcm's 641-tap brickwall. Unfiltered, the ultrasonic content alone drives the meter past full scale (a sample peak of **+1.7 dBFS** on one track). There is no `--bandpass` flag for this reason: it would produce a third number with no reference implementation to validate it against.
 
 ### Reference-data hygiene — RESOLVED (2026-07-23)
 
