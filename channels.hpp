@@ -30,8 +30,12 @@ namespace chan {
 inline bool has_lfe(unsigned nch)            { return nch == 6 || nch == 8; }
 inline bool is_lfe(unsigned nch, size_t i)   { return has_lfe(nch) && i == 3; }
 
-// Channels that count toward a score: everything but the LFE.
-inline unsigned scored_count(unsigned nch)   { return nch - (has_lfe(nch) ? 1u : 0u); }
+// Channels that count toward a score. By default everything but the LFE; with
+// include_lfe the whole layout counts (see dr::LfeScoring in analysis.hpp --
+// this is a TT DR aggregation choice, never a BS.1770 one).
+inline unsigned scored_count(unsigned nch, bool include_lfe = false) {
+    return nch - ((has_lfe(nch) && !include_lfe) ? 1u : 0u);
+}
 
 // True when the layout has a discrete front L/R pair whose DR is directly
 // comparable with the stereo release of the same master.

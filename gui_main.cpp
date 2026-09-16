@@ -75,6 +75,14 @@ struct AppState {
     int  dsd_rate_idx   = 0;   // index into DSD_RATES
     dsd::Options active_dsd_opt;   // snapshotted at analysis start
 
+    // Count the LFE toward DR? crete's rule is no (a .1 track is a
+    // band-limited effects channel, so folding it in measures bass management
+    // rather than music); foobar2000's DR Meter says yes. Off by default,
+    // available for anyone comparing the two. Snapshotted alongside the DSD
+    // options so a mid-run toggle cannot change the rule under the worker.
+    bool         score_lfe = false;
+    dr::LfeScoring active_lfe = dr::LfeScoring::Exclude;
+
     bool dark_mode = false;
     bool restyle_requested = false;
 
@@ -317,7 +325,9 @@ static void analysis_worker(AppState* app) {
             try {
                 auto ad = audio::decode_file(files[i], app->active_dsd_opt);
                 slots[i] = dr::analyze_track(ad.channels, ad.sample_rate,
-                                             ad.bit_depth, ad.codec, fname);
+                                             ad.bit_depth, ad.codec, fname,
+                                             dr::RmsMean::Quadratic,
+                                             app->active_lfe);
                 slots[i].mqa = mqa::analyze_pcm(ad.channels, ad.sample_rate,
                                                 ad.bit_depth);
                 ok[i] = 1;
@@ -365,6 +375,8 @@ static void start_analysis(AppState* app) {
     app->cancel_requested.store(false); app->is_analyzing.store(true); app->selected_track = 0;
     app->analyzed_path = app->path_buf;            // remember what we analyzed
     app->active_dsd_opt = app->build_dsd_opts();   // snapshot options for the thread
+    app->active_lfe     = app->score_lfe ? dr::LfeScoring::Include
+                                         : dr::LfeScoring::Exclude;
     if (app->worker.joinable()) app->worker.join();
     app->worker = std::thread(analysis_worker, app);
 }
@@ -567,22 +579,50 @@ static void empty_state(AppState&) {
 // single mono row to 8 (7.1) with no change of layout. Speaker names and the
 // LFE rule come from channels.hpp, the same table the CLI and JSON read, so
 // the two front-ends cannot describe a layout differently.
-static const char* channel_note(unsigned nch) {
+static const char* channel_note(unsigned nch, bool lfe_in) {
     if (nch <= 1)
         return "Mono source: no inter-channel comparison, so no width or "
                "correlation metrics. Peak, PSR and RMS are read once.";
     if (nch == 2)
         return "DR (PMF) is the mean of the two channel DRs — the TT DR rule. "
                "Peaks are reported per channel.";
+    // "LFE scored" is a setting now (Settings -> SCORING), so the note reports
+    // what this track was actually measured with rather than stating a rule.
     if (nch == 8)
-        return "DR (PMF) is the mean of the scored channels; the LFE is measured "
-               "but never scored. Loudness is BS.1770 channel-weighted (front "
-               "unity, surrounds +1.5 dB, LFE excluded). Native 7.1 music masters "
-               "are rare — most 7.1 files are film beds or Atmos renders.";
-    return "DR (PMF) is the mean of the scored channels; the LFE is measured but "
-           "never scored. Loudness is BS.1770 channel-weighted (front unity, "
-           "surrounds +1.5 dB, LFE excluded). The accent bar marks the lowest "
-           "scored channel, which a mean cannot fall below.";
+        return lfe_in
+            ? "DR (PMF) is the mean of ALL channels including the LFE — the "
+              "foobar2000 rule, not crete's default. Loudness is still BS.1770 "
+              "channel-weighted with the LFE excluded: that is ITU-R BS.1770-4, "
+              "not a setting. Native 7.1 music masters are rare — most 7.1 files "
+              "are film beds or Atmos renders."
+            : "DR (PMF) is the mean of the scored channels; the LFE is measured "
+              "but not scored. Loudness is BS.1770 channel-weighted (front "
+              "unity, surrounds +1.5 dB, LFE excluded). Native 7.1 music masters "
+              "are rare — most 7.1 files are film beds or Atmos renders.";
+    return lfe_in
+        ? "DR (PMF) is the mean of ALL channels including the LFE — the "
+          "foobar2000 rule, not crete's default. Loudness is still BS.1770 "
+          "channel-weighted with the LFE excluded: that is ITU-R BS.1770-4, not "
+          "a setting. The accent bar marks the lowest channel, which a mean "
+          "cannot fall below."
+        : "DR (PMF) is the mean of the scored channels; the LFE is measured but "
+          "not scored. Loudness is BS.1770 channel-weighted (front unity, "
+          "surrounds +1.5 dB, LFE excluded). The accent bar marks the lowest "
+          "scored channel, which a mean cannot fall below.";
+}
+
+// How many channels the ENGINE scored for this track. Read back from the
+// result rather than recomputed from the layout, so the display cannot drift
+// from what was measured -- including when the LFE was deliberately scored.
+static unsigned scored_in(const dr::TrackResult& t) {
+    unsigned n = 0;
+    for (const auto& cm : t.ch_metrics) if (cm.scored) ++n;
+    return n ? n : static_cast<unsigned>(t.ch_metrics.size());
+}
+
+static bool lfe_was_scored(const dr::TrackResult& t) {
+    for (const auto& cm : t.ch_metrics) if (cm.is_lfe) return cm.scored;
+    return false;
 }
 
 static void channel_matrix(const dr::TrackResult& t) {
@@ -610,7 +650,7 @@ static void channel_matrix(const dr::TrackResult& t) {
 
         for (int i = 0; i < nch; ++i) {
             const bool excluded   = !t.ch_metrics[i].scored;
-            const bool sets_floor = (i == worst && chan::scored_count(t.channels) > 1);
+            const bool sets_floor = (i == worst && scored_in(t) > 1);
             const ImVec4 lab = excluded ? theme::P().muted : theme::P().ink;
             ImGui::TableNextRow();
 
@@ -643,7 +683,7 @@ static void channel_matrix(const dr::TrackResult& t) {
     ImGui::PopStyleVar();
 
     ImGui::PushStyleColor(ImGuiCol_Text, theme::P().muted);
-    ImGui::TextWrapped("%s", channel_note(t.channels));
+    ImGui::TextWrapped("%s", channel_note(t.channels, lfe_was_scored(t)));
     ImGui::PopStyleColor();
 }
 
@@ -698,8 +738,10 @@ static void detail_panel(AppState& app) {
         // companions the CLI prints, so the GUI can never imply a rule the
         // engine does not use.
         ImGui::TextDisabled("Mean of %u scored channels%s",
-                            chan::scored_count(t.channels),
-                            chan::has_lfe(t.channels) ? " · LFE excluded" : "");
+                            scored_in(t),
+                            !chan::has_lfe(t.channels) ? ""
+                                : lfe_was_scored(t) ? " · LFE included"
+                                                    : " · LFE excluded");
         ImGui::Text("Front L/R  %.1f", t.dr_front_raw);
         if (t.worst_channel >= 0)
             ImGui::TextDisabled("lowest %s  %.1f",
@@ -760,11 +802,28 @@ static void band_results(AppState& app) {
     // the PEAK header says so and a footer rule spells out the scoring rule.
     const unsigned tbl_nch = app.results.empty() ? 2u : app.results.front().channels;
     const bool tbl_multi = tbl_nch > 2;
+    // Which rule produced this table, read back from the results themselves.
+    const bool tbl_lfe_in = !app.results.empty() && lfe_was_scored(app.results.front());
+    // The footer caption, chosen here so the height reserved below is measured
+    // from the string that will actually be drawn.
+    const char* tbl_footer_note = tbl_lfe_in
+        ? "DR is the mean of ALL channels, LFE included · LUFS is BS.1770 "
+          "channel-weighted (LFE still excluded — that is the standard) · "
+          "peaks are across-channel maxima"
+        : "DR is the mean of the scored channels · LUFS is BS.1770 "
+          "channel-weighted · peaks are across-channel maxima";
     // Reserve the footer's REAL height, not a guess. The band is a Rule plus a
-    // Tag and a wrapped caption that takes two lines at narrow table widths;
-    // the original 34 px cut it off against the window bottom even maximised.
+    // Tag and a WRAPPED caption; a hardcoded 34 px cut it off against the window
+    // bottom even maximised (fixed in 0.12.1), and a hardcoded two-line
+    // allowance has the same failure one string-edit later -- the LFE-included
+    // caption is half again as long as the default one and wraps to three lines
+    // at ordinary widths. So measure the caption at the width it will wrap to.
+    const float tbl_wrap_w = ImGui::GetContentRegionAvail().x;
+    const float tbl_note_h = ImGui::CalcTextSize(tbl_footer_note, nullptr,
+                                                 false, tbl_wrap_w).y;
     const float footer_h = tbl_multi
-        ? ImGui::GetFrameHeight() + ImGui::GetTextLineHeightWithSpacing() * 2.0f + 12.0f
+        ? ImGui::GetFrameHeight() + tbl_note_h
+          + ImGui::GetStyle().ItemSpacing.y * 2.0f + 12.0f
         : 0.0f;
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10, 3));
     if (ImGui::BeginTable("Results", ncols, flags, ImVec2(0, avail_h - footer_h))) {
@@ -836,11 +895,13 @@ static void band_results(AppState& app) {
     ImGui::PopStyleVar();
     if (tbl_multi) {
         theme::Rule(2.0f, 4.0f);
-        if (chan::has_lfe(tbl_nch)) { theme::Tag("LFE EXCLUDED"); ImGui::SameLine(0, 10); }
+        if (chan::has_lfe(tbl_nch)) {
+            theme::Tag(tbl_lfe_in ? "LFE INCLUDED" : "LFE EXCLUDED");
+            ImGui::SameLine(0, 10);
+        }
         ImGui::AlignTextToFramePadding();
         ImGui::PushStyleColor(ImGuiCol_Text, theme::P().muted);
-        ImGui::TextWrapped("DR is the mean of the scored channels · LUFS is BS.1770 "
-                           "channel-weighted · peaks are across-channel maxima");
+        ImGui::TextWrapped("%s", tbl_footer_note);
         ImGui::PopStyleColor();
     }
     ImGui::EndChild();
@@ -873,6 +934,24 @@ static void side_panel(AppState& app) {
     if (app.side_tab == 0) {
         theme::SectionLabel("APPEARANCE");
         if (ImGui::Checkbox("Dark shell", &app.dark_mode)) app.restyle_requested = true;
+
+        theme::SectionLabel("SCORING");
+        // Off by default: crete's rule is that a .1 track is a band-limited
+        // effects channel, so averaging it into DR measures the mixer's bass
+        // management rather than the music. foobar2000's DR Meter includes it,
+        // and this is how that comparison gets made. Disabled mid-run so the
+        // setting cannot change under the worker thread.
+        ImGui::BeginDisabled(app.is_analyzing.load());
+        ImGui::Checkbox("Score the LFE in DR", &app.score_lfe);
+        ImGui::EndDisabled();
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::P().muted);
+        ImGui::TextWrapped(app.score_lfe
+            ? "LFE averaged into DR (PMF) — matches foobar2000's DR Meter. "
+              "Loudness is unaffected: BS.1770-4 excludes the LFE by standard, "
+              "not by preference. Re-analyse to apply."
+            : "LFE measured but not scored (crete default). Only DR is affected; "
+              "5.1 and 7.1 only.");
+        ImGui::PopStyleColor();
 
         theme::SectionLabel("LOG FILE");
         // Opt-in: default is analyze-only, nothing written to disk. The

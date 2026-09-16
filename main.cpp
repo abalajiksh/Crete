@@ -65,6 +65,11 @@ static dsd::Options g_dsd_opt;
 // Only multi-stream containers (.mkv/.mp4 Blu-ray rips) can honour it.
 static int g_stream = -1;
 static dr::RmsMean  g_rms_mean = dr::RmsMean::Quadratic;
+
+// Whether the LFE counts toward the TT DR score. Exclude is crete's rule and
+// the default; Include matches foobar2000's DR Meter. Affects TT DR only --
+// BS.1770 loudness and Min. PSR are untouched. See dr::LfeScoring.
+static dr::LfeScoring g_lfe = dr::LfeScoring::Exclude;
 static constexpr const char* PROGRAM_DESC    = "TT Dynamic Range Meter (zero-dependency)";
 
 namespace fs = std::filesystem;
@@ -663,10 +668,13 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
         // TT DR defines no procedure beyond stereo, so the reader is entitled
         // to know which channels produced the headline and which did not.
         if (nch > 2) {
+            const bool lfe_in = (g_lfe == dr::LfeScoring::Include);
             std::printf("\n  DR (PMF) = mean of the %u scored channel%s%s.\n",
-                        chan::scored_count(unch),
-                        chan::scored_count(unch) == 1 ? "" : "s",
-                        chan::has_lfe(unch) ? " — LFE measured, not scored" : "");
+                        chan::scored_count(unch, lfe_in),
+                        chan::scored_count(unch, lfe_in) == 1 ? "" : "s",
+                        !chan::has_lfe(unch) ? ""
+                            : lfe_in ? " — LFE INCLUDED (--dr-lfe include)"
+                                     : " — LFE measured, not scored");
             std::printf("  Front L/R DR:        %.2f   (the figure comparable "
                         "with a stereo master)\n", t.dr_front_raw);
             if (t.worst_channel >= 0)
@@ -778,11 +786,12 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         j["sample_rate"] = first.sample_rate;
         j["channels"] = first.channels;
         j["channel_layout"] = chan::layout_short(first.channels);
-        j["scored_channels"] = chan::scored_count(first.channels);
+        j["scored_channels"] = chan::scored_count(first.channels, g_lfe == dr::LfeScoring::Include);
         j["loudness_summing"] = chan::loudness_mode(first.channels);
         j["bit_depth"] = first.bit_depth;
         j["codec"] = first.codec;
         j["dr_rms_mean"] = dr::rms_mean_name(g_rms_mean);
+        j["dr_lfe"]      = dr::lfe_scoring_name(g_lfe);
         if (first.audio_stream_count > 1) {
             j["audio_stream_count"] = first.audio_stream_count;
             j["stream_index"]       = first.stream_index;
@@ -849,7 +858,7 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         }
 
         jt["channel_layout"]  = chan::layout_short(t.channels);
-        jt["scored_channels"] = chan::scored_count(t.channels);
+        jt["scored_channels"] = chan::scored_count(t.channels, g_lfe == dr::LfeScoring::Include);
         // Multichannel companions to dr_score_raw. On mono/stereo dr_front_raw
         // equals dr_score_raw and worst_channel is just the lower-DR channel,
         // so consumers can read them unconditionally.
@@ -909,6 +918,9 @@ void print_usage(const char* argv0) {
 #endif
               << "  -o, --output <file>            Write output to file\n"
               << "  --dr-mean <quadratic|arithmetic>  Top-20% RMS averaging (default: quadratic)\n"
+              << "  --dr-lfe <exclude|include>     Count the LFE toward DR (default: exclude).\n"
+              << "                                 Affects TT DR only; BS.1770 loudness and\n"
+              << "                                 Min. PSR are unchanged. No-op without an LFE.\n"
               << "      quadratic  — sqrt(mean(rms^2)), averages POWER. The PMF procedure,\n"
               << "                   and what MAAT and foobar2000 DR Meter both do.\n"
               << "      arithmetic — sum(rms)/n, averages AMPLITUDE. What crete shipped up\n"
@@ -1013,6 +1025,13 @@ int main(int argc, char* argv[]) {
             }
             else {
                 std::cerr << "Unknown format: " << fmt << "\n";
+                return 1;
+            }
+        } else if (arg == "--dr-lfe" && i+1 < argc) {
+            try {
+                g_lfe = dr::lfe_scoring_from_string(argv[++i]);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << "\n";
                 return 1;
             }
         } else if (arg == "--dr-mean" && i+1 < argc) {
@@ -1138,7 +1157,7 @@ int main(int argc, char* argv[]) {
                     progress(basename);
                     slots[gi].push_back(dr::analyze_track(
                         ad.channels, ad.sample_rate, ad.bit_depth,
-                        ad.codec, basename, g_rms_mean));
+                        ad.codec, basename, g_rms_mean, g_lfe));
                     slots[gi].back().mqa = minfo;
                     slots[gi].back().stream_index       = ad.stream_index;
                     slots[gi].back().audio_stream_count = ad.audio_stream_count;
@@ -1185,7 +1204,7 @@ int main(int argc, char* argv[]) {
 
                         slots[gi].push_back(dr::analyze_track(
                             slice, ad.sample_rate, ad.bit_depth,
-                            ad.codec, track_name, g_rms_mean));
+                            ad.codec, track_name, g_rms_mean, g_lfe));
                         slots[gi].back().mqa = minfo;
                     slots[gi].back().stream_index       = ad.stream_index;
                     slots[gi].back().audio_stream_count = ad.audio_stream_count;

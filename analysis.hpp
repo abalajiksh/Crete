@@ -63,6 +63,39 @@ inline RmsMean rms_mean_from_string(const std::string& s) {
                              "' (expected quadratic|arithmetic)");
 }
 
+// ── Does the LFE count toward the TT DR score? ─────────────────────────────
+// crete's default is Exclude: a .1 track is a band-limited effects channel
+// whose crest factor is nearly flat and whose level is mix-dependent, so
+// folding it into the programme's dynamic range measures the mixer's bass
+// management rather than the music. TT DR / dr.loudness-war.info defines
+// nothing past stereo, so this is a CHOSEN rule, not a discovered one.
+//
+// foobar2000's DR Meter chooses the other way -- measured 6-0 on the
+// discriminating tracks of the 5.1 corpus (2026-09-15) -- and that divergence
+// is most of the remaining album-DR gap against it. Include exists so the
+// comparison can be made directly instead of argued about.
+//
+// SCOPE, deliberately narrow. This moves TT DR only: the DR mean, the joint
+// sample peak and overall RMS it is computed from, the 3 s block gate, and
+// worst_channel. It does NOT touch the BS.1770 loudness family (integrated,
+// Max M/S, LRA) -- LFE is weighted 0 there by ITU-R BS.1770-4, which is a
+// standard and not ours to toggle -- nor Min. PSR, which is AES eBrief 373
+// over the programme peak. Mono and stereo have no LFE, so every value is
+// bit-identical under either setting.
+enum class LfeScoring { Exclude, Include };
+
+inline const char* lfe_scoring_name(LfeScoring s) {
+    return s == LfeScoring::Include ? "include" : "exclude";
+}
+
+// Throws std::runtime_error on an unknown name (caller reports and exits).
+inline LfeScoring lfe_scoring_from_string(const std::string& s) {
+    if (s == "exclude" || s == "off" || s == "no")  return LfeScoring::Exclude;
+    if (s == "include" || s == "on"  || s == "yes") return LfeScoring::Include;
+    throw std::runtime_error("unknown --dr-lfe '" + s +
+                             "' (expected exclude|include)");
+}
+
 // ── Verdict classification ─────────────────────────────────────────────────
 enum class Verdict {
     Exceptional, Excellent, Normal, Compressed, Brickwalled,
@@ -532,9 +565,18 @@ struct TTDRResult {
 inline TTDRResult compute_tt_dr(
         const std::vector<std::vector<double>>& channels,
         double sample_rate, double block_seconds = 3.0,
-        RmsMean rms_mean = RmsMean::Quadratic) {
+        RmsMean rms_mean = RmsMean::Quadratic,
+        LfeScoring lfe = LfeScoring::Exclude) {
     size_t nch = channels.size();
     const unsigned unch = static_cast<unsigned>(nch);
+    // The single place the LFE policy is read. Under Exclude this is exactly
+    // chan::is_lfe, so every loop below keeps its original form and its
+    // original accumulation order -- mono and stereo never have an LFE, so
+    // they are bit-identical under either setting by construction.
+    const bool lfe_scored = (lfe == LfeScoring::Include);
+    auto unscored = [unch, lfe_scored](size_t ch) {
+        return !lfe_scored && chan::is_lfe(unch, ch);
+    };
     size_t n = channels[0].size();
     size_t block_size = static_cast<size_t>(block_seconds * sample_rate);
     TTDRResult result;
@@ -552,7 +594,7 @@ inline TTDRResult compute_tt_dr(
     // it into the programme's dynamic range measures the mixer's bass
     // management, not the music.
     for (size_t ch = 0; ch < nch; ++ch) {
-        if (chan::is_lfe(unch, ch)) continue;
+        if (unscored(ch)) continue;
         for (size_t i = 0; i < n; ++i) {
             double s = channels[ch][i];
             track_peak = std::max(track_peak, std::abs(s));
@@ -569,7 +611,7 @@ inline TTDRResult compute_tt_dr(
         for (size_t ch = 0; ch < nch; ++ch) result.dr_per_ch[ch] = result.dr;
         result.dr_front = result.dr;
         for (size_t ch = 0; ch < nch; ++ch)
-            if (!chan::is_lfe(unch, ch)) { result.worst_ch = static_cast<int>(ch); break; }
+            if (!unscored(ch)) { result.worst_ch = static_cast<int>(ch); break; }
         return result;
     }
     size_t n_blocks = n / block_size;
@@ -583,7 +625,7 @@ inline TTDRResult compute_tt_dr(
         bd.ch_rms.resize(nch, 0.0);
         double sum_sq = 0.0;
         for (size_t ch = 0; ch < nch; ++ch) {
-            const bool lfe = chan::is_lfe(unch, ch);
+            const bool lfe = unscored(ch);
             double ch_pk = 0.0, ch_sum_sq = 0.0;
             for (size_t i = start; i < start + block_size; ++i) {
                 double s = channels[ch][i];
@@ -698,7 +740,7 @@ inline TTDRResult compute_tt_dr(
     size_t n_scored = 0;
     double worst = 0.0;
     for (size_t ch = 0; ch < nch; ++ch) {
-        if (chan::is_lfe(unch, ch)) continue;
+        if (unscored(ch)) continue;
         sum_dr += result.dr_per_ch[ch];
         ++n_scored;
         if (result.worst_ch < 0 || result.dr_per_ch[ch] < worst) {
@@ -716,7 +758,8 @@ inline TTDRResult compute_tt_dr(
 inline TrackResult analyze_track(const std::vector<std::vector<double>>& channels,
                                   uint32_t sample_rate, uint32_t bit_depth,
                                   const std::string& codec, const std::string& filename,
-                                  RmsMean rms_mean = RmsMean::Quadratic) {
+                                  RmsMean rms_mean = RmsMean::Quadratic,
+                                  LfeScoring lfe = LfeScoring::Exclude) {
     TrackResult r;
     r.filename     = filename;
     r.sample_rate  = sample_rate;
@@ -730,7 +773,7 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     size_t nch = channels.size();
     size_t n = channels[0].size();
     double sr = static_cast<double>(sample_rate);
-    auto tt = compute_tt_dr(channels, sample_rate, 3.0, rms_mean);
+    auto tt = compute_tt_dr(channels, sample_rate, 3.0, rms_mean, lfe);
     r.dr_score_raw   = tt.dr;
     r.dr_score       = static_cast<int>(std::round(tt.dr));
     r.dr_per_channel = tt.dr_per_ch;
@@ -756,7 +799,7 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     for (size_t c = 0; c < nch; ++c) {
         auto& cm = r.ch_metrics[c];
         cm.is_lfe = chan::is_lfe(static_cast<unsigned>(nch), c);
-        cm.scored = !cm.is_lfe;
+        cm.scored = !cm.is_lfe || (lfe == LfeScoring::Include);
         const auto& samp = channels[c];
         double sp = peak_of(samp.data(), n);
         cm.sample_peak_dbfs = to_dbfs(sp);
