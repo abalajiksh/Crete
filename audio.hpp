@@ -1007,7 +1007,15 @@ inline bool is_ffmpeg_extra_format(const std::string& ext) {
     return ext == ".m4a" || ext == ".mp4" || ext == ".m4b" || ext == ".aac"
         || ext == ".mp3" || ext == ".opus" || ext == ".ogg" || ext == ".oga"
         || ext == ".mka" || ext == ".webm" || ext == ".wma"
-        || ext == ".wv"  || ext == ".ape"  || ext == ".mpc" || ext == ".tak";
+        || ext == ".wv"  || ext == ".ape"  || ext == ".mpc" || ext == ".tak"
+        // Disc audio. .mkv is a video container, but so is .mp4 above, and
+        // av_find_best_stream() picks the audio stream and ignores the rest --
+        // music Blu-ray rips are routinely .mkv. The rest are raw elementary
+        // streams matching the demuxers enabled in build_ffmpeg_compact.sh.
+        // NOTE: these carry the channel BED only. Atmos/DTS:X objects are not
+        // rendered by FFmpeg; see the profile note in that script.
+        || ext == ".mkv" || ext == ".thd"  || ext == ".dts"
+        || ext == ".ac3" || ext == ".eac3" || ext == ".ec3";
 #else
     (void)ext;
     return false;

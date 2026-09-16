@@ -30,6 +30,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/samplefmt.h>
+#include <libavutil/dict.h>
 #include <libswresample/swresample.h>
 }
 
@@ -65,7 +66,33 @@ inline AudioData decode_with_ffmpeg(const std::string& path) {
 
     if (avcodec_parameters_to_context(ctx, st->codecpar) < 0)
         throw std::runtime_error("FFmpeg: copy codec params failed");
-    if (avcodec_open2(ctx, dec, nullptr) < 0)
+
+    // ── Decode the ENCODED audio, not a playback rendition ──────────────
+    // AC-3 / E-AC-3 carry Dolby DRC metadata, and FFmpeg's (e)ac3 decoder
+    // APPLIES it by default (drc_scale defaults to 1). That is right for a
+    // player and wrong for a meter: it is a playback-time compressor driven
+    // by authoring metadata, so measuring it means measuring something that
+    // exists on nobody's disc. Measured on a JOC 5.1 bed (Pineapple Thief
+    // "Our Mire", 2026-09-16), default-on vs off:
+    //
+    //     peak  -6.91 -> -0.75      RMS  -20.82 -> -16.97
+    //     LUFSi -21.14 -> -17.18    DR raw 14.580 -> 14.821
+    //
+    // DR itself barely moves -- it is peak-minus-RMS and DRC scales both --
+    // but every ABSOLUTE metric was off by 4-6 dB. Peak, RMS, LUFSi, PLR and
+    // true peak are all reference-validated against MAAT, so this would have
+    // been a silent, systematic error on every AC-3/E-AC-3 file.
+    //
+    // target_level (0) and heavy_compr (false) already default to inert;
+    // they are pinned anyway so a future FFmpeg cannot change them under us.
+    // Unknown options are ignored by other decoders, so this is unconditional.
+    AVDictionary* dec_opts = nullptr;
+    av_dict_set(&dec_opts, "drc_scale",    "0", 0);
+    av_dict_set(&dec_opts, "heavy_compr",  "0", 0);
+    av_dict_set(&dec_opts, "target_level", "0", 0);
+    struct OptGuard { AVDictionary** p; ~OptGuard() { if (*p) av_dict_free(p); } } og{&dec_opts};
+
+    if (avcodec_open2(ctx, dec, &dec_opts) < 0)
         throw std::runtime_error("FFmpeg: cannot open decoder");
 
     int in_rate = ctx->sample_rate;

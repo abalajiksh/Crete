@@ -59,6 +59,7 @@ inline std::string open_file(const char* title = "Select Audio File") {
 #ifdef CRETE_HAS_FFMPEG
         "Audio Files\0*.wav;*.flac;*.aif;*.aiff;*.dsf;*.dff;"
         "*.m4a;*.mp4;*.m4b;*.aac;*.mp3;*.opus;*.ogg;*.oga;"
+        "*.mkv;*.thd;*.dts;*.ac3;*.eac3;*.ec3;"
         "*.mka;*.webm;*.wma;*.wv;*.ape;*.mpc;*.tak\0"
 #else
         "Audio Files\0*.wav;*.flac;*.aif;*.aiff;*.dsf;*.dff\0"
@@ -87,6 +88,7 @@ inline std::string open_file(const char* title = "Select Audio File") {
 #ifdef CRETE_HAS_FFMPEG
     const char* pattern = "*.wav *.flac *.aif *.aiff *.dsf *.dff "
         "*.m4a *.mp4 *.m4b *.aac *.mp3 *.opus *.ogg *.oga "
+        "*.mkv *.thd *.dts *.ac3 *.eac3 *.ec3 "
         "*.mka *.webm *.wma *.wv *.ape *.mpc *.tak";
 #else
     const char* pattern = "*.wav *.flac *.aif *.aiff *.dsf *.dff";

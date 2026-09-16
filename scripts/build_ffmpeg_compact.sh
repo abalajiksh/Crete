@@ -12,6 +12,16 @@
 #   - no encoders / muxers / filters / network / programs / devices
 #   - decoders for the formats crête can't decode natively (ALAC, AAC, MP3,
 #     Opus, Vorbis, WMA, WavPack, Monkey's Audio, Musepack, TAK, plus LPCM)
+#   - Blu-ray / disc audio beds: TrueHD (+MLP), E-AC-3, AC-3, DTS (incl. the
+#     DTS-HD MA lossless extension). All native LGPL decoders, so the
+#     LGPL-only constraint above still holds.
+#
+# NOTE ON OBJECT AUDIO: FFmpeg has no Atmos/DTS:X renderer. It decodes the
+# channel BED only (TrueHD 7.1, E-AC-3 5.1 for JOC) and discards the object
+# metadata. It does, however, report the carrier in AVCodecContext::profile
+# ("Dolby TrueHD + Dolby Atmos", "Dolby Digital Plus + Dolby Atmos"), so the
+# caller can label what was actually measured. Never present a bed measurement
+# as an Atmos measurement.
 #
 # Usage:
 #   ./scripts/build_ffmpeg_compact.sh [VERSION] [PREFIX]
@@ -36,15 +46,19 @@ JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 # Decoder names are FFmpeg's internal names (mpc7/mpc8 for Musepack, etc.).
 DECODERS="alac,aac,aac_latm,mp3,mp3float,opus,vorbis,flac,\
 wmav1,wmav2,wmalossless,wmapro,wavpack,ape,mpc7,mpc8,tak,\
+truehd,mlp,eac3,ac3,dca,\
 pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,\
 pcm_f32le,pcm_f32be,pcm_u8,pcm_s8"
 
 # wav/aiff/flac demuxers are redundant with crête's native paths (which always
 # win in decode_file) but are cheap to keep and make this FFmpeg usable solo.
+# truehd/dts/eac3/ac3 here are the RAW elementary-stream demuxers - matroska and
+# mov already cover the disc rips, these just make bare .thd/.dts files work too.
 DEMUXERS="mov,mp3,ogg,matroska,webm_dash_manifest,aac,asf,flac,wav,aiff,\
-ape,wv,mpc,mpc8,tak"
+ape,wv,mpc,mpc8,tak,truehd,dts,eac3,ac3"
 
-PARSERS="aac,aac_latm,mpegaudio,flac,vorbis,opus,tak"
+# mlp parser handles both MLP and TrueHD framing.
+PARSERS="aac,aac_latm,mpegaudio,flac,vorbis,opus,tak,mlp,ac3,dca"
 
 # ── Fetch ───────────────────────────────────────────────────────────────────
 mkdir -p "$ROOT/third_party"
