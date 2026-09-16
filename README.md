@@ -104,6 +104,7 @@ crete --dsd-filter kaiser   /path/to/dsd/           # final-stage filter (44.1 k
 crete --dsd-out-rate 352800 /path/to/dsd/           # 44100 (default) |88200|176400|352800
 
 crete --dr-mean arithmetic  /path/to/album/         # legacy <=0.12.1 DR averaging (A/B only)
+crete --dr-blocks reference /path/to/album/         # PMF reference 3 s block set (A/B only)
 
 crete-ffmpeg /path/to/album/           # cli-json-ffmpeg build: adds ALAC/MP3/AAC/Opus
 ```
@@ -112,7 +113,9 @@ crete-ffmpeg /path/to/album/           # cli-json-ffmpeg build: adds ALAC/MP3/AA
 
 `--dr-mean` selects how the loudest 20 % of blocks are averaged when computing DR: `quadratic` (default, the PMF procedure) or `arithmetic` (what crête shipped up to 0.12.1). It applies to every format, not just DSD. See *TT Dynamic Range* below.
 
-In `-f json`, every result carries `"dr_rms_mean"`, and DSD tracks additionally carry `"dsd_mode"`, `"dsd_filter"`, and `"dsd_out_rate"` — recording exactly how the numbers were produced. An unlabelled DSD result is not interpretable.
+`--dr-blocks` selects **which** 3 s blocks are ranked in the first place: `legacy` (default — what crête has always shipped: the trailing partial block is discarded and blocks are gated at `joint_rms > 1e-3`) or `reference` (the PMF reference implementation: the trailing partial block is kept, normalised by its own length, and there is no gate). This is a separate axis from `--dr-mean`. See *TT Dynamic Range* below.
+
+In `-f json`, every result carries `"dr_rms_mean"` and `"dr_blocks"`, and DSD tracks additionally carry `"dsd_mode"`, `"dsd_filter"`, and `"dsd_out_rate"` — recording exactly how the numbers were produced. An unlabelled DSD result is not interpretable.
 
 Since 0.10.1 the CLI analyses an album's files **in parallel** (one worker per core by default), same as the GUI: results are order-preserving and bit-identical to a sequential run — `-j` only changes wall-clock time, never a number. Use `-j N` to cap workers (e.g. `-j 2` for high-rate DSD output on memory-constrained hosts, since each in-flight file holds its full decoded float64 buffer — see the memory note under *Cue sheet support*), or `-j 1` for a strictly sequential run.
 
@@ -283,6 +286,21 @@ The 2nd-highest peak (rather than the highest) follows the foobar2000 DR Meter v
 > It was found by cross-checking a 5.1 corpus against foobar2000 DR Meter v1.0.8 and MAAT DROffline simultaneously. Over 264 per-channel values the two references agree with **each other** to a mean of 0.006 dB (median 0.000, 162 exact) while crête sat 0.095 from both — so the residual was crête's, not reference noise. Switching to the quadratic mean removes the bias (mean Δ +0.056 → −0.011) and improves per-channel DR accuracy against MAAT by **27–38 %** across the corpus.
 >
 > `--dr-mean arithmetic` reproduces ≤ 0.12.1 bit-for-bit, for A/B work and for re-reading old reference data.
+
+> **Steps 1–2 have a second axis: which blocks exist at all (`--dr-blocks`, 0.13.1).** crête's shipping block set differs from the PMF reference implementation (`dr14_t.meter`) in two places: it discards the trailing partial block, and it gates blocks at `joint_rms > 1e-3`. The reference keeps the tail (RMS normalised by its own length) and has no gate.
+>
+> Both deviations shrink the block count, and since `n_top = floor(nb × 0.2)` a smaller count keeps **fewer and therefore louder** top blocks — raising the top-20 % RMS and **lowering DR**. The effect grows as the discarded blocks become a larger fraction of the track, so it is worst on short tracks and on sparse channels.
+>
+> Measured on the 5.1 corpus (45 tracks × 6 channels) against foobar2000 DR Meter v1.0.8 and MAAT DROffline simultaneously — `reference` reproduces a literal transcription of `dr14_t.meter` to 3.9e-5:
+>
+> | block set | vs foobar | vs MAAT (stems) |
+> |---|---|---|
+> | `legacy` (default) | mean \|Δ\| 0.0598, bias −0.011 | 0.0628, bias −0.014 |
+> | `reference` | **0.0355, bias −0.004** | **0.0339, bias −0.001** |
+>
+> It is not a surround-only effect — the Turtles stereo album improves 0.0472 → 0.0221 against MAAT — and it accounts for what earlier analysis recorded as a *short-track effect*: `corr(1/duration, |Δ|)` falls from +0.465 to −0.044.
+>
+> **`legacy` remains the default** so every existing reference row keeps its meaning; `--dr-blocks reference` is for A/B work until a full corpus run decides it.
 
 ### EBU R128 integrated loudness
 

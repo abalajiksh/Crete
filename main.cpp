@@ -70,6 +70,7 @@ static dr::RmsMean  g_rms_mean = dr::RmsMean::Quadratic;
 // the default; Include matches foobar2000's DR Meter. Affects TT DR only --
 // BS.1770 loudness and Min. PSR are untouched. See dr::LfeScoring.
 static dr::LfeScoring g_lfe = dr::LfeScoring::Exclude;
+static dr::BlockSet g_dr_blocks = dr::BlockSet::Legacy;
 static constexpr const char* PROGRAM_DESC    = "TT Dynamic Range Meter (zero-dependency)";
 
 namespace fs = std::filesystem;
@@ -791,6 +792,7 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         j["bit_depth"] = first.bit_depth;
         j["codec"] = first.codec;
         j["dr_rms_mean"] = dr::rms_mean_name(g_rms_mean);
+        j["dr_blocks"]   = dr::block_set_name(g_dr_blocks);
         j["dr_lfe"]      = dr::lfe_scoring_name(g_lfe);
         if (first.audio_stream_count > 1) {
             j["audio_stream_count"] = first.audio_stream_count;
@@ -925,6 +927,9 @@ void print_usage(const char* argv0) {
               << "                   and what MAAT and foobar2000 DR Meter both do.\n"
               << "      arithmetic — sum(rms)/n, averages AMPLITUDE. What crete shipped up\n"
               << "                   to 0.12.1; biases DR high. For A/B only.\n"
+              << "  --dr-blocks <legacy|reference>    3 s block set for DR (default: legacy).\n"
+              << "                                 reference = PMF reference implementation:\n"
+              << "                                 keeps the trailing partial block, no block gate.\n"
               << "  --dsd-mode <direct|multistage> DSD decimation chain (default: multistage)\n"
               << "      multistage — brickwall at Nyquist (measurement-grade). Works for\n"
               << "                   DSD64/128/256/512 at every output rate.\n"
@@ -1030,6 +1035,13 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--dr-lfe" && i+1 < argc) {
             try {
                 g_lfe = dr::lfe_scoring_from_string(argv[++i]);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << "\n";
+                return 1;
+            }
+        } else if (arg == "--dr-blocks" && i+1 < argc) {
+            try {
+                g_dr_blocks = dr::block_set_from_string(argv[++i]);
             } catch (const std::exception& e) {
                 std::cerr << "Error: " << e.what() << "\n";
                 return 1;
@@ -1176,7 +1188,7 @@ int main(int argc, char* argv[]) {
                     progress(basename);
                     slots[gi].push_back(dr::analyze_track(
                         ad.channels, ad.sample_rate, ad.bit_depth,
-                        ad.codec, basename, g_rms_mean, g_lfe));
+                        ad.codec, basename, g_rms_mean, g_lfe, g_dr_blocks));
                     slots[gi].back().mqa = minfo;
                     slots[gi].back().stream_index       = ad.stream_index;
                     slots[gi].back().audio_stream_count = ad.audio_stream_count;
@@ -1223,7 +1235,7 @@ int main(int argc, char* argv[]) {
 
                         slots[gi].push_back(dr::analyze_track(
                             slice, ad.sample_rate, ad.bit_depth,
-                            ad.codec, track_name, g_rms_mean, g_lfe));
+                            ad.codec, track_name, g_rms_mean, g_lfe, g_dr_blocks));
                         slots[gi].back().mqa = minfo;
                     slots[gi].back().stream_index       = ad.stream_index;
                     slots[gi].back().audio_stream_count = ad.audio_stream_count;

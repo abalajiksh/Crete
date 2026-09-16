@@ -16,10 +16,17 @@
 #      round(mean(8,8,7)) = 8; correct single rounding gives round(7.433) = 7.
 #
 # Usage: scripts/check_fix12.sh [path-to-crete]     (default ./crete)
+#        CRETE_FLAGS="--dr-blocks reference" scripts/check_fix12.sh
+#
+# Both assertions are invariant to --dr-mean and --dr-blocks by construction --
+# one pins a DR *difference* between two channels of the same file, the other
+# pins the album rounding rule -- so they PASS in every mode. That is the point:
+# they must keep passing when the measurement axes move.
 # ============================================================================
 set -euo pipefail
 
 CRETE="${1:-./crete}"
+CRETE_FLAGS="${CRETE_FLAGS:-}"
 [ -x "$CRETE" ] || { echo "no crete binary at $CRETE — run 'make' first"; exit 1; }
 
 TMP="$(mktemp -d)"
@@ -59,7 +66,7 @@ PY
 fail=0
 
 # ── 1. per-channel RMS ──────────────────────────────────────────────────────
-read -r L R <<<"$("$CRETE" -f detail "$TMP/split.wav" 2>/dev/null \
+read -r L R <<<"$("$CRETE" $CRETE_FLAGS -f detail "$TMP/split.wav" 2>/dev/null \
                   | awk '/DR \(PMF\)/{print $3, $4}')"
 delta=$(python3 -c "print(f'{float('$R')-float('$L'):.2f}')")
 if [ "$delta" = "6.02" ]; then
@@ -71,7 +78,7 @@ else
 fi
 
 # ── 2. album_dr single rounding ─────────────────────────────────────────────
-adr=$("$CRETE" "$TMP/alb" 2>/dev/null | grep -oiE 'Official DR Value: DR[0-9]+' | grep -oE '[0-9]+$')
+adr=$("$CRETE" $CRETE_FLAGS "$TMP/alb" 2>/dev/null | grep -oiE 'Official DR Value: DR[0-9]+' | grep -oE '[0-9]+$')
 if [ "$adr" = "7" ]; then
     echo "PASS  album_dr single rounding: DR$adr  (raw mean 7.433)"
 else

@@ -55,6 +55,64 @@ inline const char* rms_mean_name(RmsMean m) {
     return m == RmsMean::Arithmetic ? "arithmetic" : "quadratic";
 }
 
+// ── 3 s block SET (TT DR / PMF) ────────────────────────────────────────────
+// Which 3 s blocks compute_tt_dr() puts into the peak/RMS pools.  This is a
+// separate axis from RmsMean above: that one picks how the top 20% are
+// averaged, this one picks WHICH blocks exist to be ranked in the first place.
+//
+// Legacy (default): the trailing partial block is discarded (n / block_size)
+//   and blocks are gated on joint_rms > 1e-3.  What crete has always shipped.
+// Reference: the trailing partial block is kept, with its RMS normalised by
+//   its OWN length, and there is no gate.  This is the PMF reference
+//   implementation (dr14_t.meter compute_dr14: seg_cnt = floor(n/bs) + 1, the
+//   tail row filled by dr_rms over the remainder, and no block gate at all).
+//
+// Why it matters, and in which direction.  n_top = floor(nb * 0.2), so both
+// Legacy deviations shrink nb and therefore shrink n_top -- keeping FEWER and
+// so LOUDER top blocks, which raises the top-20% RMS and LOWERS DR.  Legacy is
+// structurally biased low, by an amount that grows as the discarded blocks
+// become a larger fraction of the track: worst on short tracks and on sparse
+// channels (LFE/C/surrounds), whose quiet blocks the gate removes.
+//
+// Measured 2026-09-16 on the 5.1 corpus (45 tracks x 6 channels, both oracles;
+// Reference reproduces a literal transcription of dr14_t.meter to 3.9e-5, the
+// residual being that implementation's own off-by-one on the final sample):
+//
+//                       vs foobar DR Meter      vs MAAT DROffline (stems)
+//   Legacy              mean |d| 0.0598          0.0628   bias -0.011/-0.014
+//   Reference           mean |d| 0.0355          0.0339   bias -0.004/-0.001
+//
+// It is not a surround-only effect: the Turtles stereo album improves 0.0472
+// -> 0.0221 against MAAT.  And the "short-track effect" recorded in Weekly #55
+// was this: corr(1/duration, |d|) falls from +0.465 to -0.044, and DSOTM
+// "Speak to Me" (68 s) goes from up to 1.22 dB out to within 0.045 on all six
+// channels.  See CLAUDE.md for the full write-up.
+//
+// NOTE for anyone transcribing more of dr14_t.meter: do NOT copy its
+// `delta_fs = 60` fudge, which makes a 44.1 kHz block 132480 samples instead
+// of 132300.  That is a bug in that implementation, not part of the procedure.
+//
+// One further reference quirk deliberately NOT replicated: it sizes its arrays
+// at floor(n/bs) + 1 unconditionally, so when the track length is an exact
+// multiple of the block size the extra row stays all-zero and still counts
+// toward seg_cnt -- inflating n_top by one on those tracks alone.  The zero row
+// never reaches the top-20% set or the 2nd-highest peak, so it is a pure
+// counting artefact; Reference adds a trailing block only when one exists.
+// No track in the 5.1 corpus is an exact multiple, which is why the two agree
+// to 3.9e-5 there -- expect a divergence on a track that is.
+enum class BlockSet { Legacy, Reference };
+
+inline const char* block_set_name(BlockSet b) {
+    return b == BlockSet::Reference ? "reference" : "legacy";
+}
+
+// Throws std::runtime_error on an unknown name (caller reports and exits).
+inline BlockSet block_set_from_string(const std::string& s) {
+    if (s == "legacy"    || s == "classic") return BlockSet::Legacy;
+    if (s == "reference" || s == "pmf" || s == "dr14") return BlockSet::Reference;
+    throw std::runtime_error("unknown --dr-blocks '" + s + "' (use legacy or reference)");
+}
+
 // Throws std::runtime_error on an unknown name (caller reports and exits).
 inline RmsMean rms_mean_from_string(const std::string& s) {
     if (s == "quadratic"  || s == "qm" || s == "pmf") return RmsMean::Quadratic;
@@ -566,7 +624,8 @@ inline TTDRResult compute_tt_dr(
         const std::vector<std::vector<double>>& channels,
         double sample_rate, double block_seconds = 3.0,
         RmsMean rms_mean = RmsMean::Quadratic,
-        LfeScoring lfe = LfeScoring::Exclude) {
+        LfeScoring lfe = LfeScoring::Exclude,
+        BlockSet block_set = BlockSet::Legacy) {
     size_t nch = channels.size();
     const unsigned unch = static_cast<unsigned>(nch);
     // The single place the LFE policy is read. Under Exclude this is exactly
@@ -641,9 +700,42 @@ inline TTDRResult compute_tt_dr(
             bd.ch_rms[ch] = std::sqrt(2.0 * ch_sum_sq / static_cast<double>(block_size));
         }
         bd.joint_rms = std::sqrt(sum_sq / static_cast<double>(block_size));
-        if (bd.joint_rms > 1e-3) block_data.push_back(std::move(bd));
+        // Reference keeps every block; Legacy gates on joint_rms. Under Legacy
+        // the condition is exactly as it always was, so the retained set, its
+        // order and n_top are bit-identical.
+        if (block_set == BlockSet::Reference || bd.joint_rms > 1e-3)
+            block_data.push_back(std::move(bd));
+    }
+    // Reference only: the trailing partial block. Its RMS is normalised by its
+    // OWN length (dr14_t.meter's dr_rms over the remainder), not zero-padded to
+    // a full block -- zero-padding was measured and is worse against both
+    // oracles (mean |d| 0.0513 vs 0.0415 on the 5.1 corpus).
+    size_t tail_len = n - n_blocks * block_size;
+    if (block_set == BlockSet::Reference && tail_len > 0) {
+        size_t start = n_blocks * block_size;
+        BlockData bd;
+        bd.ch_peaks.resize(nch, 0.0);
+        bd.ch_rms.resize(nch, 0.0);
+        double sum_sq = 0.0;
+        for (size_t ch = 0; ch < nch; ++ch) {
+            const bool lfe = unscored(ch);
+            double ch_pk = 0.0, ch_sum_sq = 0.0;
+            for (size_t i = start; i < n; ++i) {
+                double s = channels[ch][i];
+                double a = std::abs(s);
+                if (a > ch_pk) ch_pk = a;
+                ch_sum_sq += s * s;
+                if (!lfe) sum_sq += s * s;
+            }
+            bd.ch_peaks[ch] = ch_pk;
+            bd.ch_rms[ch] = std::sqrt(2.0 * ch_sum_sq / static_cast<double>(tail_len));
+        }
+        bd.joint_rms = std::sqrt(sum_sq / static_cast<double>(tail_len));
+        block_data.push_back(std::move(bd));
     }
     if (block_data.empty()) { result.dr = 0.0; return result; }
+    // Legacy keeps reporting the ungated full-block count it always reported.
+    if (block_set == BlockSet::Reference) result.blocks = block_data.size();
     size_t nb = block_data.size();
     size_t n_top = std::max<size_t>(1, std::min<size_t>(nb,
             static_cast<size_t>(std::floor(nb * 0.2))));
@@ -759,7 +851,8 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
                                   uint32_t sample_rate, uint32_t bit_depth,
                                   const std::string& codec, const std::string& filename,
                                   RmsMean rms_mean = RmsMean::Quadratic,
-                                  LfeScoring lfe = LfeScoring::Exclude) {
+                                  LfeScoring lfe = LfeScoring::Exclude,
+                                  BlockSet block_set = BlockSet::Legacy) {
     TrackResult r;
     r.filename     = filename;
     r.sample_rate  = sample_rate;
@@ -773,7 +866,7 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     size_t nch = channels.size();
     size_t n = channels[0].size();
     double sr = static_cast<double>(sample_rate);
-    auto tt = compute_tt_dr(channels, sample_rate, 3.0, rms_mean, lfe);
+    auto tt = compute_tt_dr(channels, sample_rate, 3.0, rms_mean, lfe, block_set);
     r.dr_score_raw   = tt.dr;
     r.dr_score       = static_cast<int>(std::round(tt.dr));
     r.dr_per_channel = tt.dr_per_ch;
