@@ -49,7 +49,7 @@ extern "C" {
 
 // ── Version info ───────────────────────────────────────────────────────────
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.13.0"
+#define CRETE_VERSION "0.13.1"
 #endif
 
 static constexpr const char* PROGRAM_NAME    = "crête";
@@ -1092,6 +1092,25 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Did ANY path yield a measurement? crete exits non-zero when nothing
+
+    // could be analysed: a meter that measured nothing has not succeeded,
+
+    // and with -f json it emits no JSON at all, so a caller that trusts the
+
+    // exit code parses an empty string. That is exactly how a stale FFmpeg
+
+    // build (no truehd/dca decoder) surfaced in CI as an unreadable
+
+    // JSONDecodeError instead of crete's own "Error:" line.
+
+    // Per-file failures inside an album are NOT this case -- a partial
+
+    // success still exits 0, as before.
+
+    bool any_results = false;
+
+
     for (const auto& path : paths) {
         auto groups = collect_groups(path);
         if (groups.empty()) {
@@ -1247,6 +1266,7 @@ int main(int argc, char* argv[]) {
             if (!errlog[gi].empty()) std::cerr << errlog[gi];
 
         if (results.empty()) continue;
+        any_results = true;
 
         std::string display_name;
         if (fs::is_directory(path))
@@ -1294,5 +1314,10 @@ int main(int argc, char* argv[]) {
     }
 
     if (out_fp) std::fclose(out_fp);
+    if (!any_results) {
+        std::cerr << "Error: no audio could be analysed"
+                     " (no supported files, or every file failed to decode)\n";
+        return 1;
+    }
     return 0;
 }

@@ -92,6 +92,33 @@ echo ">> building with $JOBS jobs"
 make -j"$JOBS"
 make install
 
+# ── Build fingerprint ────────────────────────────────────────────────────────
+# A cached prefix is normally reused, and callers have gated that on
+# lib/pkgconfig/libavformat.pc merely EXISTING. That sentinel says "an FFmpeg
+# was built here", not "an FFmpeg with the decoders you need was built here" --
+# so after e754d71 added truehd/mlp/eac3/ac3/dca, every agent with a warm cache
+# silently kept a build that could not decode disc audio, and the DISCAUDIO
+# suite failed on four of six carriers with no hint as to why. Record what this
+# build actually contains so a caller can invalidate on a CHANGE rather than on
+# absence.
+# The hash is of THIS SCRIPT, not just the component lists: the configure flags
+# define the build every bit as much as the decoder list does, and hashing the
+# whole file means a future edit of any kind invalidates a stale cache without
+# anyone having to remember to extend a fingerprint.
+script_hash() {
+    if command -v md5sum >/dev/null 2>&1; then md5sum  < "$1" | cut -d' ' -f1
+    else                                       md5 -q  "$1"
+    fi
+}
+cat > "$PREFIX/crete-ffmpeg-build.id" <<EOF
+script_md5=$(script_hash "$0")
+version=$VERSION
+decoders=$DECODERS
+demuxers=$DEMUXERS
+parsers=$PARSERS
+EOF
+echo ">> wrote build id: $PREFIX/crete-ffmpeg-build.id"
+
 echo
 echo ">> done."
 echo ">>   libs + .pc files: $PREFIX/lib"
