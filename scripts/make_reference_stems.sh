@@ -60,7 +60,14 @@ command -v ffprobe >/dev/null || { echo "ffprobe not found" >&2; exit 1; }
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 MANIFEST="$DEST/STEMS.tsv"
 mkdir -p "$DEST"
-printf 'album\tgroup\tstem_channels\tsource_file\tstem_file\tsrc_channels\tsample_rate\tbits\n' > "$MANIFEST"
+# Append, never truncate: <dest-dir> is normally an EXISTING stem corpus being
+# extended with one more album, and the manifest is the only record of how the
+# stems already there were made.  A plain '>' here silently destroys it.
+if [ -f "$MANIFEST" ]; then
+    cp "$MANIFEST" "$MANIFEST.bak.$(date +%Y%m%d_%H%M%S)"
+else
+    printf 'album\tgroup\tstem_channels\tsource_file\tstem_file\tsrc_channels\tsample_rate\tbits\n' > "$MANIFEST"
+fi
 
 probe() { ffprobe -v error -select_streams a:0 -show_entries stream="$2" -of csv=p=0 "$1"; }
 
