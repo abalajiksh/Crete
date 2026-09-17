@@ -3,13 +3,27 @@
 # MAAT DROffline can actually read, for reference-log generation.
 #
 # MAAT analyses at most two channels (its log has LEFT / RIGHT columns and
-# nothing else), so a 5.1 master cannot be referenced directly.  This splits each
-# 5.1 track into three stereo stems that map onto the 5.1 channel order, so one
-# MAAT folder run per stem group covers every channel:
+# nothing else), so a multichannel master cannot be referenced directly.  This
+# splits each track into stereo stems that map onto the source channel order, so
+# one MAAT folder run per stem group covers every channel:
 #
-#     [LR]     c0,c1  ->  MAAT LEFT = L,  RIGHT = R
-#     [C-LFE]  c2,c3  ->  MAAT LEFT = C,  RIGHT = LFE   (LFE column ignored)
-#     [Ls-Rs]  c4,c5  ->  MAAT LEFT = Ls, RIGHT = Rs
+#   5.1  (6ch)  [LR]       c0,c1  ->  MAAT LEFT = L,    RIGHT = R
+#               [C-LFE]    c2,c3  ->            = C,          = LFE  (col ignored)
+#               [Ls-Rs]    c4,c5  ->            = Ls,         = Rs
+#
+#   7.1  (8ch)  [LR]       c0,c1  ->            = L,          = R
+#               [C-LFE]    c2,c3  ->            = C,          = LFE  (col ignored)
+#               [Lss-Rss]  c4,c5  ->            = Lss,        = Rss
+#               [Lrs-Rrs]  c6,c7  ->            = Lrs,        = Rrs
+#
+#   QUAD (4ch)  [LR]       c0,c1  ->            = L,          = R
+#               [Ls-Rs]    c2,c3  ->            = Ls,         = Rs
+#
+# QUAD needs only two groups: it has no centre and no LFE, so unlike 5.1 / 7.1
+# every channel it yields is one crete scores -- there is no [C-LFE] group whose
+# RIGHT column has to be discarded.  Indices are what matter, not layout names:
+# ffmpeg reports quad as either `quad` (FL FR BL BR) or `quad(side)`
+# (FL FR SL SR) depending on the source codec, and c2,c3 are the rears in both.
 #
 # A 2-channel album is instead split to a single 1-channel stem group [M] (c0),
 # which is how a dual-mono master gets a genuine nch==1 reference.
@@ -34,7 +48,7 @@ SRC=""; DEST=""; VERIFY=0
 for a in "$@"; do
     case "$a" in
         --verify) VERIFY=1 ;;
-        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
         *) if [ -z "$SRC" ]; then SRC="$a"; elif [ -z "$DEST" ]; then DEST="$a";
            else echo "unexpected argument: $a" >&2; exit 2; fi ;;
     esac
@@ -81,6 +95,8 @@ process_album() {
                     "C-LFE|pan=stereo|c0=c2|c1=c3#2,3"
                     "Lss-Rss|pan=stereo|c0=c4|c1=c5#4,5"
                     "Lrs-Rrs|pan=stereo|c0=c6|c1=c7#6,7" ) ;;
+        4) groups=( "LR|pan=stereo|c0=c0|c1=c1#0,1"
+                    "Ls-Rs|pan=stereo|c0=c2|c1=c3#2,3" ) ;;
         2) groups=( "M|pan=mono|c0=c0#0" ) ;;
         1) echo "  $album: already 1 channel — nothing to split"; return 0 ;;
         *) echo "  $album: unsupported channel count $nch — skipped" >&2; return 0 ;;
