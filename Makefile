@@ -121,6 +121,46 @@ else
     GUI_PLAT_LDFLAGS  = $(shell pkg-config --libs sdl2 2>/dev/null) \
                         -lGL -lpthread
     CURL = curl -sL
+    # STATIC=1 -- a fully static Linux binary, no shared-library dependencies
+    # at all, so ONE build runs on any distribution whatever its glibc age.
+    # The Linux counterpart of the Windows STATIC=1 above, and it exists for
+    # the same reason: crete's claim is a single self-contained executable,
+    # and a binary that needs a matching libstdc++/glibc on the host is not
+    # that. Distro packages then wrap an already-portable binary instead of
+    # each having to rebuild it.
+    #
+    # Safe HERE specifically because crete is pure compute over local files:
+    # no NSS, no DNS, no dlopen. The usual static-glibc caveats do not apply,
+    # and the compact FFmpeg tier is configured --disable-network with only
+    # the file protocol, so the FFmpeg tier does not reintroduce them.
+    #
+    # THE PTHREAD WRAPPER IS NOT DECORATION. Before glibc 2.34 libpthread was
+    # a separate library whose symbols libstdc++ resolved WEAKLY. A static
+    # link pulls in only referenced archive members, leaves those weak symbols
+    # null, and std::thread then throws "Enable multithreading to use
+    # std::thread" at RUN TIME -- a build that links clean and dies on first
+    # use, which for crete is every parallel decode. --whole-archive forces
+    # the archive in. From glibc 2.34 libpthread.a is an empty stub and the
+    # same line is a harmless no-op, so it is correct on old and new alike.
+    #
+    # PREREQUISITE, not installed by default on most distros:
+    #   Fedora/RHEL     dnf install glibc-static libstdc++-static
+    #   Debian/Ubuntu   libc6-dev + libstdc++-*-dev (usually already present)
+    # Without them the link fails with "cannot find -lc" or "cannot find
+    # -lstdc++", which is otherwise a confusing first encounter.
+    ifeq ($(STATIC),1)
+        CLI_LDFLAGS = -static -Wl,--whole-archive -lpthread -Wl,--no-whole-archive
+        # The GUI is excluded BY CONSTRUCTION -- -static lives in CLI_LDFLAGS,
+        # never in LDFLAGS, so GUI_LDFLAGS cannot inherit it. A static GUI is
+        # not achievable anyway: SDL2 opens the platform's OpenGL/X11/Wayland
+        # stack at run time. Asking for one is refused loudly rather than
+        # silently yielding a dynamic binary someone then ships as static.
+        ifneq (,$(filter gui gui-ffmpeg debug-gui debug-gui-ffmpeg all,$(MAKECMDGOALS)))
+            $(error STATIC=1 builds the CLI tiers only. The GUI links SDL2 and \
+                    OpenGL, which must resolve against the host at run time, so \
+                    it cannot be static. Build it without STATIC=1)
+        endif
+    endif
 endif
 
 # ── nlohmann/json (auto-fetched for cli-json builds) ───────────────────────
