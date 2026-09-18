@@ -976,6 +976,14 @@ void print_version() {
               << "Built: " << __DATE__ << " " << __TIME__ << "\n"
               << "DSD engine: libdsddpcm " << dsddpcm_version_string()
               << " (BSD-2-Clause, vendored)\n"
+              // Machine-readable, stable, and deliberately one line: the three
+              // DR measurement axes. A bare `--version` prints the binary's own
+              // defaults, so a harness or run manifest can RECORD which
+              // algorithm produced a number instead of assuming one -- which is
+              // how a whole weekly came to be labelled with the wrong block set.
+              << "DR settings: blocks=" << dr::block_set_name(g_dr_blocks)
+              << " mean=" << dr::rms_mean_name(g_rms_mean)
+              << " lfe=" << dr::lfe_scoring_name(g_lfe) << "\n"
               << "DSD chains to " << g_dsd_opt.out_rate << " Hz (filter: "
               << dsd::filter_name(g_dsd_opt.filter) << "):\n";
     const int rates[4]     = { 2822400, 5644800, 11289600, 22579200 };
