@@ -55,7 +55,7 @@ The compact FFmpeg build is **LGPL-only** (no GPL, no nonfree components), **dec
 
 Decoder routing is strict:
 
-- **Native formats (WAV, AIFF, FLAC, DSF, DFF) always use crête's own decoders**, even in the FFmpeg build. This preserves parity against the MAAT reference data.
+- **Native formats (WAV/RF64/Wave64, AIFF, FLAC, DSF, DFF) always use crête's own decoders**, even in the FFmpeg build. This preserves parity against the MAAT reference data.
 - FFmpeg handles only non-native formats: **ALAC (`.m4a`), MP3, AAC, Opus**.
 - **DSD is never routed through FFmpeg** — FFmpeg's `dsd2pcm` decimation is a different filter chain and would break DSD parity.
 
@@ -140,6 +140,8 @@ Since 0.11.0 results stay in the window only by default — writing a log file i
 | Format        | Extension          | Notes                                                                  |
 |---------------|--------------------|------------------------------------------------------------------------|
 | WAV           | `.wav`             | PCM 8/16/24/32-bit, IEEE float 32/64-bit, `WAVE_FORMAT_EXTENSIBLE`     |
+| RF64 / BW64   | `.wav`, `.rf64`, `.bw64` | 64-bit sizes via `ds64` — the >4 GB escape hatch (EBU Tech 3306 / ITU-R BS.2088). Same payload as WAV |
+| Wave64        | `.w64`             | Sony Wave64: GUID chunk ids and 64-bit sizes. Same payload as WAV       |
 | AIFF / AIFF-C | `.aif`, `.aiff`    | Standard big-endian; AIFF-C uncompressed (`NONE`) and `sowt` little-endian |
 | FLAC          | `.flac`            | Built-in decoder — no libFLAC dependency                                |
 | DSD (DSF)     | `.dsf`             | Sony format, LSB-first. Decimated via libdsddpcm (default 44.1 kHz, `--dsd-out-rate`) |
@@ -463,6 +465,8 @@ Three further items closed in 0.13.1:
 - **The already-low per-channel DR tail** — root-caused, not merely characterised. crête's 3 s block set discards the trailing partial block and gates blocks at `joint_rms > 1e-3`; the PMF reference implementation does neither. Both shrink the block count and so `n_top = floor(nb × 0.2)`, keeping fewer and louder top blocks — a structural *low* bias. `--dr-blocks reference` closes it (mean |Δ| 0.0598 → 0.0355 against foobar, 0.0628 → 0.0339 against MAAT, bias to ≈0), and is **off by default** pending a full corpus run. See *TT Dynamic Range*.
 - **The East_Meets_West LRA flags** — not a crête defect. crête passes all six EBU Tech 3342 compliance vectors (10.00 / 5.00 / 20.00 / 15.00 / 4.98 / 15.01 LU against nominal 10/5/20/15/5/15, ±1 LU tolerance), and its LRA is rate-invariant to ≤0.06 LU. MAAT's own LRA moves by up to **2.77 LU** across sample rates of the same album — more than the entire crête-vs-MAAT disagreement — while the short-term loudness it is derived from moves ≤0.01 LU. crête agrees with MAAT better than MAAT agrees with itself.
 
+**RF64 / BW64 / Wave64** close the 4 GB ceiling on plain RIFF — not an exotic limit for this tool's own material, since a 43-minute 5.1 96 kHz/24 LPCM extract is 4.47 GB. All three containers share one payload decoder, and RF64/Wave64 renders of the same audio measure **identically** to plain WAV (verified on 24-bit integer and 32-bit float, 6 channels; the `ds64` 64-bit `dataSize` is proven to be honoured by a file carrying a chunk *after* `data`, which a naive "read to end of buffer" would swallow — control: doing so moves duration 20 s → 21 s and DR 12.28 → −9.21). It also fixes a reachable crash the rewrite exposed: a truncated WAV — an interrupted recording or a partial copy, declaring more data than it holds — read past the end of the buffer and **segfaulted** (0.13.1 on a half-copied file: exit 139, no output at all). All three walkers now clamp to the bytes actually present and report the audio that is there. **Not yet exercised end to end above 4 GB**: this host has 18 GB of RAM and 19 GB free, and crête loads the whole file before decoding, so a genuine >4 GB decode needs a bigger machine. The 64-bit size *path* is exercised; the >4 GB *allocation* is not.
+
 As of 0.13.1 the one item still genuinely open is an **external oracle for the disc-audio formats**: TrueHD / DTS-HD MA / AC-3 decode is gated against crête's own recorded values and against the LPCM carrier of the same master, but against nothing outside crête. Not a release blocker.
 
 ### FIX 12 — per-channel DR and album rounding (0.11.3, awaiting re-validation)
@@ -537,7 +541,7 @@ main.cpp                  CLI entry point, output formatters, cue-aware grouping
 gui_main.cpp              GUI entry point (Dear ImGui + SDL2 + OpenGL); parallel decode
 crete_theme.hpp           GUI Modernist theme: palette (light/dark), fonts, widgets
 analysis.hpp              TT DR, EBU R128, true peak, PLR/PSR/LRA, crest factor
-audio.hpp                 WAV, AIFF/AIFF-C, FLAC, DSF, DFF decoders + FFmpeg routing
+audio.hpp                 WAV/RF64/BW64/Wave64, AIFF/AIFF-C, FLAC, DSF, DFF decoders + FFmpeg routing
 audio_ffmpeg.hpp          FFmpeg decode backend (guarded by CRETE_HAS_FFMPEG)
 dsd_decode.hpp            DSD decode front-end over libdsddpcm (chain/filter/rate)
 dsd_lut.hpp.bak           Retired LGPL byte-LUT engine (dormant, not built)

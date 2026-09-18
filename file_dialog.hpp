@@ -57,12 +57,12 @@ inline std::string open_file(const char* title = "Select Audio File") {
     ofn.lpstrTitle = title;
     ofn.lpstrFilter =
 #ifdef CRETE_HAS_FFMPEG
-        "Audio Files\0*.wav;*.flac;*.aif;*.aiff;*.dsf;*.dff;"
+        "Audio Files\0*.wav;*.rf64;*.bw64;*.w64;*.flac;*.aif;*.aiff;*.dsf;*.dff;"
         "*.m4a;*.mp4;*.m4b;*.aac;*.mp3;*.opus;*.ogg;*.oga;"
         "*.mkv;*.thd;*.dts;*.ac3;*.eac3;*.ec3;"
         "*.mka;*.webm;*.wma;*.wv;*.ape;*.mpc;*.tak\0"
 #else
-        "Audio Files\0*.wav;*.flac;*.aif;*.aiff;*.dsf;*.dff\0"
+        "Audio Files\0*.wav;*.rf64;*.bw64;*.w64;*.flac;*.aif;*.aiff;*.dsf;*.dff\0"
 #endif
         "All Files\0*.*\0";
     ofn.lpstrFile = filename;
@@ -76,22 +76,22 @@ inline std::string open_file(const char* title = "Select Audio File") {
         "osascript -e 'set f to POSIX path of (choose file with prompt \""
         + std::string(title) +
 #ifdef CRETE_HAS_FFMPEG
-        "\" of type {\"wav\",\"flac\",\"aif\",\"aiff\",\"dsf\",\"dff\","
+        "\" of type {\"wav\",\"rf64\",\"bw64\",\"w64\",\"flac\",\"aif\",\"aiff\",\"dsf\",\"dff\","
         "\"m4a\",\"mp4\",\"m4b\",\"aac\",\"mp3\",\"opus\",\"ogg\",\"oga\","
         "\"mka\",\"webm\",\"wma\",\"wv\",\"ape\",\"mpc\",\"tak\"})' 2>/dev/null");
 #else
-        "\" of type {\"wav\",\"flac\",\"aif\",\"aiff\",\"dsf\",\"dff\"})' 2>/dev/null");
+        "\" of type {\"wav\",\"rf64\",\"bw64\",\"w64\",\"flac\",\"aif\",\"aiff\",\"dsf\",\"dff\"})' 2>/dev/null");
 #endif
 
 #else
     // Linux: try zenity, then kdialog
 #ifdef CRETE_HAS_FFMPEG
-    const char* pattern = "*.wav *.flac *.aif *.aiff *.dsf *.dff "
+    const char* pattern = "*.wav *.rf64 *.bw64 *.w64 *.flac *.aif *.aiff *.dsf *.dff "
         "*.m4a *.mp4 *.m4b *.aac *.mp3 *.opus *.ogg *.oga "
         "*.mkv *.thd *.dts *.ac3 *.eac3 *.ec3 "
         "*.mka *.webm *.wma *.wv *.ape *.mpc *.tak";
 #else
-    const char* pattern = "*.wav *.flac *.aif *.aiff *.dsf *.dff";
+    const char* pattern = "*.wav *.rf64 *.bw64 *.w64 *.flac *.aif *.aiff *.dsf *.dff";
 #endif
     if (has_command("zenity")) {
         return exec_cmd(
