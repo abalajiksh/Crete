@@ -49,7 +49,7 @@ extern "C" {
 
 // ── Version info ───────────────────────────────────────────────────────────
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.13.1"
+#define CRETE_VERSION "0.14.0"
 #endif
 
 static constexpr const char* PROGRAM_NAME    = "crête";
@@ -70,7 +70,12 @@ static dr::RmsMean  g_rms_mean = dr::RmsMean::Quadratic;
 // the default; Include matches foobar2000's DR Meter. Affects TT DR only --
 // BS.1770 loudness and Min. PSR are untouched. See dr::LfeScoring.
 static dr::LfeScoring g_lfe = dr::LfeScoring::Exclude;
-static dr::BlockSet g_dr_blocks = dr::BlockSet::Legacy;
+// Which 3 s blocks enter the DR pools. Reference is the PMF reference
+// implementation and the default since 0.14.0 -- it keeps the trailing partial
+// block and drops the block gate, both of which biased crete's DR low. Legacy
+// is the pre-0.14.0 accounting, kept so any reference row recorded under it
+// stays reproducible. See dr::BlockSet.
+static dr::BlockSet g_dr_blocks = dr::BlockSet::Reference;
 static constexpr const char* PROGRAM_DESC    = "TT Dynamic Range Meter (zero-dependency)";
 
 namespace fs = std::filesystem;
@@ -927,9 +932,11 @@ void print_usage(const char* argv0) {
               << "                   and what MAAT and foobar2000 DR Meter both do.\n"
               << "      arithmetic — sum(rms)/n, averages AMPLITUDE. What crete shipped up\n"
               << "                   to 0.12.1; biases DR high. For A/B only.\n"
-              << "  --dr-blocks <legacy|reference>    3 s block set for DR (default: legacy).\n"
-              << "                                 reference = PMF reference implementation:\n"
-              << "                                 keeps the trailing partial block, no block gate.\n"
+              << "  --dr-blocks <reference|legacy>    3 s block set for DR (default: reference).\n"
+              << "      reference  — PMF reference implementation: keeps the trailing partial\n"
+              << "                   block, no block gate. Default since 0.14.0.\n"
+              << "      legacy     — what crete shipped up to 0.13.1: trailing block discarded,\n"
+              << "                   blocks gated on joint RMS. Biases DR low. For A/B only.\n"
               << "  --dsd-mode <direct|multistage> DSD decimation chain (default: multistage)\n"
               << "      multistage — brickwall at Nyquist (measurement-grade). Works for\n"
               << "                   DSD64/128/256/512 at every output rate.\n"
