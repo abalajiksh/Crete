@@ -60,12 +60,15 @@ inline const char* rms_mean_name(RmsMean m) {
 // separate axis from RmsMean above: that one picks how the top 20% are
 // averaged, this one picks WHICH blocks exist to be ranked in the first place.
 //
-// Legacy (default): the trailing partial block is discarded (n / block_size)
-//   and blocks are gated on joint_rms > 1e-3.  What crete has always shipped.
-// Reference: the trailing partial block is kept, with its RMS normalised by
-//   its OWN length, and there is no gate.  This is the PMF reference
-//   implementation (dr14_t.meter compute_dr14: seg_cnt = floor(n/bs) + 1, the
-//   tail row filled by dr_rms over the remainder, and no block gate at all).
+// Reference (default since 0.14.0): the trailing partial block is kept, with
+//   its RMS normalised by its OWN length, and there is no gate.  This is the
+//   PMF reference implementation (dr14_t.meter compute_dr14: seg_cnt =
+//   floor(n/bs) + 1, the tail row filled by dr_rms over the remainder, and no
+//   block gate at all).
+// Legacy: the trailing partial block is discarded (n / block_size) and blocks
+//   are gated on joint_rms > 1e-3.  What crete shipped up to and including
+//   0.13.1.  Retained so every reference row recorded under it stays
+//   reproducible, and so the two can be A/B'd -- not for new work.
 //
 // Why it matters, and in which direction.  n_top = floor(nb * 0.2), so both
 // Legacy deviations shrink nb and therefore shrink n_top -- keeping FEWER and
@@ -87,6 +90,14 @@ inline const char* rms_mean_name(RmsMean m) {
 // was this: corr(1/duration, |d|) falls from +0.465 to -0.044, and DSOTM
 // "Speak to Me" (68 s) goes from up to 1.22 dB out to within 0.045 on all six
 // channels.  See CLAUDE.md for the full write-up.
+//
+// Confirmed on the FULL corpus before it became the default: Weekly #68
+// (legacy) vs #69 (reference), same binary, same corpus, run sequentially --
+// weighted mean |d| over 2241 DR comparisons 0.0392 -> 0.0262 (-33%), DR flags
+// 29 -> 19, and NOT ONE DR row regressed.  The crete-vs-crete control suites
+// (cue, dsd_parity, dsd_roundtrip, ffmpeg_parity, format) stayed 0.000 and no
+// non-DR value moved anywhere, which is what says the change is confined to
+// the block accounting.
 //
 // NOTE for anyone transcribing more of dr14_t.meter: do NOT copy its
 // `delta_fs = 60` fudge, which makes a 44.1 kHz block 132480 samples instead
@@ -625,7 +636,7 @@ inline TTDRResult compute_tt_dr(
         double sample_rate, double block_seconds = 3.0,
         RmsMean rms_mean = RmsMean::Quadratic,
         LfeScoring lfe = LfeScoring::Exclude,
-        BlockSet block_set = BlockSet::Legacy) {
+        BlockSet block_set = BlockSet::Reference) {
     size_t nch = channels.size();
     const unsigned unch = static_cast<unsigned>(nch);
     // The single place the LFE policy is read. Under Exclude this is exactly
@@ -852,7 +863,7 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
                                   const std::string& codec, const std::string& filename,
                                   RmsMean rms_mean = RmsMean::Quadratic,
                                   LfeScoring lfe = LfeScoring::Exclude,
-                                  BlockSet block_set = BlockSet::Legacy) {
+                                  BlockSet block_set = BlockSet::Reference) {
     TrackResult r;
     r.filename     = filename;
     r.sample_rate  = sample_rate;

@@ -103,18 +103,52 @@ inline std::string get_extension(const std::string& path) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// WAV Decoder
+// WAV / RF64 / BW64 / Wave64 Decoder
 // ════════════════════════════════════════════════════════════════════════════
+//
+// Three containers, one payload. Plain RIFF carries 32-bit chunk sizes and so
+// stops dead at 4 GB — which is not an exotic limit for this tool's own
+// material: extracting the 43-minute DSOTM LPCM 5.1 96 kHz/24 stream produces
+// 4.47 GB, and long high-rate multichannel captures are RF64 or Wave64 in
+// practice for exactly that reason.
+//
+//   RIFF    "RIFF" u32 size  "WAVE"   chunks: id[4] + u32 size, pad to 2
+//   RF64    "RF64" 0xFFFFFFFF "WAVE"  the FIRST chunk must be "ds64", holding
+//   BW64    "BW64" 0xFFFFFFFF "WAVE"  u64 riffSize / dataSize / sampleCount
+//                                     plus a table of 64-bit sizes for any
+//                                     other oversized chunk. A chunk whose
+//                                     32-bit size reads 0xFFFFFFFF takes its
+//                                     real size from there. (EBU Tech 3306;
+//                                     BW64 is ITU-R BS.2088's name for the
+//                                     same structure, so both magics parse
+//                                     identically.)
+//   Wave64  16-byte GUIDs instead of 4CCs and u64 sizes throughout. Each
+//           chunk GUID is the RIFF fourCC followed by one fixed 12-byte
+//           suffix, so the chunk BODIES are byte-for-byte RIFF's — only the
+//           framing differs. Sizes INCLUDE the 24-byte chunk header and each
+//           chunk pads to an 8-byte boundary.
 
-inline AudioData decode_wav(const std::vector<uint8_t>& buf) {
-    if (buf.size() < 44)
-        throw std::runtime_error("WAV: file too small");
-    if (std::memcmp(buf.data(), "RIFF", 4) != 0 ||
-        std::memcmp(buf.data()+8, "WAVE", 4) != 0)
-        throw std::runtime_error("WAV: invalid header");
+// Wave64 GUIDs. The chunk and form GUIDs share a suffix; the outer file GUID
+// does not, which is what makes it a reliable magic number.
+inline constexpr uint8_t W64_GUID_SUFFIX[12] = {
+    0xF3,0xAC,0xD3,0x11,0x8C,0xD1,0x00,0xC0,0x4F,0x8E,0xDB,0x8A };
+inline constexpr uint8_t W64_RIFF_GUID[16] = {
+    'r','i','f','f',0x2E,0x91,0xCF,0x11,0xA5,0xD6,0x28,0xDB,0x04,0xC1,0x00,0x00 };
 
+inline bool w64_id_is(const uint8_t* p, const char* fourcc) {
+    return std::memcmp(p, fourcc, 4) == 0 &&
+           std::memcmp(p + 4, W64_GUID_SUFFIX, 12) == 0;
+}
+
+// The shared tail. The three containers differ only in how the fmt and data
+// chunks are FOUND, so one payload decoder is what keeps them from ever
+// drifting apart on bit depth, channel count or float handling — and is why a
+// plain RIFF file decodes byte-identically to before this was split out.
+inline AudioData decode_wave_payload(const uint8_t* fmt, size_t fmt_size,
+                                     const uint8_t* data_ptr, size_t data_size,
+                                     const char* codec) {
     AudioData ad;
-    ad.codec = "WAV";
+    ad.codec = codec;
 
     uint16_t audio_fmt = 0;
     uint16_t n_channels = 0;
@@ -122,45 +156,29 @@ inline AudioData decode_wav(const std::vector<uint8_t>& buf) {
     uint16_t bits_per_sample = 0;
     uint16_t block_align [[maybe_unused]] = 0;
 
-    const uint8_t* data_ptr = nullptr;
-    size_t data_size = 0;
+    if (fmt && fmt_size >= 16) {
+        audio_fmt      = rd16le(fmt);
+        n_channels     = rd16le(fmt + 2);
+        sample_rate    = rd32le(fmt + 4);
+        block_align    = rd16le(fmt + 12);
+        bits_per_sample = rd16le(fmt + 14);
 
-    // Parse chunks
-    size_t pos = 12;
-    while (pos + 8 <= buf.size()) {
-        uint32_t chunk_size = rd32le(buf.data() + pos + 4);
-        const uint8_t* chunk = buf.data() + pos + 8;
-
-        if (std::memcmp(buf.data()+pos, "fmt ", 4) == 0 && chunk_size >= 16) {
-            audio_fmt      = rd16le(chunk);
-            n_channels     = rd16le(chunk + 2);
-            sample_rate    = rd32le(chunk + 4);
-            block_align    = rd16le(chunk + 12);
-            bits_per_sample = rd16le(chunk + 14);
-
-            // WAVE_FORMAT_EXTENSIBLE
-            if (audio_fmt == 0xFFFE && chunk_size >= 40) {
-                bits_per_sample = rd16le(chunk + 18);  // valid bits
-                audio_fmt = rd16le(chunk + 24);        // sub-format GUID first word
-            }
-        } else if (std::memcmp(buf.data()+pos, "data", 4) == 0) {
-            data_ptr = chunk;
-            data_size = chunk_size;
+        // WAVE_FORMAT_EXTENSIBLE
+        if (audio_fmt == 0xFFFE && fmt_size >= 40) {
+            bits_per_sample = rd16le(fmt + 18);  // valid bits
+            audio_fmt = rd16le(fmt + 24);        // sub-format GUID first word
         }
-
-        pos += 8 + chunk_size;
-        if (chunk_size & 1) pos++;  // pad byte
     }
 
     if (!data_ptr || n_channels == 0 || sample_rate == 0)
-        throw std::runtime_error("WAV: missing fmt or data chunk");
+        throw std::runtime_error(std::string(codec) + ": missing fmt or data chunk");
 
     ad.sample_rate = sample_rate;
     ad.bit_depth   = bits_per_sample;
 
     size_t bytes_per_sample = (bits_per_sample + 7) / 8;
     size_t frame_size = bytes_per_sample * n_channels;
-    if (frame_size == 0) throw std::runtime_error("WAV: invalid frame size");
+    if (frame_size == 0) throw std::runtime_error(std::string(codec) + ": invalid frame size");
     size_t n_frames = data_size / frame_size;
 
     ad.channels.resize(n_channels);
@@ -208,8 +226,9 @@ inline AudioData decode_wav(const std::vector<uint8_t>& buf) {
                         break;
                     }
                     default:
-                        throw std::runtime_error("WAV: unsupported bit depth " +
-                                                  std::to_string(bits_per_sample));
+                        throw std::runtime_error(std::string(codec) +
+                                ": unsupported bit depth " +
+                                std::to_string(bits_per_sample));
                 }
             }
             ad.channels[c][f] = val;
@@ -217,6 +236,125 @@ inline AudioData decode_wav(const std::vector<uint8_t>& buf) {
     }
 
     return ad;
+}
+
+// RIFF and RF64/BW64. One walker: RF64 IS RIFF plus a size-escape mechanism,
+// and a writer that can fit a size in 32 bits is allowed to just write it, so
+// both forms have to work in the same file.
+inline AudioData decode_wav(const std::vector<uint8_t>& buf) {
+    if (buf.size() < 44)
+        throw std::runtime_error("WAV: file too small");
+    const bool rf64 = std::memcmp(buf.data(), "RF64", 4) == 0 ||
+                      std::memcmp(buf.data(), "BW64", 4) == 0;
+    if ((!rf64 && std::memcmp(buf.data(), "RIFF", 4) != 0) ||
+        std::memcmp(buf.data()+8, "WAVE", 4) != 0)
+        throw std::runtime_error("WAV: invalid header");
+
+    constexpr uint32_t SIZE_IS_64BIT = 0xFFFFFFFFu;
+
+    const uint8_t* fmt_ptr  = nullptr;  size_t   fmt_size  = 0;
+    const uint8_t* data_ptr = nullptr;  uint64_t data_size = 0;
+
+    uint64_t ds64_data_size = 0;
+    bool     have_ds64      = false;
+
+    // Parse chunks
+    size_t pos = 12;
+    while (pos + 8 <= buf.size()) {
+        const uint8_t* id    = buf.data() + pos;
+        const uint8_t* chunk = id + 8;
+        const size_t   avail = buf.size() - (pos + 8);
+        uint64_t chunk_size  = rd32le(id + 4);
+
+        const bool is_data = std::memcmp(id, "data", 4) == 0;
+        if (is_data && chunk_size == SIZE_IS_64BIT) {
+            if (rf64) {
+                if (!have_ds64)
+                    throw std::runtime_error(
+                        "RF64: data chunk defers to a 64-bit size but no ds64 chunk precedes it");
+                chunk_size = ds64_data_size;
+            } else {
+                // Plain RIFF with 0xFFFFFFFF: a streaming writer that never
+                // went back to patch the size. Read to the end of the file,
+                // which is what the value means in practice.
+                chunk_size = avail;
+            }
+        }
+
+        if (rf64 && !have_ds64 && std::memcmp(id, "ds64", 4) == 0 && chunk_size >= 28) {
+            // u64 riffSize, u64 dataSize, u64 sampleCount, u32 tableLength,
+            // then the table. Only dataSize can matter here: fmt is 16-40
+            // bytes, so no fmt chunk has ever needed the table, and reading
+            // sampleCount would only duplicate data_size / frame_size.
+            ds64_data_size = rd64le(chunk + 8);
+            have_ds64 = true;
+        } else if (std::memcmp(id, "fmt ", 4) == 0 && chunk_size >= 16) {
+            fmt_ptr  = chunk;
+            fmt_size = static_cast<size_t>(std::min<uint64_t>(chunk_size, avail));
+        } else if (is_data) {
+            data_ptr = chunk;
+            // A truncated capture — an interrupted recording, a partial copy —
+            // declares more data than it holds. Read what is actually there
+            // instead of running off the end of the buffer.
+            data_size = std::min<uint64_t>(chunk_size, avail);
+        }
+
+        if (chunk_size > avail) break;
+        pos += 8 + static_cast<size_t>(chunk_size);
+        if (chunk_size & 1) pos++;  // pad byte
+    }
+
+    return decode_wave_payload(fmt_ptr, fmt_size, data_ptr,
+                               static_cast<size_t>(data_size),
+                               rf64 ? "RF64" : "WAV");
+}
+
+// Sony Wave64.
+inline AudioData decode_w64(const std::vector<uint8_t>& buf) {
+    if (buf.size() < 40)
+        throw std::runtime_error("Wave64: file too small");
+    if (std::memcmp(buf.data(), W64_RIFF_GUID, 16) != 0 ||
+        !w64_id_is(buf.data() + 24, "wave"))
+        throw std::runtime_error("Wave64: invalid header");
+
+    const uint8_t* fmt_ptr  = nullptr;  size_t   fmt_size  = 0;
+    const uint8_t* data_ptr = nullptr;  uint64_t data_size = 0;
+
+    size_t pos = 40;                         // 16 riff GUID + 8 size + 16 wave GUID
+    while (pos + 24 <= buf.size()) {
+        const uint8_t* id   = buf.data() + pos;
+        uint64_t       size = rd64le(id + 16);
+        if (size < 24) break;                // malformed: would not advance
+        const uint8_t* chunk = id + 24;
+        const size_t   avail = buf.size() - (pos + 24);
+        uint64_t body = std::min<uint64_t>(size - 24, avail);
+
+        if (w64_id_is(id, "fmt ")) {
+            fmt_ptr  = chunk;
+            fmt_size = static_cast<size_t>(body);
+        } else if (w64_id_is(id, "data")) {
+            data_ptr  = chunk;
+            data_size = body;
+        }
+
+        // Chunks pad to an 8-byte boundary; the pad is not counted in size.
+        uint64_t adv = (size + 7) & ~static_cast<uint64_t>(7);
+        if (adv > buf.size() - pos) break;
+        pos += static_cast<size_t>(adv);
+    }
+
+    return decode_wave_payload(fmt_ptr, fmt_size, data_ptr,
+                               static_cast<size_t>(data_size), "WAVE64");
+}
+
+// Entry point for the whole RIFF family. Dispatch is by MAGIC, not extension,
+// deliberately: RF64 files are conventionally named .wav (that is the point of
+// the format — it is a drop-in escape hatch), and a Wave64 capture renamed
+// .wav is common enough to be worth surviving.
+inline AudioData decode_wave(const std::vector<uint8_t>& buf) {
+    if (buf.size() >= 16 && std::memcmp(buf.data(), W64_RIFF_GUID, 16) == 0)
+        return decode_w64(buf);
+    return decode_wav(buf);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1006,8 +1144,13 @@ inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream);
 // Formats crête decodes natively. These are the validated paths (vs MAAT for
 // PCM; vs foobar's chosen DSD mode for DSD) and must NEVER be routed to FFmpeg.
 inline bool is_native_format(const std::string& ext) {
+    // .rf64/.bw64/.w64 are listed so a directory scan picks them up, but the
+    // decoder dispatches on the file's MAGIC rather than its name: an RF64
+    // file is conventionally named .wav, so the extension is not evidence of
+    // anything. See decode_wave().
     return ext == ".wav" || ext == ".flac" || ext == ".aif" || ext == ".aiff"
-        || ext == ".dsf" || ext == ".dff";
+        || ext == ".dsf" || ext == ".dff"
+        || ext == ".rf64" || ext == ".bw64" || ext == ".w64";
 }
 
 // Extra container/codec extensions accepted only in FFmpeg builds. Curated so
@@ -1065,8 +1208,8 @@ inline AudioData decode_file(const std::string& path,
 
     auto buf = read_file(path);
 
-    if (ext == ".wav")
-        return decode_wav(buf);
+    if (ext == ".wav" || ext == ".rf64" || ext == ".bw64" || ext == ".w64")
+        return decode_wave(buf);
     else if (ext == ".aif" || ext == ".aiff")
         return decode_aiff(buf);
     else if (ext == ".flac")

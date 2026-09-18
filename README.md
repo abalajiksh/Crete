@@ -55,7 +55,7 @@ The compact FFmpeg build is **LGPL-only** (no GPL, no nonfree components), **dec
 
 Decoder routing is strict:
 
-- **Native formats (WAV, AIFF, FLAC, DSF, DFF) always use crête's own decoders**, even in the FFmpeg build. This preserves parity against the MAAT reference data.
+- **Native formats (WAV/RF64/Wave64, AIFF, FLAC, DSF, DFF) always use crête's own decoders**, even in the FFmpeg build. This preserves parity against the MAAT reference data.
 - FFmpeg handles only non-native formats: **ALAC (`.m4a`), MP3, AAC, Opus**.
 - **DSD is never routed through FFmpeg** — FFmpeg's `dsd2pcm` decimation is a different filter chain and would break DSD parity.
 
@@ -104,7 +104,7 @@ crete --dsd-filter kaiser   /path/to/dsd/           # final-stage filter (44.1 k
 crete --dsd-out-rate 352800 /path/to/dsd/           # 44100 (default) |88200|176400|352800
 
 crete --dr-mean arithmetic  /path/to/album/         # legacy <=0.12.1 DR averaging (A/B only)
-crete --dr-blocks reference /path/to/album/         # PMF reference 3 s block set (A/B only)
+crete --dr-blocks legacy    /path/to/album/         # pre-0.14.0 3 s block set (A/B only)
 
 crete-ffmpeg /path/to/album/           # cli-json-ffmpeg build: adds ALAC/MP3/AAC/Opus
 ```
@@ -113,7 +113,7 @@ crete-ffmpeg /path/to/album/           # cli-json-ffmpeg build: adds ALAC/MP3/AA
 
 `--dr-mean` selects how the loudest 20 % of blocks are averaged when computing DR: `quadratic` (default, the PMF procedure) or `arithmetic` (what crête shipped up to 0.12.1). It applies to every format, not just DSD. See *TT Dynamic Range* below.
 
-`--dr-blocks` selects **which** 3 s blocks are ranked in the first place: `legacy` (default — what crête has always shipped: the trailing partial block is discarded and blocks are gated at `joint_rms > 1e-3`) or `reference` (the PMF reference implementation: the trailing partial block is kept, normalised by its own length, and there is no gate). This is a separate axis from `--dr-mean`. See *TT Dynamic Range* below.
+`--dr-blocks` selects **which** 3 s blocks are ranked in the first place: `reference` (default since 0.14.0 — the PMF reference implementation: the trailing partial block is kept, normalised by its own length, and there is no gate) or `legacy` (what crête shipped up to 0.13.1: the trailing partial block is discarded and blocks are gated at `joint_rms > 1e-3`). This is a separate axis from `--dr-mean`. See *TT Dynamic Range* below.
 
 In `-f json`, every result carries `"dr_rms_mean"` and `"dr_blocks"`, and DSD tracks additionally carry `"dsd_mode"`, `"dsd_filter"`, and `"dsd_out_rate"` — recording exactly how the numbers were produced. An unlabelled DSD result is not interpretable.
 
@@ -140,6 +140,8 @@ Since 0.11.0 results stay in the window only by default — writing a log file i
 | Format        | Extension          | Notes                                                                  |
 |---------------|--------------------|------------------------------------------------------------------------|
 | WAV           | `.wav`             | PCM 8/16/24/32-bit, IEEE float 32/64-bit, `WAVE_FORMAT_EXTENSIBLE`     |
+| RF64 / BW64   | `.wav`, `.rf64`, `.bw64` | 64-bit sizes via `ds64` — the >4 GB escape hatch (EBU Tech 3306 / ITU-R BS.2088). Same payload as WAV |
+| Wave64        | `.w64`             | Sony Wave64: GUID chunk ids and 64-bit sizes. Same payload as WAV       |
 | AIFF / AIFF-C | `.aif`, `.aiff`    | Standard big-endian; AIFF-C uncompressed (`NONE`) and `sowt` little-endian |
 | FLAC          | `.flac`            | Built-in decoder — no libFLAC dependency                                |
 | DSD (DSF)     | `.dsf`             | Sony format, LSB-first. Decimated via libdsddpcm (default 44.1 kHz, `--dsd-out-rate`) |
@@ -287,7 +289,7 @@ The 2nd-highest peak (rather than the highest) follows the foobar2000 DR Meter v
 >
 > `--dr-mean arithmetic` reproduces ≤ 0.12.1 bit-for-bit, for A/B work and for re-reading old reference data.
 
-> **Steps 1–2 have a second axis: which blocks exist at all (`--dr-blocks`, 0.13.1).** crête's shipping block set differs from the PMF reference implementation (`dr14_t.meter`) in two places: it discards the trailing partial block, and it gates blocks at `joint_rms > 1e-3`. The reference keeps the tail (RMS normalised by its own length) and has no gate.
+> **Steps 1–2 have a second axis: which blocks exist at all (`--dr-blocks`). Changed in v0.14.0.** Up to 0.13.1 crête's block set differed from the PMF reference implementation (`dr14_t.meter`) in two places: it discarded the trailing partial block, and it gated blocks at `joint_rms > 1e-3`. The reference keeps the tail (RMS normalised by its own length) and has no gate.
 >
 > Both deviations shrink the block count, and since `n_top = floor(nb × 0.2)` a smaller count keeps **fewer and therefore louder** top blocks — raising the top-20 % RMS and **lowering DR**. The effect grows as the discarded blocks become a larger fraction of the track, so it is worst on short tracks and on sparse channels.
 >
@@ -295,12 +297,12 @@ The 2nd-highest peak (rather than the highest) follows the foobar2000 DR Meter v
 >
 > | block set | vs foobar | vs MAAT (stems) |
 > |---|---|---|
-> | `legacy` (default) | mean \|Δ\| 0.0598, bias −0.011 | 0.0628, bias −0.014 |
-> | `reference` | **0.0355, bias −0.004** | **0.0339, bias −0.001** |
+> | `legacy` (≤ 0.13.1) | mean \|Δ\| 0.0598, bias −0.011 | 0.0628, bias −0.014 |
+> | `reference` (default) | **0.0355, bias −0.004** | **0.0339, bias −0.001** |
 >
 > It is not a surround-only effect — the Turtles stereo album improves 0.0472 → 0.0221 against MAAT — and it accounts for what earlier analysis recorded as a *short-track effect*: `corr(1/duration, |Δ|)` falls from +0.465 to −0.044.
 >
-> **`legacy` remains the default** so every existing reference row keeps its meaning; `--dr-blocks reference` is for A/B work until a full corpus run decides it.
+> **The full corpus decided it.** Two weeklies, same binary, same corpus, run back to back — #68 under `legacy`, #69 under `reference`. Weighted mean \|Δ\| over **2241 DR comparisons: 0.0392 → 0.0262 (−33 %)**, DR flags 29 → 19, integer `DR (PMF)` flags 10 → 5, and **not one DR row regressed**. The crête-vs-crête control suites (`cue`, `dsd_parity`, `dsd_roundtrip`, `ffmpeg_parity`, `format`) stayed at 0.000 and **no non-DR value moved anywhere**, which is what confirms the change is confined to the block accounting. `reference` is the default from v0.14.0; `--dr-blocks legacy` reproduces ≤ 0.13.1 bit-for-bit, for A/B work and for re-reading reference rows recorded under it.
 
 ### EBU R128 integrated loudness
 
@@ -460,10 +462,12 @@ Most of this section is a resolved record (kept for provenance). Closed since: *
 Three further items closed in 0.13.1:
 
 - **Cross-arch identity** — measured on both CI agents, 8/8 each. The two Linux agents produce *identical* deltas against the same baseline, so the x86-64 vs aarch64 claim behind `-ffp-contract=off` now has real files behind it instead of being an untested assertion. Gated weekly. (A separate, genuinely platform-level finding fell out of it: Linux and macOS differ by one ULP on `20·log10(x)`, identically on both architectures — `libm` rounding, not FP contraction. A macOS-produced JSON cannot be equality-compared against a Linux one.)
-- **The already-low per-channel DR tail** — root-caused, not merely characterised. crête's 3 s block set discards the trailing partial block and gates blocks at `joint_rms > 1e-3`; the PMF reference implementation does neither. Both shrink the block count and so `n_top = floor(nb × 0.2)`, keeping fewer and louder top blocks — a structural *low* bias. `--dr-blocks reference` closes it (mean |Δ| 0.0598 → 0.0355 against foobar, 0.0628 → 0.0339 against MAAT, bias to ≈0), and is **off by default** pending a full corpus run. See *TT Dynamic Range*.
+- **The already-low per-channel DR tail** — root-caused, not merely characterised. crête's 3 s block set discarded the trailing partial block and gated blocks at `joint_rms > 1e-3`; the PMF reference implementation does neither. Both shrink the block count and so `n_top = floor(nb × 0.2)`, keeping fewer and louder top blocks — a structural *low* bias. The reference block set closes it (mean |Δ| 0.0598 → 0.0355 against foobar, 0.0628 → 0.0339 against MAAT, bias to ≈0). It was held off by default pending a full corpus run; that run happened (Weekly #68 vs #69, −33 % on 2241 DR comparisons, zero regressions, controls unmoved) and **it is the default from v0.14.0**. See *TT Dynamic Range*.
 - **The East_Meets_West LRA flags** — not a crête defect. crête passes all six EBU Tech 3342 compliance vectors (10.00 / 5.00 / 20.00 / 15.00 / 4.98 / 15.01 LU against nominal 10/5/20/15/5/15, ±1 LU tolerance), and its LRA is rate-invariant to ≤0.06 LU. MAAT's own LRA moves by up to **2.77 LU** across sample rates of the same album — more than the entire crête-vs-MAAT disagreement — while the short-term loudness it is derived from moves ≤0.01 LU. crête agrees with MAAT better than MAAT agrees with itself.
 
-As of 0.13.1 the one item still genuinely open is an **external oracle for the disc-audio formats**: TrueHD / DTS-HD MA / AC-3 decode is gated against crête's own recorded values and against the LPCM carrier of the same master, but against nothing outside crête. Not a release blocker.
+v0.14.0 adds **RF64 / BW64 / Wave64**, closing the 4 GB ceiling on plain RIFF — not an exotic limit for this tool's own material, since a 43-minute 5.1 96 kHz/24 LPCM extract is 4.47 GB. All three containers share one payload decoder, and RF64/Wave64 renders of the same audio measure **identically** to plain WAV (verified on 24-bit integer and 32-bit float, 6 channels; the `ds64` 64-bit `dataSize` is proven to be honoured by a file carrying a chunk *after* `data`, which a naive "read to end of buffer" would swallow — control: doing so moves duration 20 s → 21 s and DR 12.28 → −9.21). It also fixes a reachable crash the rewrite exposed: a truncated WAV — an interrupted recording or a partial copy, declaring more data than it holds — read past the end of the buffer and **segfaulted** (0.13.1 on a half-copied file: exit 139, no output at all). All three walkers now clamp to the bytes actually present and report the audio that is there. **Not yet exercised end to end above 4 GB**: this host has 18 GB of RAM and 19 GB free, and crête loads the whole file before decoding, so a genuine >4 GB decode needs a bigger machine. The 64-bit size *path* is exercised; the >4 GB *allocation* is not.
+
+As of 0.14.0 the one item still genuinely open is an **external oracle for the disc-audio formats**: TrueHD / DTS-HD MA / AC-3 decode is gated against crête's own recorded values and against the LPCM carrier of the same master, but against nothing outside crête. Not a release blocker.
 
 ### FIX 12 — per-channel DR and album rounding (0.11.3, awaiting re-validation)
 
@@ -537,7 +541,7 @@ main.cpp                  CLI entry point, output formatters, cue-aware grouping
 gui_main.cpp              GUI entry point (Dear ImGui + SDL2 + OpenGL); parallel decode
 crete_theme.hpp           GUI Modernist theme: palette (light/dark), fonts, widgets
 analysis.hpp              TT DR, EBU R128, true peak, PLR/PSR/LRA, crest factor
-audio.hpp                 WAV, AIFF/AIFF-C, FLAC, DSF, DFF decoders + FFmpeg routing
+audio.hpp                 WAV/RF64/BW64/Wave64, AIFF/AIFF-C, FLAC, DSF, DFF decoders + FFmpeg routing
 audio_ffmpeg.hpp          FFmpeg decode backend (guarded by CRETE_HAS_FFMPEG)
 dsd_decode.hpp            DSD decode front-end over libdsddpcm (chain/filter/rate)
 dsd_lut.hpp.bak           Retired LGPL byte-LUT engine (dormant, not built)
