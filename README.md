@@ -596,7 +596,9 @@ v0.15.0 closes two more. **The joint true peak excluded nothing.** `peak_dbfs` (
 
 v0.15.0 also adds **`codec_profile`** (see *Immersive carriers*) and **SACD ISO reading** (see *SACD disc images*) — the format gap a user with a DSD collection hits first.
 
-The one item still genuinely open is an **external oracle for the disc-audio formats**: TrueHD / DTS-HD MA / AC-3 decode is gated against crête's own recorded values and against the LPCM carrier of the same master, but against nothing outside crête. Not a release blocker.
+v0.16.0 adds the **DST decoder**, so SACD multichannel areas measure rather than being refused — see *SACD disc images*. Written from ISO/IEC 14496-3 Subpart 10; lossless, so the numbers are the disc's. It carries its own correctness assertion (every frame must consume its own coded length), which exists because the bug found while writing it satisfied every other plausibility check available: frames parsed, mispredictions looked healthy at 0.75 %, and the output was 1-bit data that decimated to audible sound, while actually being the prediction filter free-running on its own output.
+
+Two items are still genuinely open, neither a release blocker. First, an **external oracle for the disc-audio formats**: TrueHD / DTS-HD MA / AC-3 decode is gated against crête's own recorded values and against the LPCM carrier of the same master, but against nothing outside crête. The same now applies to DST — the check available is that crête on an ISO must equal crête on an external extraction of the same disc, which is a comparison worth running once. Second, **DST speed**: roughly 2× realtime for six channels. All channels share one arithmetic decoder so no parallelism exists inside a frame, but the prediction history is reinitialised per frame, so frames are independent and could be decoded in parallel.
 
 ### FIX 12 — per-channel DR and album rounding (0.11.3, validated)
 
