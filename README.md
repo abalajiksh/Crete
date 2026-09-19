@@ -174,7 +174,7 @@ Since 0.11.0 results stay in the window only by default — writing a log file i
 | RF64 / BW64   | `.wav`, `.rf64`, `.bw64` | 64-bit sizes via `ds64` — the >4 GB escape hatch (EBU Tech 3306 / ITU-R BS.2088). Same payload as WAV |
 | Wave64        | `.w64`             | Sony Wave64: GUID chunk ids and 64-bit sizes. Same payload as WAV       |
 | AIFF / AIFF-C | `.aif`, `.aiff`    | Standard big-endian; AIFF-C uncompressed (`NONE`) and `sowt` little-endian |
-| SACD disc image | `.iso`           | Scarlet Book. Both areas read from the disc TOC; **uncompressed areas only** — see below |
+| SACD disc image | `.iso`           | Scarlet Book. Both areas read from the disc TOC, DSD and DST — see below |
 | FLAC          | `.flac`            | Built-in decoder — no libFLAC dependency                                |
 | DSD (DSF)     | `.dsf`             | Sony format, LSB-first. Decimated via libdsddpcm (default 44.1 kHz, `--dsd-out-rate`) |
 | DSD (DFF)     | `.dff`             | Philips DSDIFF, MSB-first. Same decode engine as DSF                    |
@@ -258,13 +258,28 @@ crete --sacd-area stereo       album.iso
 built on, the layer comparable with every other release of an album, and
 usually the uncompressed one.
 
-**Limitation: DST-compressed areas are not decoded yet.** DST is SACD's
-lossless compression, and multichannel areas commonly use it (on the DSOTM disc
-the stereo area is plain DSD at 1.72 GiB while the 5.1 area is DST at 2.16 GiB,
-against the 5.16 GiB it would need uncompressed). crête refuses such an area by
-name rather than measuring it — DST bytes fed to the DSD path decode to
-something that still looks like a plausible measurement, which is the worst
-possible failure mode for a meter.
+**DST-compressed areas decode too.** DST is SACD's lossless compression, and
+multichannel areas commonly use it — on the DSOTM disc the stereo area is plain
+DSD at 1.72 GiB while the 5.1 area is DST at 2.16 GiB against the 5.16 GiB it
+would need uncompressed. crête carries its own DST decoder (`dst.hpp`, written
+from the ISO/IEC 14496-3 Subpart 10 syntax, zero-dependency like everything
+else), so both areas of a hybrid disc measure through the same libdsddpcm chain
+and nothing downstream can tell which the disc used. DST is lossless, so this is
+not an approximation.
+
+It is not fast: roughly 2× realtime for six channels, because DST interleaves
+all channels through one arithmetic decoder and so cannot be parallelised
+within a frame. A 43-minute 5.1 disc takes about 20 minutes.
+
+**The decoder self-checks, and this matters more than it sounds.** Arithmetic
+coding consumes exactly the bits the encoder produced if and only if the decoder
+applies the same probability sequence, so crête asserts that every frame
+consumes its own coded length. That check exists because a *wrong* DST decoder
+does not announce itself: an early version of this one parsed every frame
+header correctly, reported a plausible 0.75 % misprediction rate, and emitted
+1-bit data at the right density that decimated to something audible — while
+actually producing the prediction filter free-running on its own output. It
+consumed 15 % of each frame. The corrected decoder consumes 100.0 %.
 
 Dispatch is by **content, not extension**: `.iso` names every disc image ever
 made, so crête checks for `SACDMTOC` at LSN 510 and quietly ignores anything
@@ -662,6 +677,7 @@ dsd_lut.hpp.bak           Retired LGPL byte-LUT engine (dormant, not built)
 dsd2wav.cpp               DSD -> WAV exporter (make dsd2wav); mirrors --dsd-* flags
 cue.hpp                   Zero-dependency cue sheet parser
 sacd.hpp                  SACD (Scarlet Book) ISO reader: TOC, areas, tracks, DSD
+dst.hpp                   DST decoder (ISO/IEC 14496-3 Subpart 10), zero-dependency
 file_dialog.hpp           Portable native file/folder dialogs (Linux/macOS/Windows)
 mqa_detect.hpp            MQA identification (forensics; never feeds metrics)
 channels.hpp              Channel layout table: speaker names, LFE, BS.1770 weights

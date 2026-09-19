@@ -1219,18 +1219,7 @@ int main(int argc, char* argv[]) {
             try {
                 sacd::Disc d = sacd::probe(g.audio_path);
                 g.sacd_area = sacd::pick_area(d, g_sacd_area);
-                // read_dsd() refuses a DST area too, but by then a worker has
-                // already printed a progress line for track 1. Check it here
-                // so an undecodable area reports before any work is claimed.
-                if (g.sacd_area.is_dst())
-                    throw std::runtime_error(
-                        "the " + std::string(g.sacd_area.channels == 2 ? "2-channel"
-                                                                       : "multichannel") +
-                        " area is DST-compressed and crete has no DST decoder yet" +
-                        (d.stereo.present && !d.stereo.is_dst()
-                             ? "; this disc's 2-channel area is uncompressed, so "
-                               "--sacd-area stereo works"
-                             : ""));
+
             } catch (const std::exception& e) {
                 std::cerr << "Error: " << fs::path(g.audio_path).filename().string()
                           << ": " << e.what() << "\n";

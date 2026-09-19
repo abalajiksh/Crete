@@ -75,6 +75,8 @@
 #include <string>
 #include <vector>
 
+#include "dst.hpp"
+
 namespace sacd {
 
 static constexpr size_t   SECTOR       = 2048;
@@ -319,17 +321,12 @@ inline const Area& pick_area(const Disc& d, AreaSel sel) {
 // the resulting frame stream into per-channel DSD (MSB-first) ready for
 // dsd::decimate_channel.
 //
-// Throws on a DST area: there is no DST decoder yet. Failing loudly matters
-// more than usual here, because DST bytes fed to the DSD path decode to
-// something that still looks like a measurement.
+// Handles both frame formats. An uncompressed area's frames are copied out
+// directly; a DST area's are handed to dst::Decoder, which returns the same
+// per-channel bytes the uncompressed form would have held -- DST is lossless,
+// so downstream nothing can tell which the disc used.
 inline std::vector<std::vector<uint8_t>>
 read_dsd(Image& img, const Area& area, uint32_t first_lsn, uint32_t n_lsn) {
-    if (area.is_dst())
-        throw std::runtime_error(
-            "SACD: this area is DST-compressed and crete has no DST decoder yet. "
-            "Use --sacd-area stereo if the disc has an uncompressed 2-channel "
-            "area, or extract with an external tool.");
-
     const size_t nch = area.channels;
     const size_t frame = FRAME_BYTES_PER_CH * nch;
 
@@ -342,6 +339,38 @@ read_dsd(Image& img, const Area& area, uint32_t first_lsn, uint32_t n_lsn) {
 
     std::vector<uint8_t> carry;          // partial frame across sector reads
     carry.reserve(frame * 2);
+
+    // DST state. A DST frame is variable length and delimited by the
+    // frame_start flag on its first audio packet, not by a byte count, so it
+    // is accumulated separately from the fixed-size uncompressed path.
+    const bool is_dst = area.is_dst();
+    dst::Decoder dec(static_cast<unsigned>(nch), FRAME_BYTES_PER_CH);
+    std::vector<uint8_t> dstframe;
+    bool dst_started = false;
+    // `final` marks the flush after the last sector, where the accumulated
+    // frame is usually INCOMPLETE: a track's sector range ends where the TOC
+    // says, not on a 1/75 s frame boundary, so the tail is whatever part of
+    // the next frame happened to fit. There is no length field to detect
+    // that with -- but the decoder's bit-consumption check is exactly a
+    // completeness test, since a truncated frame cannot consume its own
+    // coded length. So the last frame is decoded if it decodes and dropped
+    // if it does not, which mirrors the uncompressed path dropping its own
+    // trailing partial frame. Mid-stream failures still propagate.
+    auto flush_dst = [&](bool final_frame) {
+        if (!dst_started || dstframe.empty()) return;
+        try {
+            dec.decode_frame(dstframe.data(), dstframe.size());
+        } catch (const std::exception&) {
+            dstframe.clear();
+            if (final_frame) return;      // truncated tail: drop it
+            throw;
+        }
+        for (size_t c = 0; c < nch; ++c) {
+            const auto& v = dec.channel(static_cast<unsigned>(c));
+            chans[c].insert(chans[c].end(), v.begin(), v.end());
+        }
+        dstframe.clear();
+    };
 
     // Read in chunks rather than a sector at a time: one seek per 512 sectors
     // instead of one per sector is worth an order of magnitude on spinning
@@ -373,13 +402,22 @@ read_dsd(Image& img, const Area& area, uint32_t first_lsn, uint32_t n_lsn) {
 
             for (unsigned p = 0; p < npkt; ++p) {
                 const uint16_t pi = rd16(&sec[1 + 2 * p]);
+                const unsigned fstart = (pi >> 15) & 1;
                 const unsigned dtype = (pi >> 11) & 7;
                 const size_t   plen  = pi & 0x7FF;
                 if (off + plen > SECTOR) break;      // malformed; skip the rest
-                if (dtype == DATA_TYPE_AUDIO)
-                    carry.insert(carry.end(), sec + off, sec + off + plen);
+                if (dtype == DATA_TYPE_AUDIO) {
+                    if (is_dst) {
+                        if (fstart) { flush_dst(false); dst_started = true; }
+                        if (dst_started)
+                            dstframe.insert(dstframe.end(), sec + off, sec + off + plen);
+                    } else {
+                        carry.insert(carry.end(), sec + off, sec + off + plen);
+                    }
+                }
                 off += plen;
             }
+            if (is_dst) continue;
 
             // Drain whole frames out of the carry buffer, de-blocking each
             // into its per-channel run.
@@ -402,6 +440,8 @@ read_dsd(Image& img, const Area& area, uint32_t first_lsn, uint32_t n_lsn) {
                                  carry.begin() + static_cast<std::ptrdiff_t>(pos));
         }
     }
+    // The final DST frame has no following frame_start to flush it.
+    flush_dst(true);
     // A trailing partial frame is dropped: it is less than 1/75 s and cannot
     // be split across channels without inventing data.
     return chans;
