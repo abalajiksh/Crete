@@ -46,6 +46,21 @@ struct AudioData {
     int stream_index        = -1;
     int audio_stream_count  = 1;
 
+    // The codec's own profile string, where the bitstream carries one --
+    // "Dolby TrueHD + Dolby Atmos", "Dolby Digital Plus + Dolby Atmos",
+    // "DTS-HD MA", "DTS-X". Empty for every native decode and for any codec
+    // whose stream declares no profile.
+    //
+    // This is IDENTIFICATION, not decode. FFmpeg has no Atmos or DTS:X
+    // renderer: it decodes the underlying BED (TrueHD 7.1, or the E-AC-3 5.1
+    // core for JOC) and discards the object metadata. So crete's numbers for
+    // such a file are the bed's numbers, which is a real and complete
+    // measurement of what a non-immersive playback chain delivers -- but an
+    // unqualified "crete measures Atmos" would be false, and that is exactly
+    // what this field exists to prevent. Same precedent as mqa_detect.hpp:
+    // measure the delivered stream, name the premium layer separately.
+    std::string codec_profile;
+
     size_t num_channels() const { return channels.size(); }
     size_t num_samples()  const { return channels.empty() ? 0 : channels[0].size(); }
 };
@@ -1143,6 +1158,32 @@ inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream);
 
 // Formats crête decodes natively. These are the validated paths (vs MAAT for
 // PCM; vs foobar's chosen DSD mode for DSD) and must NEVER be routed to FFmpeg.
+// ── Immersive (object-based) carriers ──────────────────────────────────────
+// Does this profile string name a format whose objects FFmpeg does NOT
+// render? Atmos (over TrueHD or E-AC-3 JOC) and DTS:X both decode to their
+// channel BED with the object metadata discarded, so a layout reported for
+// such a file describes the bed and must say so. A plain "DTS-HD MA" or
+// "DTS Express" profile is NOT this: it is lossless/lossy channel audio with
+// nothing unrendered, and gets no qualifier.
+//
+// Substring matching on FFmpeg's own profile table entries, which are fixed
+// strings in libavcodec: "Dolby TrueHD + Dolby Atmos", "Dolby Digital Plus +
+// Dolby Atmos", "DTS-HD MA + DTS:X", "DTS-HD MA + DTS:X IMAX".
+inline bool profile_is_immersive(const std::string& profile) {
+    auto has = [&](const char* needle) {
+        return profile.find(needle) != std::string::npos;
+    };
+    return has("Atmos") || has("DTS:X") || has("DTS-X");
+}
+
+// The one-line qualifier to hang off a layout, or empty when none is needed.
+inline std::string layout_qualifier(const std::string& profile) {
+    if (!profile_is_immersive(profile)) return {};
+    return profile.find("DTS") != std::string::npos
+         ? "DTS:X objects not rendered"
+         : "Atmos objects not rendered";
+}
+
 inline bool is_native_format(const std::string& ext) {
     // .rf64/.bw64/.w64 are listed so a directory scan picks them up, but the
     // decoder dispatches on the file's MAGIC rather than its name: an RF64

@@ -18,10 +18,20 @@
 #
 # NOTE ON OBJECT AUDIO: FFmpeg has no Atmos/DTS:X renderer. It decodes the
 # channel BED only (TrueHD 7.1, E-AC-3 5.1 for JOC) and discards the object
-# metadata. It does, however, report the carrier in AVCodecContext::profile
-# ("Dolby TrueHD + Dolby Atmos", "Dolby Digital Plus + Dolby Atmos"), so the
-# caller can label what was actually measured. Never present a bed measurement
-# as an Atmos measurement.
+# metadata. It does report the carrier in AVCodecContext::profile as an
+# integer, so the caller can label what was actually measured. Never present a
+# bed measurement as an Atmos measurement.
+#
+# BUT: --enable-small below makes NULL_IF_CONFIG_SMALL(ff_truehd_profiles) and
+# its siblings expand to NULL, so av_get_profile_name() returns NULL for EVERY
+# codec in THIS build -- including DTS-HD MA, which a full ffprobe names
+# without trouble. Measured 2026-09-19 on all six DSOTM Blu-ray carriers: 6/6
+# empty. The profile NUMBER survives; only the name TABLE is compiled out. So
+# crete carries its own AV_PROFILE_* -> string table in audio_ffmpeg.hpp rather
+# than dropping --enable-small (which would grow every agent's cached build and
+# invalidate the crete-ffmpeg-build.id stamp for no measurement benefit).
+# If you ever remove --enable-small, that table becomes dead but harmless:
+# av_get_profile_name() is tried first and wins when it works.
 #
 # Usage:
 #   ./scripts/build_ffmpeg_compact.sh [VERSION] [PREFIX]

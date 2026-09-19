@@ -24,6 +24,37 @@ Three CLI build tiers, one GUI:
 | `make gui` | `crete-gui` | SDL2, OpenGL, Dear ImGui | drag-and-drop GUI |
 | `make gui-ffmpeg` | `crete-gui-ffmpeg` | SDL2 + compact static FFmpeg | GUI with ALAC / MP3 / AAC / Opus decode |
 
+### First time on a new machine
+
+```bash
+make setup-deps-check                 # report what's missing, change nothing
+make setup-deps                       # install it
+```
+
+`scripts/setup-deps.sh` (macOS and Linux — bash 3.2 compatible, so it also runs
+under zsh) and `scripts/setup-deps.ps1` (Windows, via MSYS2) install the
+toolchain for whichever tiers you ask for: `--tier cli|json|ffmpeg|gui|cross`,
+default all but `cross`. They check by **capability**, not by package name, so a
+compiler you built yourself or an SDL2 from another package still counts; they
+print every command before running it, support `--check` and `--dry-run`, and
+never install something already present. Package managers covered: Homebrew,
+dnf, apt, pacman, zypper, and MSYS2's pacman.
+
+Two things they check that are easy to get wrong:
+
+- **nasm on x86.** `build_ffmpeg_compact.sh` does not pass `--disable-x86asm`,
+  so FFmpeg's configure *errors out* on x86_64 without an assembler — as a deep,
+  confusing build failure rather than a clear missing-dependency message.
+  Irrelevant on aarch64.
+- **The MinGW threading model on Windows.** The `win32` model ships a libstdc++
+  with no `std::thread` at all, and crête's parallel per-file decode is its
+  default path, so such a build links cleanly and then dies on the first album.
+  The `posix` model works with zero source changes.
+
+The setup scripts install the *toolchain*; `make setup-imgui`, `make
+setup-nlohmann` and `make setup-ffmpeg` fetch the *sources* crête vendors
+(`setup-deps.sh --fetch` will run those too).
+
 ### CLI (zero dependencies)
 
 ```bash
@@ -310,7 +341,7 @@ K-weighting (BS.1770-4) implemented via hardcoded biquad coefficients from libeb
 
 ### True peak
 
-4× polyphase FIR (12 taps per phase) per channel; joint result is the max across channels.
+4× polyphase FIR (12 taps per phase) per channel; the joint result is the max across the **scored** channels — so on a multichannel layout the LFE is excluded by default, exactly as it is from the joint sample peak, and `--dr-lfe include` moves both together. Up to v0.14.0 the joint true peak alone had no such guard, which on a file whose LFE was its loudest channel produced a true peak far above the sample peak for reasons that had nothing to do with inter-sample overshoot (see *Pending work*).
 
 The result is clamped to be **≥ the sample peak**, which BS.1770 requires by definition (the reconstructed continuous waveform passes through every sample). The interpolation FIR is designed for audio-band content and attenuates energy near Nyquist, so without the clamp the oversampled peak can land *below* the sample peak on signals with heavy ultrasonic content. This never occurs on PCM or on DSD Direct; it does occur on **DSD Multistage**, whose 80-tap `fir1_8` leaves enough of DSD's shaped noise floor in place to trigger it (5 violations on I Robot, worst −0.143 dB). The clamp is a no-op wherever TP ≥ SP already, so the EBU 3341 true-peak battery is unaffected.
 
@@ -353,6 +384,46 @@ place of it:
 The LFE is measured in full — its own peak, RMS and DR are reported (bracketed in
 `-f detail`, `scored: false` in JSON) — and scored in nothing. Joint peak, overall RMS and
 the 3 s block gate likewise run over the scored channels only.
+
+### Immersive carriers — Atmos, DTS:X, Auro-3D
+
+**crête measures the channel bed, and since v0.14.1 it says so.** FFmpeg has no Atmos or
+DTS:X renderer: given a Dolby Atmos stream it decodes the underlying TrueHD 7.1 bed (or the
+E-AC-3 5.1 core, for JOC) and discards the object metadata; DTS:X has the same shape over a
+DTS-HD MA core. That is a real and complete measurement of what a non-immersive playback
+chain actually delivers — it is what your receiver plays if it is not an Atmos receiver —
+but an unqualified "crête measures Atmos" would be false, so the profile is reported
+separately from the layout:
+
+```
+Format:              TRUEHD 24-bit / 48000 Hz
+Profile:             Dolby TrueHD + Dolby Atmos
+Layout:              7.1 · L R C LFE Lss Rss Lrs Rrs  [bed -- Atmos objects not rendered]
+```
+
+JSON carries `codec_profile` and a boolean `immersive_bed`. The profile comes from the
+bitstream itself (`AVCodecContext::profile`), so this costs no parsing of MLP substreams or
+`dec3` boxes — but it does need the raised probe crête already applies: at FFmpeg's default
+5 MB probe a TrueHD stream interleaved among five others reports `profile=unknown`.
+
+This is **identification, not decode**, and it follows the precedent `mqa_detect.hpp`
+already set for MQA: measure the delivered stream deterministically, name the premium layer
+separately from authoritative bitstream fields, and never imply the premium layer was
+rendered. The field is descriptive — **no measured value depends on it**. It appears only in
+`crete-ffmpeg` builds, since the zero-dependency binary cannot decode these codecs at all.
+
+A non-immersive profile such as `DTS-HD MA` is reported too, without the bed qualifier:
+there is nothing unrendered about it.
+
+**Auro-3D is not detectable this way**, and is not attempted. FFmpeg reports an Auro carrier
+as plain DTS-HD MA; on the one disc measured here "Auro-3D 9.1" was only a container title
+tag, with the height channels buried in the carrier's low bits. That signature is real — on
+a solo-piano recording whose LFE is otherwise digitally silent, the Auro carrier's LFE held
+803 853 non-zero samples in ±24 (5 bits of payload) against the DTS:X carrier's exact zero —
+but reading it is inference, so if it is ever built it belongs in the confidence-scored
+`forensics` namespace, gated off, never in `metrics`. Worth knowing meanwhile: such a carrier
+reads as ~19 effective bits and is useless for noise-floor or bit-depth forensics, while DR
+and loudness are untouched (−116 dB is nowhere near a 3 s block).
 
 ### PLR / PSR / LRA / crest factor
 
@@ -467,18 +538,22 @@ Three further items closed in 0.13.1:
 
 v0.14.0 adds **RF64 / BW64 / Wave64**, closing the 4 GB ceiling on plain RIFF — not an exotic limit for this tool's own material, since a 43-minute 5.1 96 kHz/24 LPCM extract is 4.47 GB. All three containers share one payload decoder, and RF64/Wave64 renders of the same audio measure **identically** to plain WAV (verified on 24-bit integer and 32-bit float, 6 channels; the `ds64` 64-bit `dataSize` is proven to be honoured by a file carrying a chunk *after* `data`, which a naive "read to end of buffer" would swallow — control: doing so moves duration 20 s → 21 s and DR 12.28 → −9.21). It also fixes a reachable crash the rewrite exposed: a truncated WAV — an interrupted recording or a partial copy, declaring more data than it holds — read past the end of the buffer and **segfaulted** (0.13.1 on a half-copied file: exit 139, no output at all). All three walkers now clamp to the bytes actually present and report the audio that is there. **Not yet exercised end to end above 4 GB**: this host has 18 GB of RAM and 19 GB free, and crête loads the whole file before decoding, so a genuine >4 GB decode needs a bigger machine. The 64-bit size *path* is exercised; the >4 GB *allocation* is not.
 
-As of 0.14.0 the one item still genuinely open is an **external oracle for the disc-audio formats**: TrueHD / DTS-HD MA / AC-3 decode is gated against crête's own recorded values and against the LPCM carrier of the same master, but against nothing outside crête. Not a release blocker.
+v0.14.1 closes two more. **The joint true peak excluded nothing.** `peak_dbfs` (the joint *sample* peak) has skipped unscored channels since v0.12.0, but the loop computing `max_true_peak_dbtp` had no such guard, so on a multichannel file the two were measured over different channel sets and `--dr-lfe` reached one of them and not the other. True peak is ≥ sample peak by definition and the excess is inter-sample overshoot — a few tenths of a dB — so a file whose LFE is its loudest channel produced an uninterpretable reading, and `plr_db` inherited it, mixing an LFE-inclusive numerator with an LFE-excluded denominator. On a synthetic 5.1 with every channel at −20 dBFS and the LFE at −3, sample peak −20.000 was reported against a true peak of **−2.986**: a 17.01 dB gap, all of it the LFE. It never surfaced on the corpus because the LFE has to be the loudest channel and there it never is (real DSOTM 5.1: LFE −11.14, L −1.67). The joint true peak now takes the scored channels, matching the sample peak and honouring `--dr-lfe`; the same synthetic reads −19.992, i.e. 0.008 dB of genuine overshoot. Two invariants were measured on all six carriers of the DSOTM Blu-ray, whole-JSON: **`--dr-lfe include` on 0.14.1 reproduces `--dr-lfe include` on 0.14.0 exactly** (the old behaviour was unconditional inclusion, so that is the bit-identical path), and **at the default setting nothing moved either** — because in this corpus the LFE is never the loudest channel, so the guard is a no-op on every real file we hold and bites only where an LFE actually dominates. Mono and stereo have no LFE and are unaffected by construction, and no MAAT-referenced value moves: MAAT reads at most two channels, so every referenced `Max. TPL` row is stereo/mono or per-channel.
 
-### FIX 12 — per-channel DR and album rounding (0.11.3, awaiting re-validation)
+v0.14.1 also adds **`codec_profile`** — see *Immersive carriers* below.
+
+The one item still genuinely open is an **external oracle for the disc-audio formats**: TrueHD / DTS-HD MA / AC-3 decode is gated against crête's own recorded values and against the LPCM carrier of the same master, but against nothing outside crête. Not a release blocker.
+
+### FIX 12 — per-channel DR and album rounding (0.11.3, validated)
 
 Weekly #53 passed 141/141 with no catastrophic breach, but the DR deltas underneath exposed two real defects, both now fixed:
 
 - **Per-channel DR shared a single joint RMS across channels**, so `DR LEFT` and `DR RIGHT` could differ only through the peak term. The error cancelled in the mean — mean-of-L/R matched MAAT to a **0.01 dB median** — but split wrongly per channel (up to **2.37 dB**, spread often opposite in sign), and collapsed to `DR LEFT == DR RIGHT` bit-identically whenever both channels shared a 2nd-highest block peak. Each channel now uses its own top-20% RMS, per the TT DR / PMF definition. Block set, gate and top-20% count are unchanged.
 - **Album DR rounded twice** (`round(mean(round(track_dr)))`), which desynchronised the album score from MAAT even when every individual track matched. It now averages the raw per-track DR and rounds once.
 
-Both are covered by `scripts/check_fix12.sh`, a zero-dependency synthetic self-check with analytically known truth (no corpus required). **The full corpus has not yet been re-measured against these fixes** — treat the per-channel DR reference rows as pending until the next weekly reports.
+Both are covered by `scripts/check_fix12.sh`, a zero-dependency synthetic self-check with analytically known truth (no corpus required). **The corpus has since confirmed both.** Weekly #54 collapsed the per-channel DR flags from **83 → 8** (LEFT) and **77 → 5** (RIGHT), with qualification, mqa, dsd256 and dsd512 all reaching zero; the error this was measuring directly — crête's L−R spread against MAAT's — fell to a **median of 0.000 dB** (max 0.29), against pre-fix errors of up to 3.4 dB with the sign frequently inverted. Where crête still reports L == R, MAAT reports L == R too. Album mismatches went 3 → 2. Two later averaging and block-set corrections (v0.12.x `--dr-mean quadratic`, v0.14.0 `--dr-blocks reference`) have since improved per-channel DR by a further 27–38 % and then 33 %, so the numbers below are the *starting* point of that sequence, not the current state.
 
-Note: joint DR is the mean of the per-channel values, so correcting the RMS term shifts joint DR slightly **upward** on channel-asymmetric material (zero shift when L and R carry equal energy). This is the PMF definition, but it is the opposite direction from the residual integer-DR bias, and the corpus run is what settles it.
+Note: joint DR is the mean of the per-channel values, so correcting the RMS term shifts joint DR slightly **upward** on channel-asymmetric material (zero shift when L and R carry equal energy). This is the PMF definition, and it is the opposite direction from the residual integer-DR bias that was open at the time — in the event joint DR improved rather than drifting, and the bias was closed separately by the quadratic mean (net signed bias +9 → 0 over integer DR mismatches, Weekly #56).
 
 ### DSD output-rate parity — 44.1 kHz is the parity-guaranteed rate
 
@@ -548,8 +623,13 @@ dsd_lut.hpp.bak           Retired LGPL byte-LUT engine (dormant, not built)
 dsd2wav.cpp               DSD -> WAV exporter (make dsd2wav); mirrors --dsd-* flags
 cue.hpp                   Zero-dependency cue sheet parser
 file_dialog.hpp           Portable native file/folder dialogs (Linux/macOS/Windows)
+mqa_detect.hpp            MQA identification (forensics; never feeds metrics)
+channels.hpp              Channel layout table: speaker names, LFE, BS.1770 weights
 Makefile                  Build system (cli / cli-json / cli-json-ffmpeg / gui / dsd2wav)
-build_ffmpeg_compact.sh   One-time compact static FFmpeg build (LGPL-only, decode-only)
+scripts/setup-deps.sh     Install build dependencies (macOS + Linux; also runs under zsh)
+scripts/setup-deps.ps1    Install build dependencies (Windows, via MSYS2)
+scripts/build_ffmpeg_compact.sh  One-time compact static FFmpeg (LGPL-only, decode-only)
+scripts/check_fix12.sh    Corpus-free synthetic DR self-check
 third_party/libdsddpcm/   Vendored BSD-2-Clause DSD decode kernel (committed, compiled in)
 third_party/              Dear ImGui, nlohmann/json, compact FFmpeg (fetched on demand)
 ```

@@ -188,6 +188,62 @@ inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream = -
         for (auto& ch : name) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
         ad.codec = name;  // e.g. ALAC / AAC / MP3 / OPUS — signals FFmpeg origin
     }
+    // ── Profile: which premium layer this stream declares ───────────────
+    // The whole cost of identifying Atmos and DTS:X -- no MLP substream
+    // parser, no dec3 box reader -- because AVCodecContext::profile carries
+    // it for both carriers. It NEEDS the raised probesize above: at FFmpeg's
+    // default 5 MB probe a TrueHD stream interleaved among five others
+    // reports profile=unknown.
+    //
+    // av_get_profile_name() is tried FIRST and is expected to fail here.
+    // crete's vendored FFmpeg is configured --enable-small, which makes
+    // NULL_IF_CONFIG_SMALL(ff_truehd_profiles) expand to NULL, so every
+    // decoder in the compact build has codec->profiles == NULL and the
+    // lookup returns NULL for every stream -- including DTS-HD MA, which
+    // the system ffprobe names without trouble. Measured 2026-09-19 on all
+    // six DSOTM Blu-ray carriers: 6/6 empty through av_get_profile_name,
+    // 6/6 correct through the table below. The earlier note that "detection
+    // costs nothing, profile carries it" was verified against a full
+    // ffprobe, not against the build crete actually links.
+    //
+    // The profile NUMBER survives --enable-small (it is a plain int on the
+    // context); only the name TABLE is compiled out. So crete names it
+    // itself. These AV_PROFILE_* values are public ABI constants from
+    // libavcodec/defs.h, and the strings match FFmpeg's own so anything
+    // grepping crete's output against ffprobe's still matches. Keeping the
+    // av_get_profile_name() call first means a crete linked against a full
+    // FFmpeg picks up profiles for codecs this table does not list.
+    if (const char* prof = av_get_profile_name(dec, ctx->profile)) {
+        ad.codec_profile = prof;
+    } else if (ctx->profile != AV_PROFILE_UNKNOWN) {
+        const char* name = nullptr;
+        switch (ctx->codec_id) {
+            case AV_CODEC_ID_TRUEHD:
+            case AV_CODEC_ID_MLP:
+                if (ctx->profile == AV_PROFILE_TRUEHD_ATMOS)
+                    name = "Dolby TrueHD + Dolby Atmos";
+                break;
+            case AV_CODEC_ID_EAC3:
+                if (ctx->profile == AV_PROFILE_EAC3_DDP_ATMOS)
+                    name = "Dolby Digital Plus + Dolby Atmos";
+                break;
+            case AV_CODEC_ID_DTS:
+                switch (ctx->profile) {
+                    case AV_PROFILE_DTS:               name = "DTS";            break;
+                    case AV_PROFILE_DTS_ES:            name = "DTS-ES";         break;
+                    case AV_PROFILE_DTS_96_24:         name = "DTS 96/24";      break;
+                    case AV_PROFILE_DTS_HD_HRA:        name = "DTS-HD HRA";     break;
+                    case AV_PROFILE_DTS_HD_MA:         name = "DTS-HD MA";      break;
+                    case AV_PROFILE_DTS_EXPRESS:       name = "DTS Express";    break;
+                    case AV_PROFILE_DTS_HD_MA_X:       name = "DTS-HD MA + DTS:X";      break;
+                    case AV_PROFILE_DTS_HD_MA_X_IMAX:  name = "DTS-HD MA + DTS:X IMAX"; break;
+                    default: break;
+                }
+                break;
+            default: break;
+        }
+        if (name) ad.codec_profile = name;
+    }
     ad.sample_rate = static_cast<uint32_t>(in_rate);
     // Lossy codecs have no PCM "bit depth"; bits_per_raw_sample is 0 there.
     ad.bit_depth = (ctx->bits_per_raw_sample > 0)

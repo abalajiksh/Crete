@@ -47,7 +47,7 @@ extern "C" {
 namespace fs = std::filesystem;
 
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.14.0"
+#define CRETE_VERSION "0.14.1"
 #endif
 static constexpr const char* PROGRAM_NAME    = "crête";
 static constexpr const char* PROGRAM_VERSION = CRETE_VERSION;
@@ -330,6 +330,7 @@ static void analysis_worker(AppState* app) {
                                              app->active_lfe);
                 slots[i].mqa = mqa::analyze_pcm(ad.channels, ad.sample_rate,
                                                 ad.bit_depth);
+                slots[i].codec_profile = ad.codec_profile;
                 ok[i] = 1;
             } catch (const std::exception& e) {
                 std::lock_guard<std::mutex> lk(app->mtx);
@@ -703,6 +704,22 @@ static void detail_panel(AppState& app) {
     ImGui::TextDisabled("%02d · %s · %s %u-bit / %u Hz · %s",
         app.selected_track+1, chan::layout_short(t.channels).c_str(), t.codec.c_str(),
         t.bit_depth, t.sample_rate, format_duration(t.duration_secs).c_str());
+
+    // Profile, where the stream declares one. For an immersive carrier this is
+    // the only thing on screen saying the numbers describe the channel BED:
+    // FFmpeg decodes the TrueHD 7.1 / E-AC-3 5.1 bed and discards the object
+    // metadata, so the layout above is real but incomplete without this line.
+    if (!t.codec_profile.empty()) {
+        const std::string q = audio::layout_qualifier(t.codec_profile);
+        if (q.empty()) {
+            ImGui::TextDisabled("%s", t.codec_profile.c_str());
+        } else {
+            theme::Tag(t.codec_profile.c_str(), theme::P().accentSoft,
+                       theme::P().accent);
+            ImGui::TextDisabled("Measured as the %s bed — %s.",
+                                chan::layout_short(t.channels).c_str(), q.c_str());
+        }
+    }
 
     // MQA warning — a listener measuring DR is entitled to know the source is
     // lossy MQA, not lossless. Deterministic datasync only (see mqa_detect.hpp).

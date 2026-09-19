@@ -214,6 +214,11 @@ struct TrackResult {
     uint32_t    bit_depth      = 0;
     uint64_t    total_samples  = 0;
     std::string codec;
+    // FFmpeg's profile string for this stream, where one is declared --
+    // "Dolby TrueHD + Dolby Atmos", "DTS-HD MA", "DTS-X". Empty on every
+    // native decode. Descriptive only: no measured value depends on it, and
+    // the numbers are the BED's, not the immersive presentation's.
+    std::string codec_profile;
     double      duration_secs  = 0.0;
 
     int         dr_score       = 0;
@@ -240,7 +245,9 @@ struct TrackResult {
 
     std::vector<ChannelMetrics> ch_metrics;
 
-    // Joint true peak (4x oversampled, max across channels) — dBTP scale
+    // Joint true peak (4x oversampled, max across the SCORED channels, so
+    // the LFE is excluded under the default --dr-lfe exclude exactly as it
+    // is from peak_dbfs) — dBTP scale
     double      max_true_peak_dbtp = SILENCE_FLOOR_DB;
 
     double      max_momentary_lufs  = LUFS_FLOOR;
@@ -919,7 +926,21 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
         // TP >= SP already, so the EBU 3341 true-peak battery is unaffected.
         double tp = std::max(compute_true_peak(samp.data(), n), sp);
         cm.true_peak_dbtp = to_dbfs(tp);
-        if (tp > joint_tp) joint_tp = tp;
+        // The JOINT true peak takes the scored channels only, matching
+        // peak_dbfs (compute_tt_dr's track_peak, which skips unscored()) and
+        // honouring --dr-lfe through cm.scored rather than re-deriving the
+        // policy here.  Until v0.14.1 this loop had no guard at all, so
+        // max_true_peak_dbtp was a max over EVERY channel while peak_dbfs
+        // excluded the LFE: on a 5.1 master whose LFE is the loudest channel
+        // the two disagreed by far more than inter-sample overshoot can
+        // explain (synthetic 5.1, all channels -20 dBFS and LFE at -3:
+        // peak_dbfs -20.000 against max_true_peak -2.986), and plr_db
+        // inherited it, mixing an LFE-inclusive numerator with an
+        // LFE-excluded denominator.  Invisible on the corpus because the LFE
+        // is never the loudest channel there (real DSOTM 5.1: LFE -11.14,
+        // L -1.67, so the joint peak came from L either way).  Mono and
+        // stereo have no LFE, so this is a no-op for them by construction.
+        if (cm.scored && tp > joint_tp) joint_tp = tp;
         double ch_rms = rms_of(samp.data(), n) * std::sqrt(ch_power_scale);
         cm.rms_dbfs = to_dbfs(ch_rms);
         cm.dr_raw   = tt.dr_per_ch[c];

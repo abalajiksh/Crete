@@ -49,7 +49,7 @@ extern "C" {
 
 // ── Version info ───────────────────────────────────────────────────────────
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.14.0"
+#define CRETE_VERSION "0.14.1"
 #endif
 
 static constexpr const char* PROGRAM_NAME    = "crête";
@@ -593,8 +593,16 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
 
         std::printf("  Format:              %s %u-bit / %u Hz\n",
                     t.codec.c_str(), t.bit_depth, t.sample_rate);
-        std::printf("  Layout:              %s\n",
-                    chan::layout_detail(t.channels).c_str());
+        if (!t.codec_profile.empty())
+            std::printf("  Profile:             %s\n", t.codec_profile.c_str());
+        {
+            // An immersive carrier is measured as its channel bed -- FFmpeg has
+            // no Atmos or DTS:X renderer -- so the layout says which it is.
+            const std::string q = audio::layout_qualifier(t.codec_profile);
+            std::string line = chan::layout_detail(t.channels);
+            if (!q.empty()) line += "  [bed -- " + q + "]";
+            std::printf("  Layout:              %s\n", line.c_str());
+        }
         std::printf("  Duration:            %s\n\n",
                     format_duration(t.duration_secs).c_str());
 
@@ -705,6 +713,11 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
                   << " (" << chan::layout_detail(first.channels) << ")\n";
         std::cout << "Bits per sample:   " << first.bit_depth << "\n";
         std::cout << "Codec:             " << first.codec << "\n";
+        if (!first.codec_profile.empty())
+            std::cout << "Profile:           " << first.codec_profile
+                      << (audio::profile_is_immersive(first.codec_profile)
+                              ? "  [measured as the channel bed]" : "")
+                      << "\n";
         if (first.audio_stream_count > 1)
             std::cout << "Audio stream:      " << first.stream_index
                       << " of " << first.audio_stream_count
@@ -796,6 +809,10 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         j["loudness_summing"] = chan::loudness_mode(first.channels);
         j["bit_depth"] = first.bit_depth;
         j["codec"] = first.codec;
+        if (!first.codec_profile.empty()) {
+            j["codec_profile"] = first.codec_profile;
+            j["immersive_bed"] = audio::profile_is_immersive(first.codec_profile);
+        }
         j["dr_rms_mean"] = dr::rms_mean_name(g_rms_mean);
         j["dr_blocks"]   = dr::block_set_name(g_dr_blocks);
         j["dr_lfe"]      = dr::lfe_scoring_name(g_lfe);
@@ -816,6 +833,10 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         json jt;
         jt["filename"] = t.filename;
         jt["codec"] = t.codec;
+        if (!t.codec_profile.empty()) {
+            jt["codec_profile"] = t.codec_profile;
+            jt["immersive_bed"] = audio::profile_is_immersive(t.codec_profile);
+        }
         jt["sample_rate"] = t.sample_rate;
         jt["bit_depth"] = t.bit_depth;
         jt["channels"] = t.channels;
@@ -1207,6 +1228,7 @@ int main(int argc, char* argv[]) {
                     slots[gi].back().mqa = minfo;
                     slots[gi].back().stream_index       = ad.stream_index;
                     slots[gi].back().audio_stream_count = ad.audio_stream_count;
+                    slots[gi].back().codec_profile      = ad.codec_profile;
                 } else {
                     size_t total_samples = ad.channels.empty()
                                            ? 0 : ad.channels[0].size();
@@ -1254,6 +1276,7 @@ int main(int argc, char* argv[]) {
                         slots[gi].back().mqa = minfo;
                     slots[gi].back().stream_index       = ad.stream_index;
                     slots[gi].back().audio_stream_count = ad.audio_stream_count;
+                    slots[gi].back().codec_profile      = ad.codec_profile;
                     }
                 }
             } catch (const std::exception& e) {
