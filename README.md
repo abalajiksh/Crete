@@ -174,6 +174,7 @@ Since 0.11.0 results stay in the window only by default — writing a log file i
 | RF64 / BW64   | `.wav`, `.rf64`, `.bw64` | 64-bit sizes via `ds64` — the >4 GB escape hatch (EBU Tech 3306 / ITU-R BS.2088). Same payload as WAV |
 | Wave64        | `.w64`             | Sony Wave64: GUID chunk ids and 64-bit sizes. Same payload as WAV       |
 | AIFF / AIFF-C | `.aif`, `.aiff`    | Standard big-endian; AIFF-C uncompressed (`NONE`) and `sowt` little-endian |
+| SACD disc image | `.iso`           | Scarlet Book. Both areas read from the disc TOC; **uncompressed areas only** — see below |
 | FLAC          | `.flac`            | Built-in decoder — no libFLAC dependency                                |
 | DSD (DSF)     | `.dsf`             | Sony format, LSB-first. Decimated via libdsddpcm (default 44.1 kHz, `--dsd-out-rate`) |
 | DSD (DFF)     | `.dff`             | Philips DSDIFF, MSB-first. Same decode engine as DSF                    |
@@ -230,6 +231,44 @@ foobar2000's DR Meter chooses the other way. `--dr-lfe include` (GUI: **Settings
 | `--dr-lfe include` | 11.8606 | 6 | LFE |
 
 It affects **TT DR only**: the DR mean, the joint sample peak and overall RMS behind it, the 3 s block gate and `worst_channel`. Integrated loudness, Max M/S, LRA and Min. PSR do not move at all — BS.1770 weights the LFE at zero by ITU-R BS.1770-4, which is a standard rather than a preference. Mono and stereo have no LFE, so the option is a no-op there and no stereo measurement can change.
+
+### SACD disc images
+
+SACD rips circulate overwhelmingly as `.iso`, so crête reads them directly
+rather than requiring an external extraction to `.dsf`/`.dff` first. The disc's
+own TOC supplies the track list, and each track is decoded from its own sector
+range through the **same libdsddpcm chain** every `.dsf` and `.dff` goes
+through — so `--dsd-mode`, `--dsd-filter` and `--dsd-out-rate` all apply, and
+crête on an ISO must agree with crête on an extracted `.dsf` of the same disc.
+That is a crête-vs-crête gate needing no external oracle, and it is how this
+reader was validated: on the 2018 DSOTM SACD every one of the 10 track
+durations matches the published running order, and *The Great Gig in the Sky*
+returns peak **−5.489** / RMS **−19.753** against the **−5.49 / −19.75**
+recorded earlier from a `.dsf` rip of the same album.
+
+A disc may carry a 2-channel area, a multichannel area, or both:
+
+```bash
+crete album.iso                                 # auto: prefer the 2-channel area
+crete --sacd-area multichannel album.iso        # the 5.1 area
+crete --sacd-area stereo       album.iso
+```
+
+`auto` prefers stereo deliberately — it is the layer crête's DR references are
+built on, the layer comparable with every other release of an album, and
+usually the uncompressed one.
+
+**Limitation: DST-compressed areas are not decoded yet.** DST is SACD's
+lossless compression, and multichannel areas commonly use it (on the DSOTM disc
+the stereo area is plain DSD at 1.72 GiB while the 5.1 area is DST at 2.16 GiB,
+against the 5.16 GiB it would need uncompressed). crête refuses such an area by
+name rather than measuring it — DST bytes fed to the DSD path decode to
+something that still looks like a plausible measurement, which is the worst
+possible failure mode for a meter.
+
+Dispatch is by **content, not extension**: `.iso` names every disc image ever
+made, so crête checks for `SACDMTOC` at LSN 510 and quietly ignores anything
+else rather than trying to meter a data DVD.
 
 ### Cue sheet support
 
@@ -622,6 +661,7 @@ dsd_decode.hpp            DSD decode front-end over libdsddpcm (chain/filter/rat
 dsd_lut.hpp.bak           Retired LGPL byte-LUT engine (dormant, not built)
 dsd2wav.cpp               DSD -> WAV exporter (make dsd2wav); mirrors --dsd-* flags
 cue.hpp                   Zero-dependency cue sheet parser
+sacd.hpp                  SACD (Scarlet Book) ISO reader: TOC, areas, tracks, DSD
 file_dialog.hpp           Portable native file/folder dialogs (Linux/macOS/Windows)
 mqa_detect.hpp            MQA identification (forensics; never feeds metrics)
 channels.hpp              Channel layout table: speaker names, LFE, BS.1770 weights

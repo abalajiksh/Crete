@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "dsd_decode.hpp"
+#include "sacd.hpp"
 
 namespace audio {
 
@@ -1184,6 +1185,14 @@ inline std::string layout_qualifier(const std::string& profile) {
          : "Atmos objects not rendered";
 }
 
+// Disc images. Kept OUT of is_native_format(): the extension says nothing --
+// .iso is every disc image ever made -- so acceptance is decided by content,
+// via sacd::looks_like_sacd_iso(). This predicate exists only so a directory
+// scan considers the file at all.
+inline bool is_disc_image_format(const std::string& ext) {
+    return ext == ".iso";
+}
+
 inline bool is_native_format(const std::string& ext) {
     // .rf64/.bw64/.w64 are listed so a directory scan picks them up, but the
     // decoder dispatches on the file's MAGIC rather than its name: an RF64
@@ -1229,6 +1238,47 @@ inline bool is_supported_format(const std::string& path) {
 // choose". Only meaningful for the FFmpeg-routed container formats; the native
 // decoders each read a file that holds exactly one stream, so asking for a
 // specific index there is a user error rather than a silent no-op.
+// One track of an SACD area, decoded through the SAME libdsddpcm chain every
+// .dsf and .dff goes through -- which is what makes "crete on the ISO" and
+// "crete on a sacd_extract'ed .dsf of the same disc" a valid crete-vs-crete
+// gate needing no external oracle.
+//
+// Takes an open Image so a 10-track album does not reopen and re-probe the
+// disc ten times, and decodes ONE track rather than the whole area: the
+// stereo area of a 43-minute disc is 1.8 GB of f64 at the default 44.1 kHz
+// output and 14.6 GB at 352.8, so the cue-style "decode once, slice" model
+// does not transfer here.
+inline AudioData decode_sacd_track(sacd::Image& img, const sacd::Area& area,
+                                   size_t track_index,
+                                   const dsd::Options& dsd_opt = {}) {
+    auto ch_dsd = sacd::read_track(img, area, track_index);
+
+    AudioData ad;
+    ad.codec       = "DSD";
+    ad.bit_depth   = 1;
+    ad.sample_rate = static_cast<uint32_t>(dsd_opt.out_rate);
+    const size_t nch = ch_dsd.size();
+    ad.channels.resize(nch);
+
+    std::vector<std::thread> ch_threads;
+    std::vector<std::exception_ptr> ch_err(nch);
+    for (size_t c = 0; c < nch; ++c) {
+        ch_threads.emplace_back([&, c]() {
+            try {
+                ad.channels[c] = dsd::decimate_channel(
+                    ch_dsd[c], ch_dsd[c].size() * 8,
+                    static_cast<int>(sacd::DSD_RATE),
+                    false /* SACD is MSB-first, as DFF is */, dsd_opt);
+            } catch (...) {
+                ch_err[c] = std::current_exception();
+            }
+        });
+    }
+    for (auto& t : ch_threads) t.join();
+    for (auto& e : ch_err) if (e) std::rethrow_exception(e);
+    return ad;
+}
+
 inline AudioData decode_file(const std::string& path,
                              const dsd::Options& dsd_opt = {},
                              int want_stream = -1) {

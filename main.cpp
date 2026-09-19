@@ -76,6 +76,11 @@ static dr::LfeScoring g_lfe = dr::LfeScoring::Exclude;
 // is the pre-0.14.0 accounting, kept so any reference row recorded under it
 // stays reproducible. See dr::BlockSet.
 static dr::BlockSet g_dr_blocks = dr::BlockSet::Reference;
+// Which SACD audio area to measure. Auto prefers the 2-channel area:
+// it is the layer crete's DR references are built on, the one comparable
+// with every other release of the album, and on most discs the
+// uncompressed one. --sacd-area multichannel is one flag away.
+static sacd::AreaSel g_sacd_area = sacd::AreaSel::Auto;
 static constexpr const char* PROGRAM_DESC    = "TT Dynamic Range Meter (zero-dependency)";
 
 namespace fs = std::filesystem;
@@ -170,6 +175,15 @@ std::string get_ext(const std::string& filename) {
 struct AnalysisGroup {
     std::string audio_path;
     cue::Sheet  sheet;   // empty tracks => analyse audio_path as one file
+
+    // SACD ISO. A third shape alongside "one file" and "cue-sliced": the disc
+    // TOC already names N tracks by sector range, so unlike a cue this is NOT
+    // a slice of one decoded buffer. Each track is read from its own sectors
+    // and decoded on its own -- the stereo area of a 43-minute disc is 1.8 GB
+    // of f64 at the default 44.1 kHz output and 14.6 GB at 352.8, so decoding
+    // the area once and slicing is not an option.
+    bool       is_sacd = false;
+    sacd::Area sacd_area;
 };
 
 // Inode-level dedup. We can't compare claimed paths to directory entries as
@@ -193,6 +207,21 @@ std::vector<AnalysisGroup> collect_groups(const std::string& path) {
         // A bare file argument is never cue-sliced: there's no directory
         // context to find a companion .cue, and the user named the file
         // explicitly.
+        std::string fext = audio::get_extension(path);
+        if (audio::is_disc_image_format(fext)) {
+            // Decided by CONTENT: .iso names every disc image ever made, so
+            // a data DVD must not be handed to the audio path.
+            if (sacd::looks_like_sacd_iso(path)) {
+                AnalysisGroup g;
+                g.audio_path = path;
+                g.is_sacd    = true;
+                groups.push_back(std::move(g));
+            } else {
+                std::cerr << "Warning: " << fs::path(path).filename().string()
+                          << " is not an SACD image (no SACDMTOC at LSN 510)\n";
+            }
+            return groups;
+        }
         if (audio::is_supported_format(path)) {
             AnalysisGroup g;
             g.audio_path = path;
@@ -210,6 +239,9 @@ std::vector<AnalysisGroup> collect_groups(const std::string& path) {
         std::string fp = e.path().string();
         std::string ext = audio::get_extension(fp);
         if (ext == ".cue")                       cue_paths.push_back(fp);
+        else if (audio::is_disc_image_format(ext)) {
+            if (sacd::looks_like_sacd_iso(fp)) audio_paths.push_back(fp);
+        }
         else if (audio::is_supported_format(fp)) audio_paths.push_back(fp);
     }
     std::sort(cue_paths.begin(), cue_paths.end());
@@ -254,6 +286,8 @@ std::vector<AnalysisGroup> collect_groups(const std::string& path) {
         if (is_claimed) continue;
         AnalysisGroup g;
         g.audio_path = ap;
+        if (audio::is_disc_image_format(audio::get_extension(ap)))
+            g.is_sacd = true;
         groups.push_back(std::move(g));
     }
 
@@ -949,6 +983,8 @@ void print_usage(const char* argv0) {
               << "  --dr-lfe <exclude|include>     Count the LFE toward DR (default: exclude).\n"
               << "                                 Affects TT DR only; BS.1770 loudness and\n"
               << "                                 Min. PSR are unchanged. No-op without an LFE.\n"
+              << "  --sacd-area <auto|stereo|multichannel>  Which area of an SACD .iso to\n"
+              << "                                 measure (default: auto = prefer stereo).\n"
               << "      quadratic  — sqrt(mean(rms^2)), averages POWER. The PMF procedure,\n"
               << "                   and what MAAT and foobar2000 DR Meter both do.\n"
               << "      arithmetic — sum(rms)/n, averages AMPLITUDE. What crete shipped up\n"
@@ -1068,6 +1104,13 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Unknown format: " << fmt << "\n";
                 return 1;
             }
+        } else if (arg == "--sacd-area" && i+1 < argc) {
+            try {
+                g_sacd_area = sacd::area_sel_from_string(argv[++i]);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << "\n";
+                return 1;
+            }
         } else if (arg == "--dr-lfe" && i+1 < argc) {
             try {
                 g_lfe = dr::lfe_scoring_from_string(argv[++i]);
@@ -1166,9 +1209,39 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        // Resolve each SACD image's area up front: the track count comes from
+        // the disc TOC, and a bad --sacd-area (asking for multichannel on a
+        // stereo-only disc, or for an area crete cannot decode) must fail here
+        // on the main thread rather than inside a worker. Same fail-fast rule
+        // dsd::validate() follows.
+        for (auto& g : groups) {
+            if (!g.is_sacd) continue;
+            try {
+                sacd::Disc d = sacd::probe(g.audio_path);
+                g.sacd_area = sacd::pick_area(d, g_sacd_area);
+                // read_dsd() refuses a DST area too, but by then a worker has
+                // already printed a progress line for track 1. Check it here
+                // so an undecodable area reports before any work is claimed.
+                if (g.sacd_area.is_dst())
+                    throw std::runtime_error(
+                        "the " + std::string(g.sacd_area.channels == 2 ? "2-channel"
+                                                                       : "multichannel") +
+                        " area is DST-compressed and crete has no DST decoder yet" +
+                        (d.stereo.present && !d.stereo.is_dst()
+                             ? "; this disc's 2-channel area is uncompressed, so "
+                               "--sacd-area stereo works"
+                             : ""));
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << fs::path(g.audio_path).filename().string()
+                          << ": " << e.what() << "\n";
+                return 1;
+            }
+        }
+
         size_t total_tracks = 0;
         for (const auto& g : groups)
-            total_tracks += g.sheet.tracks.empty() ? 1 : g.sheet.tracks.size();
+            total_tracks += g.is_sacd ? g.sacd_area.tracks.size()
+                          : (g.sheet.tracks.empty() ? 1 : g.sheet.tracks.size());
 
         // Decode + analyse groups in parallel (a group = one standalone file,
         // or one cue-sliced monolith yielding N contiguous tracks). Mirrors
@@ -1198,6 +1271,30 @@ int main(int argc, char* argv[]) {
             std::string ext_str  = fs::path(g.audio_path).extension().string();
 
             try {
+                // ── SACD ISO: N tracks straight from the disc TOC ──────────
+                // Handled before decode_file() because an ISO is not one
+                // stream: the area's track list already gives sector ranges,
+                // and each track is decoded from its own sectors rather than
+                // sliced out of one huge decode (see AnalysisGroup).
+                if (g.is_sacd) {
+                    sacd::Image img(g.audio_path);
+                    const auto& area = g.sacd_area;
+                    const std::string stem = fs::path(g.audio_path).stem().string();
+                    for (size_t t = 0; t < area.tracks.size(); ++t) {
+                        char tn[8];
+                        std::snprintf(tn, sizeof(tn), "%02zu", t + 1);
+                        std::string tname = stem + " - " + tn;
+                        progress(tname);
+                        auto ad = audio::decode_sacd_track(img, area, t, g_dsd_opt);
+                        slots[gi].push_back(dr::analyze_track(
+                            ad.channels, ad.sample_rate, ad.bit_depth,
+                            ad.codec, tname, g_rms_mean, g_lfe, g_dr_blocks));
+                        slots[gi].back().mqa = mqa::analyze_pcm(
+                            ad.channels, ad.sample_rate, ad.bit_depth);
+                    }
+                    return;
+                }
+
                 auto ad = audio::decode_file(g.audio_path, g_dsd_opt, g_stream);
 
                 // Several audio streams and no explicit choice: say which one
