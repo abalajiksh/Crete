@@ -929,7 +929,7 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
         // The JOINT true peak takes the scored channels only, matching
         // peak_dbfs (compute_tt_dr's track_peak, which skips unscored()) and
         // honouring --dr-lfe through cm.scored rather than re-deriving the
-        // policy here.  Until v0.14.1 this loop had no guard at all, so
+        // policy here.  Until v0.15.0 this loop had no guard at all, so
         // max_true_peak_dbtp was a max over EVERY channel while peak_dbfs
         // excluded the LFE: on a 5.1 master whose LFE is the loudest channel
         // the two disagreed by far more than inter-sample overshoot can
