@@ -20,6 +20,11 @@
 #   make clean            Remove all build artifacts
 #   make install          Install CLI to $(PREFIX)/bin
 #
+# First time on a new machine:
+#   make setup-deps-check   Report which build dependencies are missing
+#   make setup-deps         Install them (shows every command before running it)
+#   Windows: powershell -ExecutionPolicy Bypass -File scripts\setup-deps.ps1
+#
 # FFmpeg tiers need the bundled compact FFmpeg AND pkg-config:
 #   ./scripts/build_ffmpeg_compact.sh        (or: make setup-ffmpeg)
 #   pkg-config:  macOS:  brew install pkg-config
@@ -59,7 +64,7 @@ CXXFLAGS   = -std=c++17 -Wall -Wextra -Wpedantic $(FP_DETERMINISM)
 CFLAGS     = -std=c99 -O2 -Wall -Wextra $(FP_DETERMINISM)
 LDFLAGS    =
 
-VERSION   ?= 0.14.0
+VERSION   ?= 0.14.1
 CXXFLAGS  += -DCRETE_VERSION='"$(VERSION)"'
 
 PREFIX    ?= /usr/local
@@ -308,6 +313,15 @@ distclean: clean
 	rm -rf third_party/nlohmann
 
 # ── Setup helpers ───────────────────────────────────────────────────────────
+# setup-deps installs the TOOLCHAIN (compilers, pkg-config, SDL2, nasm); the
+# three setup-* targets below fetch the SOURCES crête vendors. Different jobs:
+# the first needs a package manager and possibly root, the others just curl/git.
+setup-deps:
+	@./scripts/setup-deps.sh
+
+setup-deps-check:
+	@./scripts/setup-deps.sh --check
+
 setup-imgui:
 	@echo "Downloading Dear ImGui..."
 	@mkdir -p third_party
@@ -393,4 +407,5 @@ ffmpeg-info:
         debug debug-json debug-ffmpeg debug-json-ffmpeg \
         gui gui-ffmpeg debug-gui debug-gui-ffmpeg clean distclean \
         install install-json install-gui install-gui-ffmpeg \
+        setup-deps setup-deps-check \
         setup-imgui setup-nlohmann setup-ffmpeg ffmpeg-info
