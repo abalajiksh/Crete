@@ -64,7 +64,7 @@ CXXFLAGS   = -std=c++17 -Wall -Wextra -Wpedantic $(FP_DETERMINISM)
 CFLAGS     = -std=c99 -O2 -Wall -Wextra $(FP_DETERMINISM)
 LDFLAGS    =
 
-VERSION   ?= 0.16.0
+VERSION   ?= 0.16.1
 CXXFLAGS  += -DCRETE_VERSION='"$(VERSION)"'
 
 PREFIX    ?= /usr/local
@@ -179,7 +179,7 @@ CLI_TARGET = crete$(EXE_EXT)
 # FFmpeg tiers emit a distinctly-named binary so the in-house decoder (crete)
 # and the FFmpeg-enabled decoder (crete-ffmpeg) never overwrite each other.
 FFMPEG_TARGET = crete-ffmpeg$(EXE_EXT)
-CLI_HEADERS = analysis.hpp audio.hpp channels.hpp dsd_decode.hpp mqa_detect.hpp cue.hpp \
+CLI_HEADERS = analysis.hpp audio.hpp channels.hpp dsd_decode.hpp mqa_detect.hpp cue.hpp groups.hpp \
               sacd.hpp dst.hpp \
               $(LIBDSDDPCM_DIR)/include/dsddpcm.h
 
@@ -269,7 +269,7 @@ debug-gui-ffmpeg: GUI_CXXFLAGS += -O0 -g -fsanitize=address,undefined -DCRETE_HA
 debug-gui-ffmpeg: GUI_LDFLAGS  += -fsanitize=address,undefined $(FFMPEG_LDLIBS)
 debug-gui-ffmpeg: $(GUI_FFMPEG_TARGET)
 
-$(GUI_FFMPEG_TARGET): $(GUI_SRC) $(IMGUI_OBJS) analysis.hpp audio.hpp audio_ffmpeg.hpp dsd_decode.hpp file_dialog.hpp $(LIBDSDDPCM_OBJ)
+$(GUI_FFMPEG_TARGET): $(GUI_SRC) $(IMGUI_OBJS) analysis.hpp audio.hpp audio_ffmpeg.hpp dsd_decode.hpp file_dialog.hpp $(LIBDSDDPCM_OBJ) | ffmpeg-ensure
 	@$(FFMPEG_PRECHECK)
 	$(CXX) $(GUI_CXXFLAGS) -o $@ $(GUI_SRC) $(IMGUI_OBJS) $(LIBDSDDPCM_OBJ) $(GUI_LDFLAGS)
 
@@ -333,8 +333,16 @@ setup-imgui:
 setup-nlohmann: $(NLOHMANN_HEADER)
 	@echo "nlohmann/json ready at $(NLOHMANN_HEADER)"
 
-setup-ffmpeg:
-	./scripts/build_ffmpeg_compact.sh
+setup-ffmpeg: ffmpeg-ensure
+	@echo "compact FFmpeg ready at $(abspath $(FFMPEG_PREFIX))"
+
+# Force a rebuild regardless of the stamp. `setup-ffmpeg` is now
+# staleness-aware and will no-op on a fresh cache, so this is the way to
+# rebuild on purpose (a changed FFmpeg VERSION, a half-finished build, or a
+# prefix whose provenance you simply do not trust).
+.PHONY: ffmpeg-rebuild
+ffmpeg-rebuild:
+	./$(FFMPEG_SCRIPT)
 
 # ============================================================================
 # FFmpeg (optional, compact static build → single self-contained binary)
@@ -353,6 +361,55 @@ FFMPEG_PREFIX    ?= third_party/ffmpeg-compact
 FFMPEG_PKGCONFIG  = $(FFMPEG_PREFIX)/lib/pkgconfig
 FFMPEG_LIBS       = libavformat libavcodec libswresample libavutil
 PKG_CONFIG       ?= pkg-config
+FFMPEG_SCRIPT     = scripts/build_ffmpeg_compact.sh
+FFMPEG_STAMP      = $(FFMPEG_PREFIX)/crete-ffmpeg-build.id
+
+# ── Auto-build the compact FFmpeg, and notice when it is STALE ──────────────
+#
+# `make cli-ffmpeg` used to fail with "run ./scripts/build_ffmpeg_compact.sh",
+# which is a build system telling you to run part of the build by hand. It now
+# runs it for you, as an order-only prerequisite, so an FFmpeg tier is one
+# command like every other tier. Set FFMPEG_AUTOBUILD=0 to opt out (an external
+# or system FFmpeg via FFMPEG_PREFIX is detected and never clobbered).
+#
+# Staleness is decided by the stamp the script writes, NOT by the prefix merely
+# existing. That older sentinel answered "an FFmpeg was built here", not "an
+# FFmpeg with the decoders this revision needs was built here" -- so when
+# truehd/mlp/eac3/ac3/dca were added, every warm cache silently kept a build
+# that could not decode disc audio and the DISCAUDIO suite failed on four of
+# six carriers with no hint as to why. Both Jenkinsfiles learned to compare the
+# stamp; a developer's local tree never did, so the same stale-cache failure
+# was still reachable here. Now it is caught in both places.
+#
+# The script stays the single source of build truth rather than being inlined
+# here, because the stamp records an md5 of the SCRIPT. Hashing this Makefile
+# instead would make every unrelated target or CXXFLAGS edit invalidate every
+# agent's FFmpeg cache; hashing a hand-maintained component list brings back
+# exactly the "someone forgot to extend the fingerprint" failure the whole-file
+# hash was introduced to remove.
+FFMPEG_AUTOBUILD ?= 1
+FFMPEG_SCRIPT_MD5 = $(shell (md5sum < $(FFMPEG_SCRIPT) 2>/dev/null || md5 -q $(FFMPEG_SCRIPT) 2>/dev/null) | cut -d' ' -f1)
+FFMPEG_STAMP_MD5  = $(shell sed -n 's/^script_md5=//p' $(FFMPEG_STAMP) 2>/dev/null)
+
+.PHONY: ffmpeg-ensure
+ffmpeg-ensure:
+	@if [ "$(FFMPEG_AUTOBUILD)" != "1" ]; then \
+	    :; \
+	elif [ -f "$(FFMPEG_STAMP)" ]; then \
+	    if [ "$(FFMPEG_STAMP_MD5)" != "$(FFMPEG_SCRIPT_MD5)" ]; then \
+	        echo ">> compact FFmpeg is STALE ($(FFMPEG_SCRIPT) changed since it was built)"; \
+	        echo ">> rebuilding — a cached build with the wrong decoder set fails at"; \
+	        echo ">> decode time, not at link time, which is far harder to read."; \
+	        ./$(FFMPEG_SCRIPT); \
+	    fi; \
+	elif PKG_CONFIG_PATH=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --exists $(FFMPEG_LIBS) 2>/dev/null; then \
+	    echo ">> using an externally-provided FFmpeg at $(abspath $(FFMPEG_PREFIX)) (no crete stamp)"; \
+	    echo ">> NOTE: crete cannot verify its decoder set — if a disc-audio decode"; \
+	    echo ">> fails, check for truehd/mlp/eac3/ac3/dca."; \
+	else \
+	    echo ">> compact FFmpeg not built — building it now via $(FFMPEG_SCRIPT)"; \
+	    ./$(FFMPEG_SCRIPT); \
+	fi
 
 # Recursively-expanded (=) on purpose: pkg-config only runs when an FFmpeg
 # target is actually built, so plain `make` / `make cli-json` never touch it.
@@ -375,7 +432,7 @@ debug-ffmpeg: $(CLI_TARGET)-ffmpeg
 
 cli-ffmpeg: release-ffmpeg
 
-$(CLI_TARGET)-ffmpeg: $(CLI_SRC) $(CLI_HEADERS) audio_ffmpeg.hpp $(LIBDSDDPCM_OBJ)
+$(CLI_TARGET)-ffmpeg: $(CLI_SRC) $(CLI_HEADERS) audio_ffmpeg.hpp $(LIBDSDDPCM_OBJ) | ffmpeg-ensure
 	@$(FFMPEG_PRECHECK)
 	$(CXX) $(CXXFLAGS) -o $(FFMPEG_TARGET) $(CLI_SRC) $(LIBDSDDPCM_OBJ) $(LDFLAGS) $(CLI_LDFLAGS)
 
@@ -390,7 +447,7 @@ debug-json-ffmpeg: $(CLI_TARGET)-json-ffmpeg
 
 cli-json-ffmpeg: release-json-ffmpeg
 
-$(CLI_TARGET)-json-ffmpeg: $(CLI_SRC) $(CLI_HEADERS) audio_ffmpeg.hpp $(NLOHMANN_HEADER) $(LIBDSDDPCM_OBJ)
+$(CLI_TARGET)-json-ffmpeg: $(CLI_SRC) $(CLI_HEADERS) audio_ffmpeg.hpp $(NLOHMANN_HEADER) $(LIBDSDDPCM_OBJ) | ffmpeg-ensure
 	@$(FFMPEG_PRECHECK)
 	$(CXX) $(CXXFLAGS) -o $(FFMPEG_TARGET) $(CLI_SRC) $(LIBDSDDPCM_OBJ) $(LDFLAGS) $(CLI_LDFLAGS)
 

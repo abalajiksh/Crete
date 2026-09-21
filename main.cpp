@@ -4,7 +4,9 @@
 // Measures TT Dynamic Range (Pleasurize Music Foundation algorithm),
 // EBU R128 integrated loudness, and crest factor for audio files.
 //
-// Supported formats: WAV, AIFF, FLAC, DSF, DFF (DSD)
+// Native formats: WAV / RF64 / BW64 / Wave64, AIFF/AIFF-C, FLAC, DSF, DFF (DSD)
+// SACD images:  .iso, both areas, DST included (accepted by content, not name)
+// Disc audio:   TrueHD/MLP, AC-3, E-AC-3, DTS/DTS-HD MA (FFmpeg tier)
 // Cue sheets: parsed automatically when present alongside a monolithic
 //             audio file; each TRACK becomes its own analysed entry.
 // Output compatible with dr.loudness-war.info submission format.
@@ -17,6 +19,7 @@
 #include "analysis.hpp"
 #include "audio.hpp"
 #include "cue.hpp"
+#include "groups.hpp"
 
 #ifdef CRETE_HAS_JSON
 #include <nlohmann/json.hpp>
@@ -49,7 +52,7 @@ extern "C" {
 
 // ── Version info ───────────────────────────────────────────────────────────
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.16.0"
+#define CRETE_VERSION "0.16.1"
 #endif
 
 static constexpr const char* PROGRAM_NAME    = "crête";
@@ -172,127 +175,9 @@ std::string get_ext(const std::string& filename) {
 // exactly as it did before cue support was added.
 // ════════════════════════════════════════════════════════════════════════════
 
-struct AnalysisGroup {
-    std::string audio_path;
-    cue::Sheet  sheet;   // empty tracks => analyse audio_path as one file
-
-    // SACD ISO. A third shape alongside "one file" and "cue-sliced": the disc
-    // TOC already names N tracks by sector range, so unlike a cue this is NOT
-    // a slice of one decoded buffer. Each track is read from its own sectors
-    // and decoded on its own -- the stereo area of a 43-minute disc is 1.8 GB
-    // of f64 at the default 44.1 kHz output and 14.6 GB at 352.8, so decoding
-    // the area once and slicing is not an option.
-    bool       is_sacd = false;
-    sacd::Area sacd_area;
-};
-
-// Inode-level dedup. We can't compare claimed paths to directory entries as
-// byte-equal strings, because UTF-8 normalization differs between filesystems
-// — notably, a cue file generated on Linux/Windows usually carries NFC
-// codepoints (`é` = U+00E9), while macOS APFS may report the same filename
-// from a directory listing in NFD (`é` = U+0065 U+0301). The two strings name
-// the same file but compare unequal; without this dedup the referenced audio
-// file would be analysed twice — once via the cue (sliced into N tracks) and
-// once standalone (yielding N+1 total). fs::equivalent goes to stat(2) for
-// device + inode identity and sidesteps the whole question.
-static bool is_same_file(const fs::path& a, const fs::path& b) {
-    std::error_code ec;
-    return fs::equivalent(a, b, ec);   // false on any error; cheap and safe
-}
-
-std::vector<AnalysisGroup> collect_groups(const std::string& path) {
-    std::vector<AnalysisGroup> groups;
-
-    if (fs::is_regular_file(path)) {
-        // A bare file argument is never cue-sliced: there's no directory
-        // context to find a companion .cue, and the user named the file
-        // explicitly.
-        std::string fext = audio::get_extension(path);
-        if (audio::is_disc_image_format(fext)) {
-            // Decided by CONTENT: .iso names every disc image ever made, so
-            // a data DVD must not be handed to the audio path.
-            if (sacd::looks_like_sacd_iso(path)) {
-                AnalysisGroup g;
-                g.audio_path = path;
-                g.is_sacd    = true;
-                groups.push_back(std::move(g));
-            } else {
-                std::cerr << "Warning: " << fs::path(path).filename().string()
-                          << " is not an SACD image (no SACDMTOC at LSN 510)\n";
-            }
-            return groups;
-        }
-        if (audio::is_supported_format(path)) {
-            AnalysisGroup g;
-            g.audio_path = path;
-            groups.push_back(std::move(g));
-        }
-        return groups;
-    }
-    if (!fs::is_directory(path)) return groups;
-
-    // Pass 1: enumerate cue and audio files separately.
-    std::vector<std::string> cue_paths;
-    std::vector<std::string> audio_paths;
-    for (const auto& e : fs::directory_iterator(path)) {
-        if (!e.is_regular_file()) continue;
-        std::string fp = e.path().string();
-        std::string ext = audio::get_extension(fp);
-        if (ext == ".cue")                       cue_paths.push_back(fp);
-        else if (audio::is_disc_image_format(ext)) {
-            if (sacd::looks_like_sacd_iso(fp)) audio_paths.push_back(fp);
-        }
-        else if (audio::is_supported_format(fp)) audio_paths.push_back(fp);
-    }
-    std::sort(cue_paths.begin(), cue_paths.end());
-    std::sort(audio_paths.begin(), audio_paths.end());
-
-    // Pass 2: parse each cue, resolve its referenced audio file, claim it.
-    std::vector<fs::path> claimed_paths;
-    claimed_paths.reserve(cue_paths.size());
-    for (const auto& cp : cue_paths) {
-        cue::Sheet sheet;
-        if (!cue::parse(cp, sheet)) {
-            std::cerr << "Warning: failed to parse cue file: " << cp << "\n";
-            continue;
-        }
-        std::string ref = cue::resolve_referenced_file(sheet);
-        if (ref.empty()) {
-            std::cerr << "Warning: cue " << fs::path(cp).filename().string()
-                      << " references missing file: "
-                      << sheet.referenced_file << "\n";
-            continue;
-        }
-        if (!audio::is_supported_format(ref)) {
-            std::cerr << "Warning: cue " << fs::path(cp).filename().string()
-                      << " references unsupported file: " << ref << "\n";
-            continue;
-        }
-        AnalysisGroup g;
-        g.audio_path = ref;
-        g.sheet = std::move(sheet);
-        groups.push_back(std::move(g));
-        claimed_paths.emplace_back(ref);
-    }
-
-    // Pass 3: audio files not claimed by any cue → single-track groups.
-    // is_same_file uses fs::equivalent — see comment above.
-    for (const auto& ap : audio_paths) {
-        bool is_claimed = false;
-        fs::path ap_path(ap);
-        for (const auto& cp : claimed_paths) {
-            if (is_same_file(ap_path, cp)) { is_claimed = true; break; }
-        }
-        if (is_claimed) continue;
-        AnalysisGroup g;
-        g.audio_path = ap;
-        if (audio::is_disc_image_format(audio::get_extension(ap)))
-            g.is_sacd = true;
-        groups.push_back(std::move(g));
-    }
-
-    return groups;
-}
+// Group collection, SACD area resolution and the per-group analysis all live
+// in groups.hpp so the GUI runs the identical code path -- see that header.
+// The CLI adds only its own reporting: warnings to stderr, a progress line.
 
 // ── MQA warning block (all human-facing formats) ───────────────────────────
 //
@@ -1013,7 +898,22 @@ void print_usage(const char* argv0) {
               << "  -q, --quiet                    Suppress progress output\n"
               << "  -v, --version                  Show version\n"
               << "  -h, --help                     Show this help\n\n"
-              << "Supported formats: WAV, AIFF, FLAC, DSF, DFF (DSD)\n"
+              << "Native formats (crete's own validated decoders):\n"
+              << "  WAV · RF64/BW64 · Wave64 · AIFF/AIFF-C · FLAC · DSF/DFF (DSD)\n"
+              << "  RF64 and Wave64 are recognised by MAGIC, not by extension --\n"
+              << "  an RF64 file is conventionally named .wav.\n"
+#ifdef CRETE_HAS_FFMPEG
+              << "FFmpeg formats (this build): ALAC, AAC, MP3, Opus, Vorbis,\n"
+              << "  WMA (v1/v2/Pro/Lossless), WavPack, APE, Musepack, TAK,\n"
+              << "  and disc audio -- Dolby TrueHD/MLP, AC-3, E-AC-3, DTS\n"
+              << "  (DTS-ES, 96/24, HD HRA, HD MA, Express).\n"
+              << "  Atmos and DTS:X are IDENTIFIED but measured as their channel\n"
+              << "  BED: FFmpeg renders no objects.\n"
+#endif
+              << "SACD images: a .iso holding an SACDMTOC is read directly --\n"
+              << "  both the 2-channel and multichannel areas, DST-compressed\n"
+              << "  included. Tracks come from the disc TOC. Accepted by CONTENT,\n"
+              << "  never by the .iso extension. See --sacd-area.\n"
               << "Cue sheets: any .cue file in the input folder is parsed\n"
               << "  automatically; each TRACK becomes its own analysed entry,\n"
               << "  sliced from the referenced monolithic audio file.\n"
@@ -1203,48 +1103,34 @@ int main(int argc, char* argv[]) {
 
 
     for (const auto& path : paths) {
-        auto groups = collect_groups(path);
+        std::vector<std::string> warnings;
+        auto groups = grp::collect(path, warnings);
+        for (const auto& w : warnings) std::cerr << w << "\n";
         if (groups.empty()) {
             std::cerr << "Warning: no supported audio files in " << path << "\n";
             continue;
         }
 
-        // Resolve each SACD image's area up front: the track count comes from
-        // the disc TOC, and a bad --sacd-area (asking for multichannel on a
-        // stereo-only disc, or for an area crete cannot decode) must fail here
-        // on the main thread rather than inside a worker. Same fail-fast rule
-        // dsd::validate() follows.
-        for (auto& g : groups) {
-            if (!g.is_sacd) continue;
-            try {
-                sacd::Disc d = sacd::probe(g.audio_path);
-                g.sacd_area = sacd::pick_area(d, g_sacd_area);
-
-            } catch (const std::exception& e) {
-                std::cerr << "Error: " << fs::path(g.audio_path).filename().string()
-                          << ": " << e.what() << "\n";
-                return 1;
-            }
+        // Resolve each SACD image's area before any decoding starts: the
+        // track count comes from the disc TOC, and a bad --sacd-area must
+        // fail here on the main thread rather than inside a worker.
+        std::string sacd_err;
+        if (!grp::resolve_sacd_areas(groups, g_sacd_area, sacd_err)) {
+            std::cerr << sacd_err << "\n";
+            return 1;
         }
 
-        size_t total_tracks = 0;
-        for (const auto& g : groups)
-            total_tracks += g.is_sacd ? g.sacd_area.tracks.size()
-                          : (g.sheet.tracks.empty() ? 1 : g.sheet.tracks.size());
+        const size_t total_tracks = grp::count_tracks(groups);
 
-        // Decode + analyse groups in parallel (a group = one standalone file,
-        // or one cue-sliced monolith yielding N contiguous tracks). Mirrors
-        // the GUI worker pool: decode_file/analyze_track hold no shared
-        // mutable state, DSD decodes still fan out per-channel inside each
-        // group, and results land in per-group slots so the flattened output
-        // order matches the sequential walk exactly. Measurement is
-        // unchanged — parallelism only reorders the wall-clock schedule.
-        const size_t ngroups = groups.size();
-        std::vector<std::vector<dr::TrackResult>> slots(ngroups);
-        std::vector<std::string> errlog(ngroups);
-        std::atomic<size_t> next{0}, done{0};
+        grp::Options gopt;
+        gopt.dsd      = g_dsd_opt;
+        gopt.rms_mean = g_rms_mean;
+        gopt.lfe      = g_lfe;
+        gopt.blocks   = g_dr_blocks;
+        gopt.stream   = g_stream;
+
+        std::atomic<size_t> done{0};
         std::mutex io_mtx;
-
         auto progress = [&](const std::string& name) {
             size_t d = done.fetch_add(1) + 1;
             if (!quiet) {
@@ -1254,152 +1140,12 @@ int main(int argc, char* argv[]) {
             }
         };
 
-        auto process_group = [&](size_t gi) {
-            const auto& g = groups[gi];
-            std::string basename = fs::path(g.audio_path).filename().string();
-            std::string ext_str  = fs::path(g.audio_path).extension().string();
-
-            try {
-                // ── SACD ISO: N tracks straight from the disc TOC ──────────
-                // Handled before decode_file() because an ISO is not one
-                // stream: the area's track list already gives sector ranges,
-                // and each track is decoded from its own sectors rather than
-                // sliced out of one huge decode (see AnalysisGroup).
-                if (g.is_sacd) {
-                    sacd::Image img(g.audio_path);
-                    const auto& area = g.sacd_area;
-                    const std::string stem = fs::path(g.audio_path).stem().string();
-                    for (size_t t = 0; t < area.tracks.size(); ++t) {
-                        char tn[8];
-                        std::snprintf(tn, sizeof(tn), "%02zu", t + 1);
-                        std::string tname = stem + " - " + tn;
-                        progress(tname);
-                        auto ad = audio::decode_sacd_track(img, area, t, g_dsd_opt);
-                        slots[gi].push_back(dr::analyze_track(
-                            ad.channels, ad.sample_rate, ad.bit_depth,
-                            ad.codec, tname, g_rms_mean, g_lfe, g_dr_blocks));
-                        slots[gi].back().mqa = mqa::analyze_pcm(
-                            ad.channels, ad.sample_rate, ad.bit_depth);
-                    }
-                    return;
-                }
-
-                auto ad = audio::decode_file(g.audio_path, g_dsd_opt, g_stream);
-
-                // Several audio streams and no explicit choice: say which one
-                // was measured. A Blu-ray rip's LPCM 5.1, DTS-HD MA 5.1 and
-                // TrueHD 7.1 tracks are different mixes with different DR, so
-                // silently metering whichever FFmpeg ranks highest would make
-                // the number unreproducible without this line.
-                if (g_stream < 0 && ad.audio_stream_count > 1) {
-                    errlog[gi] += "Warning: " + basename + " has "
-                        + std::to_string(ad.audio_stream_count)
-                        + " audio streams; measured stream "
-                        + std::to_string(ad.stream_index)
-                        + " (" + ad.codec + ", "
-                        + std::to_string(ad.num_channels()) + " ch, "
-                        + std::to_string(ad.sample_rate)
-                        + " Hz). Use --stream N to choose.\n";
-                }
-
-                // File-level MQA check, stamped onto every track from this decode.
-                const mqa::Info minfo =
-                    mqa::analyze_pcm(ad.channels, ad.sample_rate, ad.bit_depth);
-
-                if (g.sheet.tracks.empty()) {
-                    progress(basename);
-                    slots[gi].push_back(dr::analyze_track(
-                        ad.channels, ad.sample_rate, ad.bit_depth,
-                        ad.codec, basename, g_rms_mean, g_lfe, g_dr_blocks));
-                    slots[gi].back().mqa = minfo;
-                    slots[gi].back().stream_index       = ad.stream_index;
-                    slots[gi].back().audio_stream_count = ad.audio_stream_count;
-                    slots[gi].back().codec_profile      = ad.codec_profile;
-                } else {
-                    size_t total_samples = ad.channels.empty()
-                                           ? 0 : ad.channels[0].size();
-                    const auto& tracks_cue = g.sheet.tracks;
-
-                    for (size_t i = 0; i < tracks_cue.size(); ++i) {
-                        const auto& trk = tracks_cue[i];
-
-                        uint64_t start = cue::frames_to_samples(
-                            trk.start_frame, ad.sample_rate);
-                        uint64_t end = (i + 1 < tracks_cue.size())
-                            ? cue::frames_to_samples(
-                                  tracks_cue[i + 1].start_frame, ad.sample_rate)
-                            : total_samples;
-                        if (end > total_samples) end = total_samples;
-
-                        // NN - Title.ext, mirroring sacd_extract / common
-                        // splitter conventions so cue-derived tracks pair
-                        // cleanly with per-track siblings under helpers.py's
-                        // _base_norm normalization.
-                        char track_name[512];
-                        std::snprintf(track_name, sizeof(track_name),
-                                      "%02d - %s%s",
-                                      trk.number, trk.title.c_str(),
-                                      ext_str.c_str());
-
-                        progress(track_name);
-
-                        if (start >= end) {
-                            errlog[gi] += std::string("Warning: empty cue range for ")
-                                          + track_name + "\n";
-                            continue;
-                        }
-
-                        std::vector<std::vector<double>> slice(ad.channels.size());
-                        for (size_t c = 0; c < ad.channels.size(); ++c) {
-                            slice[c].assign(
-                                ad.channels[c].begin() + static_cast<std::ptrdiff_t>(start),
-                                ad.channels[c].begin() + static_cast<std::ptrdiff_t>(end));
-                        }
-
-                        slots[gi].push_back(dr::analyze_track(
-                            slice, ad.sample_rate, ad.bit_depth,
-                            ad.codec, track_name, g_rms_mean, g_lfe, g_dr_blocks));
-                        slots[gi].back().mqa = minfo;
-                    slots[gi].back().stream_index       = ad.stream_index;
-                    slots[gi].back().audio_stream_count = ad.audio_stream_count;
-                    slots[gi].back().codec_profile      = ad.codec_profile;
-                    }
-                }
-            } catch (const std::exception& e) {
-                errlog[gi] += "Error: " + basename + ": " + e.what() + "\n";
-            }
-        };
-
-        unsigned hw = std::thread::hardware_concurrency();
-        size_t nthreads = jobs > 0 ? (size_t)jobs : (hw ? (size_t)hw : 4);
-        nthreads = std::min(nthreads, ngroups);
-
-        if (nthreads <= 1) {
-            for (size_t gi = 0; gi < ngroups; ++gi) process_group(gi);
-        } else {
-            auto worker = [&]() {
-                for (;;) {
-                    size_t gi = next.fetch_add(1);
-                    if (gi >= ngroups) break;
-                    process_group(gi);
-                }
-            };
-            std::vector<std::thread> pool;
-            pool.reserve(nthreads);
-            for (size_t k = 0; k < nthreads; ++k) pool.emplace_back(worker);
-            for (auto& th : pool) th.join();
-        }
+        auto run = grp::run(groups, gopt, jobs, progress);
 
         if (!quiet) std::cerr << "\r" << std::string(80, ' ') << "\r";
+        if (!run.errlog.empty()) std::cerr << run.errlog;
 
-        // Flatten per-group slots in original group order; errors/warnings
-        // are replayed afterwards so they never interleave mid-progress.
-        std::vector<dr::TrackResult> results;
-        results.reserve(total_tracks);
-        for (size_t gi = 0; gi < ngroups; ++gi)
-            for (auto& t : slots[gi]) results.push_back(std::move(t));
-        for (size_t gi = 0; gi < ngroups; ++gi)
-            if (!errlog[gi].empty()) std::cerr << errlog[gi];
+        std::vector<dr::TrackResult> results = std::move(run.tracks);
 
         if (results.empty()) continue;
         any_results = true;

@@ -12,6 +12,7 @@
 
 #include "analysis.hpp"
 #include "audio.hpp"
+#include "groups.hpp"
 #include "file_dialog.hpp"
 #include "crete_theme.hpp"
 
@@ -47,7 +48,7 @@ extern "C" {
 namespace fs = std::filesystem;
 
 #ifndef CRETE_VERSION
-#define CRETE_VERSION "0.16.0"
+#define CRETE_VERSION "0.16.1"
 #endif
 static constexpr const char* PROGRAM_NAME    = "crête";
 static constexpr const char* PROGRAM_VERSION = CRETE_VERSION;
@@ -57,6 +58,10 @@ static const char* DSD_MODE_LABELS[]   = { "Multistage", "Direct" };
 static const char* DSD_FILTER_LABELS[] = { "default", "firls", "kaiser" };
 static const char* DSD_RATE_LABELS[]   = { "44.1", "88.2", "176.4", "352.8" };
 static const int   DSD_RATES[]         = { 44100, 88200, 176400, 352800 };
+static const char* SACD_AREA_LABELS[]  = { "Auto", "Stereo", "Multichannel" };
+static const sacd::AreaSel SACD_AREAS[] = { sacd::AreaSel::Auto,
+                                            sacd::AreaSel::Stereo,
+                                            sacd::AreaSel::Multichannel };
 
 // ── Application state ──────────────────────────────────────────────────────
 struct AppState {
@@ -82,6 +87,24 @@ struct AppState {
     // options so a mid-run toggle cannot change the rule under the worker.
     bool         score_lfe = false;
     dr::LfeScoring active_lfe = dr::LfeScoring::Exclude;
+
+    // Which area of an SACD .iso to measure. Auto prefers the 2-channel area:
+    // it is the layer crete's DR references are built on, the one comparable
+    // with every other release of the album, and on most discs the
+    // uncompressed one. Snapshotted alongside the DSD options so a mid-run
+    // toggle cannot change the disc under the worker.
+    int           sacd_area_idx = 0;
+    sacd::AreaSel active_sacd_area = sacd::AreaSel::Auto;
+
+    // Which audio stream of a multi-stream container to measure, or -1 for
+    // FFmpeg's own choice. A music Blu-ray rip routinely holds six (LPCM /
+    // DTS-HD MA / TrueHD / AC-3 mixes of the same album) and they are NOT the
+    // same measurement -- the CLI reports its choice and --stream overrides
+    // it, but a GUI can show the choice BEFORE the run, so it does.
+    int  stream_idx    = -1;
+    int  active_stream = -1;
+    std::vector<audio::StreamInfo> streams;   // probed from stream_probe_path
+    std::string stream_probe_path;            // what `streams` describes
 
     bool dark_mode = false;
     bool restyle_requested = false;
@@ -110,6 +133,7 @@ struct AppState {
     // is not re-scanned from disk on every frame (source_is_dsd runs per-frame).
     std::string dsd_probe_path;
     bool        dsd_probe_val = false;
+    bool        sacd_probe_val = false;
 
     dsd::Options build_dsd_opts() const {
         dsd::Options o;
@@ -126,35 +150,58 @@ struct AppState {
         return o;
     }
 
-    std::vector<std::string> collect_files_from_path() {
-        std::vector<std::string> files;
+    // Expand the current path into units of work. Shape matters: an input
+    // path is NOT always one file and one track. grp::collect() recognises a
+    // standalone file, a cue sheet plus its monolithic audio (N sliced
+    // tracks), and an SACD .iso (N tracks straight from the disc TOC).
+    //
+    // This used to be a flat is_supported_format() scan, so the GUI silently
+    // ignored every cue sheet -- while the landing screen advertised "CUE" --
+    // and could not see a disc image at all. Both front-ends now call the one
+    // collector, so a folder cannot expand differently depending on which one
+    // opened it.
+    std::vector<grp::Group> collect_groups_from_path() {
+        std::vector<grp::Group> groups;
         std::string p = path_buf;
         while (!p.empty() && (p.back()==' '||p.back()=='\n'||p.back()=='\r')) p.pop_back();
         while (p.size()>1 && (p.back()=='/'||p.back()=='\\')) p.pop_back();
-        if (p.empty()) return files;
+        if (p.empty()) return groups;
         try {
-            if (fs::is_regular_file(p)) {
-                if (audio::is_supported_format(p)) files.push_back(p);
-                else { std::lock_guard<std::mutex> lk(mtx);
-                       error_log += "Unsupported format: " + fs::path(p).extension().string() + "\n"; }
-            } else if (fs::is_directory(p)) {
-                for (const auto& e : fs::directory_iterator(p))
-                    if (e.is_regular_file() && audio::is_supported_format(e.path().string()))
-                        files.push_back(e.path().string());
-                std::sort(files.begin(), files.end());
-                if (files.empty()) { std::lock_guard<std::mutex> lk(mtx);
+            if (!fs::exists(p)) {
+                std::lock_guard<std::mutex> lk(mtx);
+                error_log += "Path not found: " + p + "\n";
+                return groups;
+            }
+            std::vector<std::string> warnings;
+            groups = grp::collect(p, warnings);
+            if (!warnings.empty() || groups.empty()) {
+                std::lock_guard<std::mutex> lk(mtx);
+                for (const auto& w : warnings) error_log += w + "\n";
+                // Only when the collector had nothing to SAY about it --
+                // a rejected .iso already explained itself ("not an SACD
+                // image"), and following that with "Unsupported format: .iso"
+                // reads as two different problems.
+                if (groups.empty() && warnings.empty()) {
+                    if (fs::is_regular_file(p))
+                        error_log += "Unsupported format: "
+                                   + fs::path(p).extension().string() + "\n";
+                    else
+                        error_log += std::string("No supported audio files in folder.\n")
+                                   + "Native: .wav .rf64 .bw64 .w64 .aif .aiff .flac "
+                                     ".dsf .dff .iso (SACD) · cue sheets\n"
 #ifdef CRETE_HAS_FFMPEG
-                    error_log += "No supported audio files (.wav .flac .aif .dsf .dff + "
-                                 "ffmpeg: .m4a .mp3 .aac .opus .ogg .wma .wv .ape .mpc .tak ...) in folder.\n";
-#else
-                    error_log += "No supported audio files (.wav .flac .aif .dsf .dff) in folder.\n";
+                                   + "FFmpeg: .m4a .mp4 .m4b .aac .mp3 .opus .ogg .oga "
+                                     ".mka .webm .wma .wv .ape .mpc .tak "
+                                     ".mkv .thd .dts .ac3 .eac3 .ec3\n"
 #endif
+                                   ;
                 }
-            } else { std::lock_guard<std::mutex> lk(mtx); error_log += "Path not found: " + p + "\n"; }
+            }
         } catch (const std::exception& e) {
-            std::lock_guard<std::mutex> lk(mtx); error_log += "Error scanning path: " + std::string(e.what()) + "\n";
+            std::lock_guard<std::mutex> lk(mtx);
+            error_log += "Error scanning path: " + std::string(e.what()) + "\n";
         }
-        return files;
+        return groups;
     }
 
     std::string get_output_filepath() {
@@ -172,15 +219,42 @@ struct AppState {
 
 // Filesystem probe: is this path a DSD file, or a folder containing one?
 // This touches the disk (directory scan), so callers must cache the result.
-static bool probe_path_is_dsd(const std::string& path) {
+// An SACD area is a DSD bitstream decimated through the SAME libdsddpcm chain
+// a .dsf goes through, so the DSD strip applies to an .iso exactly as it does
+// to a .dsf. Decided by CONTENT for the .iso, never by the extension: .iso
+// names every disc image ever made.
+static bool probe_one_is_dsd(const std::string& path) {
     std::string ext = audio::get_extension(path);
     if (ext == ".dsf" || ext == ".dff") return true;
+    if (audio::is_disc_image_format(ext)) return sacd::looks_like_sacd_iso(path);
+    return false;
+}
+
+static bool probe_path_is_dsd(const std::string& path) {
+    if (fs::is_regular_file(path)) return probe_one_is_dsd(path);
     if (fs::is_directory(path)) {
         try {
             for (const auto& e : fs::directory_iterator(path)) {
-                std::string x = audio::get_extension(e.path().string());
-                if (x == ".dsf" || x == ".dff") return true;
+                if (e.is_regular_file() && probe_one_is_dsd(e.path().string()))
+                    return true;
             }
+        } catch (...) {}
+    }
+    return false;
+}
+
+// Is this path an SACD image, or a folder holding one? Touches the disk, so
+// callers memoise it on the path string just as the DSD probe is memoised.
+static bool probe_path_is_sacd(const std::string& path) {
+    auto one = [](const std::string& f) {
+        return audio::is_disc_image_format(audio::get_extension(f))
+            && sacd::looks_like_sacd_iso(f);
+    };
+    if (fs::is_regular_file(path)) return one(path);
+    if (fs::is_directory(path)) {
+        try {
+            for (const auto& e : fs::directory_iterator(path))
+                if (e.is_regular_file() && one(e.path().string())) return true;
         } catch (...) {}
     }
     return false;
@@ -189,13 +263,40 @@ static bool probe_path_is_dsd(const std::string& path) {
 // True if the current path (or the loaded results) points at DSD material.
 // Runs every frame, so the disk probe is memoised on the path string and the
 // folder is only re-scanned when the path actually changes.
+static void refresh_source_probe(AppState& app) {
+    if (app.dsd_probe_path == app.path_buf) return;
+    app.dsd_probe_path  = app.path_buf;
+    app.dsd_probe_val   = probe_path_is_dsd(app.path_buf);
+    app.sacd_probe_val  = probe_path_is_sacd(app.path_buf);
+}
+
 static bool source_is_dsd(AppState& app) {
     for (const auto& t : app.results) if (t.codec == "DSD") return true;
-    if (app.dsd_probe_path != app.path_buf) {
-        app.dsd_probe_path = app.path_buf;
-        app.dsd_probe_val  = probe_path_is_dsd(app.path_buf);
-    }
+    refresh_source_probe(app);
     return app.dsd_probe_val;
+}
+
+// True when the current path points at an SACD image. Unlike source_is_dsd
+// this does NOT consult the results: a decoded SACD track reports codec "DSD",
+// indistinguishable from a .dsf, and the area selector only means anything for
+// the image itself.
+static bool source_is_sacd(AppState& app) {
+    refresh_source_probe(app);
+    return app.sacd_probe_val;
+}
+
+// Re-probe the container's audio streams when the path changes. Only a
+// multi-stream container has anything to choose, so a native file or a
+// single-stream container clears the list and the picker stays hidden.
+static void refresh_stream_probe(AppState& app) {
+    if (app.stream_probe_path == app.path_buf) return;
+    app.stream_probe_path = app.path_buf;
+    app.streams.clear();
+    app.stream_idx = -1;          // a new file invalidates the old choice
+    std::string p = app.path_buf;
+    if (p.empty() || !fs::is_regular_file(p)) return;
+    app.streams = audio::list_audio_streams(p);
+    if (app.streams.size() < 2) app.streams.clear();
 }
 
 // ── Format helpers ─────────────────────────────────────────────────────────
@@ -292,67 +393,68 @@ static std::string generate_log(const std::vector<dr::TrackResult>& tracks,
 
 // ── Analysis worker ─────────────────────────────────────────────────────────
 static void analysis_worker(AppState* app) {
-    auto files = app->collect_files_from_path();
-    const int n = (int)files.size();
-    app->total_files.store(n);
-    if (files.empty()) {
+    auto groups = app->collect_groups_from_path();
+    if (groups.empty()) {
         std::lock_guard<std::mutex> lk(app->mtx);
         app->error_log += "No supported audio files found.\n";
         app->is_analyzing.store(false);
         return;
     }
 
-    // Decode + analyze files in parallel. Each file is independent (decode_file
-    // and analyze_track hold no shared mutable state); DSD files still fan out
-    // per-channel inside decode_file. Results land in per-index slots so the
-    // original file order is preserved; a failure just leaves ok[i] = 0 and is
-    // recorded in the error log. Threads pull work via an atomic cursor and
-    // stop early on cancel.
-    std::vector<dr::TrackResult> slots(n);
-    std::vector<uint8_t>         ok(n, 0);
-    std::atomic<int> next{0}, completed{0};
-
-    unsigned hw = std::thread::hardware_concurrency();
-    const int nthreads = std::min<int>(hw ? (int)hw : 4, n);
-
-    auto do_work = [&]() {
-        for (;;) {
-            if (app->cancel_requested.load()) break;
-            int i = next.fetch_add(1);
-            if (i >= n) break;
-            auto fname = fs::path(files[i]).filename().string();
-            { std::lock_guard<std::mutex> lk(app->mtx); app->current_filename = fname; }
-            try {
-                auto ad = audio::decode_file(files[i], app->active_dsd_opt);
-                slots[i] = dr::analyze_track(ad.channels, ad.sample_rate,
-                                             ad.bit_depth, ad.codec, fname,
-                                             dr::RmsMean::Quadratic,
-                                             app->active_lfe);
-                slots[i].mqa = mqa::analyze_pcm(ad.channels, ad.sample_rate,
-                                                ad.bit_depth);
-                slots[i].codec_profile = ad.codec_profile;
-                ok[i] = 1;
-            } catch (const std::exception& e) {
-                std::lock_guard<std::mutex> lk(app->mtx);
-                app->error_log += fname + ": " + e.what() + "\n";
-            }
-            int done = completed.fetch_add(1) + 1;
-            app->current_file.store(done);
-            app->progress.store((float)done / (float)n);
+    // Resolve each SACD image's area BEFORE any decoding starts. The track
+    // count comes from the disc TOC, and a bad area choice (asking for
+    // multichannel on a stereo-only disc, or for an area crete cannot decode)
+    // has to fail here rather than inside a worker -- the same fail-fast rule
+    // dsd::validate() follows, and the same one the CLI applies.
+    {
+        std::string sacd_err;
+        if (!grp::resolve_sacd_areas(groups, app->active_sacd_area, sacd_err)) {
+            std::lock_guard<std::mutex> lk(app->mtx);
+            app->error_log += sacd_err + "\n";
+            app->is_analyzing.store(false);
+            return;
         }
+    }
+
+    // Progress counts TRACKS, not groups: one cue sheet or one SACD area is a
+    // single group that yields a whole album, so counting groups would show
+    // "1 of 1" for a 43-minute disc.
+    const int n = static_cast<int>(grp::count_tracks(groups));
+    app->total_files.store(n);
+
+    grp::Options gopt;
+    gopt.dsd      = app->active_dsd_opt;
+    gopt.rms_mean = dr::RmsMean::Quadratic;
+    gopt.lfe      = app->active_lfe;
+    gopt.blocks   = dr::BlockSet::Reference;
+    gopt.stream   = app->active_stream;
+
+    // Called on a worker thread, once per track, before that track's work
+    // starts -- so it must do its own locking.
+    std::atomic<int> started{0};
+    auto progress = [&](const std::string& name) {
+        // fetch_add returns the pre-increment value and is the ONLY read --
+        // a load-then-add would let two workers claim the same number.
+        int d = started.fetch_add(1) + 1;
+        std::lock_guard<std::mutex> lk(app->mtx);
+        app->current_filename = name;
+        app->current_file.store(d);
+        app->progress.store(n ? (float)d / (float)n : 0.0f);
     };
 
-    std::vector<std::thread> pool;
-    pool.reserve(nthreads);
-    for (int k = 0; k < nthreads; ++k) pool.emplace_back(do_work);
-    for (auto& th : pool) th.join();
+    // grp::run decodes and analyses groups in parallel, preserving order, and
+    // polls cancel_requested between groups. Measurement is identical to the
+    // CLI's because it IS the CLI's -- same function, same options struct.
+    auto run = grp::run(groups, gopt, 0, progress, &app->cancel_requested);
 
     app->progress.store(1.0f);
+    app->current_file.store(n);
 
-    // Compact successful results back into original file order.
-    std::vector<dr::TrackResult> results;
-    results.reserve(n);
-    for (int i = 0; i < n; ++i) if (ok[i]) results.push_back(std::move(slots[i]));
+    std::vector<dr::TrackResult> results = std::move(run.tracks);
+    if (!run.errlog.empty()) {
+        std::lock_guard<std::mutex> lk(app->mtx);
+        app->error_log += run.errlog;
+    }
 
     if (!results.empty() && !app->cancel_requested.load() && app->save_log) {
         std::string out_path = app->get_output_filepath();
@@ -378,6 +480,8 @@ static void start_analysis(AppState* app) {
     app->active_dsd_opt = app->build_dsd_opts();   // snapshot options for the thread
     app->active_lfe     = app->score_lfe ? dr::LfeScoring::Include
                                          : dr::LfeScoring::Exclude;
+    app->active_sacd_area = SACD_AREAS[app->sacd_area_idx];
+    app->active_stream    = app->stream_idx;
     if (app->worker.joinable()) app->worker.join();
     app->worker = std::thread(analysis_worker, app);
 }
@@ -453,6 +557,99 @@ static void band_source(AppState& app, bool analyzing) {
     } else {
         if (ImGui::Button("Cancel", ImVec2(analyze_w,0))) cancel_analysis(&app);
     }
+    theme::Rule(1.0f);
+}
+
+// ── SACD area selector ──────────────────────────────────────────────────────
+// A hybrid SACD carries two independent recordings: a 2-channel area and a
+// multichannel one. They are DIFFERENT MIXES, so which one is measured is not
+// a detail -- it changes every number. Auto prefers stereo: it is the layer
+// crete's DR references are built on, the one comparable with every other
+// release of the album, and on most discs the uncompressed one.
+static void band_sacd(AppState& app) {
+    const theme::Palette& p = theme::P();
+    ImVec2 c0 = ImGui::GetCursorScreenPos();
+    float w = ImGui::GetContentRegionAvail().x;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    float pad = 10.0f, h = 34.0f;
+    dl->AddRectFilled(ImVec2(c0.x-6, c0.y), ImVec2(c0.x+w, c0.y+h), theme::u32(p.accentSoft));
+    dl->AddRectFilled(ImVec2(c0.x-6, c0.y), ImVec2(c0.x-3, c0.y+h), theme::u32(p.accent));
+    ImGui::Dummy(ImVec2(0, pad*0.4f));
+
+    ImGui::PushStyleColor(ImGuiCol_Text, p.accentInk);
+    ImGui::PushFont(theme::g_head); ImGui::TextUnformatted("SACD IMAGE"); ImGui::PopFont();
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::TextDisabled("· tracks come from the disc TOC");
+
+    ImGui::SameLine(0, 20); theme::Kicker("AREA"); ImGui::SameLine();
+    ImGui::BeginDisabled(app.is_analyzing.load());
+    theme::Segmented("sacdarea", SACD_AREA_LABELS, 3, &app.sacd_area_idx);
+    ImGui::EndDisabled();
+    ImGui::SameLine(0, 12);
+    ImGui::TextDisabled(app.sacd_area_idx == 2
+        ? "multichannel mix — a different recording from the stereo layer"
+        : (app.sacd_area_idx == 1 ? "2-channel layer"
+                                  : "prefers the 2-channel layer"));
+    ImGui::Dummy(ImVec2(0, 8));
+    theme::Rule(2.0f);
+}
+
+// ── Audio-stream picker (multi-stream containers) ───────────────────────────
+// A music Blu-ray rip commonly holds several mixes of the same album -- LPCM
+// 5.1, DTS-HD MA 5.1, TrueHD 7.1, an AC-3 core, stereo variants -- and they
+// are NOT the same measurement. FFmpeg's automatic choice ranks by bitrate and
+// channel count, which need not agree with the container's default
+// disposition: on a 6-audio-stream DSOTM remux it returns the 13.8 Mbps LPCM
+// track, not the default-flagged TrueHD. The CLI reports that choice after the
+// fact and --stream overrides it; here the whole list is on screen first.
+static void band_streams(AppState& app) {
+    const theme::Palette& p = theme::P();
+    ImGui::Dummy(ImVec2(0, 4));
+    ImGui::PushStyleColor(ImGuiCol_Text, p.accentInk);
+    ImGui::PushFont(theme::g_head); ImGui::TextUnformatted("AUDIO STREAM"); ImGui::PopFont();
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::TextDisabled("· %zu streams in this container — they are different mixes",
+                        app.streams.size());
+
+    ImGui::BeginDisabled(app.is_analyzing.load());
+    ImGui::Dummy(ImVec2(0, 2));
+
+    // "Auto" names what FFmpeg would pick, so choosing it is not a mystery.
+    const audio::StreamInfo* def = nullptr;
+    for (const auto& si : app.streams) if (si.is_default) { def = &si; break; }
+    char autolbl[192];
+    if (def)
+        std::snprintf(autolbl, sizeof(autolbl),
+                      "Automatic  —  stream %d, %s, %d ch, %d Hz",
+                      def->index, def->codec.c_str(), def->channels, def->sample_rate);
+    else
+        std::snprintf(autolbl, sizeof(autolbl), "Automatic");
+    ImGui::RadioButton(autolbl, &app.stream_idx, -1);
+
+    for (const auto& si : app.streams) {
+        char lbl[256];
+        std::snprintf(lbl, sizeof(lbl), "%d  —  %s%s%s, %d ch, %d Hz##st%d",
+                      si.index, si.codec.c_str(),
+                      si.profile.empty() ? "" : " · ",
+                      si.profile.c_str(), si.channels, si.sample_rate, si.index);
+        if (!si.decodable) ImGui::BeginDisabled();
+        ImGui::RadioButton(lbl, &app.stream_idx, si.index);
+        if (!si.decodable) {
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled("(no decoder in this build)");
+        } else if (audio::profile_is_immersive(si.profile)) {
+            // Say it at the point of choice, not only after the run: FFmpeg has
+            // no Atmos or DTS:X renderer, so picking this stream measures its
+            // channel bed with the objects discarded.
+            ImGui::SameLine();
+            ImGui::TextDisabled("(bed only — objects not rendered)");
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::Dummy(ImVec2(0, 4));
     theme::Rule(1.0f);
 }
 
@@ -569,7 +766,16 @@ static void empty_state(AppState&) {
     const char* t2 = "…or use the File / Folder buttons above to browse";
     ImGui::SetCursorPosX((ImGui::GetWindowWidth()-ImGui::CalcTextSize(t2).x)*0.5f);
     ImGui::TextDisabled("%s", t2);
-    const char* chips = "WAV   AIFF   FLAC   DSF   DFF   CUE";
+    // Mirrors audio.hpp's is_native_format()/is_disc_image_format() plus the
+    // cue and SACD shapes grp::collect() recognises. RF64/BW64/Wave64 are not
+    // listed separately: an RF64 file is conventionally named .wav, so the
+    // chip a user looks for is WAV.
+#ifdef CRETE_HAS_FFMPEG
+    const char* chips = "WAV   AIFF   FLAC   DSF/DFF   SACD ISO   CUE   "
+                        "ALAC   AAC   MP3   TRUEHD   DTS-HD   E-AC-3";
+#else
+    const char* chips = "WAV   AIFF   FLAC   DSF/DFF   SACD ISO   CUE";
+#endif
     ImGui::Dummy(ImVec2(0,8));
     ImGui::SetCursorPosX((ImGui::GetWindowWidth()-ImGui::CalcTextSize(chips).x)*0.5f);
     ImGui::TextDisabled("%s", chips);
@@ -1024,8 +1230,23 @@ static void side_panel(AppState& app) {
         ImGui::TextDisabled("WMA v1/v2 · WMA Pro · WMA Lossless");
         ImGui::TextDisabled("WavPack · Monkey's Audio (APE) · Musepack (SV7/SV8) · TAK");
         ImGui::Dummy(ImVec2(0,2));
+        theme::Kicker("DISC AUDIO");
+        ImGui::TextDisabled("Dolby TrueHD (+ MLP) · Dolby Digital (AC-3) · Dolby Digital Plus (E-AC-3)");
+        ImGui::TextDisabled("DTS · DTS-ES · DTS 96/24 · DTS-HD HRA · DTS-HD MA · DTS Express");
+        ImGui::Dummy(ImVec2(0,2));
+        // Says what is measured, at the place a user reads the codec list.
+        // FFmpeg has no Atmos or DTS:X renderer: it decodes the underlying BED
+        // (TrueHD 7.1, or the E-AC-3 5.1 core for JOC) and discards the object
+        // metadata. That is a real and complete measurement of what a
+        // non-immersive playback chain delivers -- but an unqualified "crete
+        // measures Atmos" would be false, and this is where that is prevented.
+        ImGui::TextWrapped("Atmos and DTS:X carriers are identified and measured as their "
+            "channel BED: FFmpeg renders no objects. crête labels such a track "
+            "rather than presenting the bed as the immersive mix.");
+        ImGui::Dummy(ImVec2(0,2));
         ImGui::TextWrapped("Accepted extensions: .m4a .mp4 .m4b .aac .mp3 .opus "
-            ".ogg .oga .mka .webm .wma .wv .ape .mpc .tak");
+            ".ogg .oga .mka .webm .wma .wv .ape .mpc .tak "
+            ".mkv .thd .dts .ac3 .eac3 .ec3");
         ImGui::Dummy(ImVec2(0,6));
 #endif
 
@@ -1047,7 +1268,24 @@ static void side_panel(AppState& app) {
         ImGui::TextDisabled("Per-channel Momentary/Short-Term values are informative\n"
             "(non-ITU): BS.1770 defines them for the summed program only.");
         ImGui::Dummy(ImVec2(0,6));
-        ImGui::TextDisabled("Native: WAV · AIFF/AIFF-C · FLAC · DSF/DFF (DSD)");
+        theme::SectionLabel("NATIVE DECODERS");
+        // crete's own, reference-validated paths. decode_file() always
+        // prefers these over FFmpeg for the formats listed here.
+        ImGui::TextDisabled("WAV · RF64/BW64 · Wave64 · AIFF/AIFF-C · FLAC");
+        ImGui::TextDisabled("DSF · DFF (DSD64/128/256/512)");
+        ImGui::TextDisabled("SACD .iso — both areas, DST-compressed included");
+        ImGui::TextDisabled("Cue sheets — each TRACK analysed separately");
+        ImGui::Dummy(ImVec2(0,4));
+        // The GUI takes crete's defaults on the two A/B measurement axes and
+        // offers no control for them, so state them: a number is only
+        // reproducible if you know which algorithm produced it. LFE scoring IS
+        // a control here, so this line follows the checkbox above.
+        ImGui::TextDisabled("DR settings: blocks=%s  mean=%s  lfe=%s",
+            dr::block_set_name(dr::BlockSet::Reference),
+            dr::rms_mean_name(dr::RmsMean::Quadratic),
+            dr::lfe_scoring_name(app.score_lfe ? dr::LfeScoring::Include
+                                               : dr::LfeScoring::Exclude));
+        ImGui::Dummy(ImVec2(0,4));
         ImGui::TextDisabled("MIT License — Ashwin Balaji 2026");
         ImGui::TextDisabled("Archivo: SIL Open Font License 1.1");
     } else if (app.side_tab == 1) {
@@ -1155,7 +1393,10 @@ static void render_ui(AppState& app) {
     ImGui::BeginChild("content", ImVec2(ImGui::GetContentRegionAvail().x - side_w, 0), false);
     band_header(app);
     band_source(app, analyzing);
+    if (source_is_sacd(app)) band_sacd(app);
     if (source_is_dsd(app)) band_dsd(app);
+    refresh_stream_probe(app);
+    if (!app.streams.empty()) band_streams(app);
 
     // Held across the bands below (band_progress / band_verdict / band_results
     // / error log) which read shared state — they must NOT re-lock app.mtx.

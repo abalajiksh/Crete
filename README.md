@@ -77,17 +77,24 @@ Adds the `-f json` output mode for machine-readable analysis. The header is down
 ### CLI with FFmpeg decode (opt-in)
 
 ```bash
-./build_ffmpeg_compact.sh    # one-time: builds a minimal static FFmpeg (default 7.1)
 make cli-ffmpeg              # FFmpeg decode, no JSON
 make cli-json-ffmpeg         # FFmpeg decode + JSON (binary: crete-ffmpeg)
 ```
+
+**The compact FFmpeg builds itself.** Since 0.16.1 the FFmpeg tiers carry it as an order-only prerequisite, so there is no separate script to remember — an FFmpeg tier is one command like every other tier. It is also **staleness-aware**: `scripts/build_ffmpeg_compact.sh` stamps the prefix with an md5 of itself, and the Makefile rebuilds when that stamp is missing or no longer matches this checkout. That matters because a stale cache does not fail at link time — it fails at *decode* time, which is far harder to read. (When the disc-audio decoders were added, every warm cache silently kept a build that could not decode them, and the DISCAUDIO suite failed on four of six carriers with no hint why. Both Jenkinsfiles learned to compare the stamp; a local tree never did. Now both do.)
+
+- `make setup-ffmpeg` — build it on its own, no-op if already fresh.
+- `make ffmpeg-rebuild` — force a rebuild regardless of the stamp.
+- `make ... FFMPEG_AUTOBUILD=0` — never build it automatically.
+
+An externally-provided FFmpeg (`FFMPEG_PREFIX=/path`) is detected and never clobbered; crête says so and warns that it cannot verify the decoder set. The script stays the single source of build truth rather than being inlined into the Makefile, because the stamp hashes the *script*: hashing the Makefile instead would make every unrelated target or `CXXFLAGS` edit invalidate every agent's FFmpeg cache.
 
 The compact FFmpeg build is **LGPL-only** (no GPL, no nonfree components), **decode-only**, and statically linked — `crete-ffmpeg` is still a single self-contained binary. Point the build at a non-default FFmpeg install with `make cli-json-ffmpeg FFMPEG_PREFIX=/path/to/ffmpeg`. Requires `pkg-config`.
 
 Decoder routing is strict:
 
 - **Native formats (WAV/RF64/Wave64, AIFF, FLAC, DSF, DFF) always use crête's own decoders**, even in the FFmpeg build. This preserves parity against the MAAT reference data.
-- FFmpeg handles only non-native formats: **ALAC (`.m4a`), MP3, AAC, Opus**.
+- FFmpeg handles only non-native formats: **ALAC (`.m4a`), MP3, AAC, Opus, Vorbis, WMA, WavPack, APE, Musepack, TAK**, plus the disc-audio set — **TrueHD/MLP, AC-3, E-AC-3, DTS/DTS-HD MA**.
 - **DSD is never routed through FFmpeg** — FFmpeg's `dsd2pcm` decimation is a different filter chain and would break DSD parity.
 
 `crete-ffmpeg --version` advertises the linked FFmpeg as `[+ffmpeg-compact N.N]`.
@@ -160,7 +167,19 @@ Browse for a file or folder (or drag-and-drop) and click Analyze. The log output
 
 Since 0.11.0 results stay in the window only by default — writing a log file is opt-in ("Save analysis log to disk" in Settings, with the analysis-folder/custom-folder destination choice appearing once enabled). The About panel documents the measurement standards behind each reported metric.
 
-`make gui-ffmpeg` builds `crete-gui-ffmpeg`, the GUI with the same compact LGPL-only FFmpeg tier as `crete-ffmpeg`: folder scans, drag-and-drop, and the file dialogs additionally accept `.m4a .mp4 .m4b .aac .mp3 .opus .ogg .oga .mka .webm .wma .wv .ape .mpc .tak`, with the same strict routing (native formats always use crête's own decoders; DSD is never routed through FFmpeg). The header shows `+ffmpeg`, and the About panel lists the linked FFmpeg version and every extra codec (ALAC, AAC, MP3, Opus, Vorbis, WMA v1/v2/Pro/Lossless, WavPack, APE, Musepack, TAK).
+**The GUI reads everything the CLI reads.** Since 0.16.1 both front-ends expand an input path through the same collector (`groups.hpp`), so a folder cannot mean different things depending on which one opened it. That means the GUI now handles all three input shapes, not just "one file, one track":
+
+| shape | what appears |
+|---|---|
+| a standalone file | one track, as before |
+| a **cue sheet** + its monolithic audio | each `TRACK` analysed separately, sliced from one decode |
+| an **SACD `.iso`** | every track from the disc TOC; an **SACD IMAGE** strip appears with an `Auto / Stereo / Multichannel` area selector |
+
+A **multi-stream container** (a Blu-ray `.mkv` carrying several mixes of one album) raises an **AUDIO STREAM** picker listing every stream with its codec, profile, channel count and sample rate, marking the one FFmpeg would choose unaided and flagging any Atmos/DTS:X stream as *bed only*. This is the GUI's equivalent of `--stream N`, shown *before* the run rather than reported after it. It appears for a single selected file; when a whole folder is analysed, crête's "measured stream N of M" warning still lands in the error log.
+
+Two measurement axes are deliberately **not** exposed: `--dr-mean` and `--dr-blocks` are documented A/B-comparison flags, so the GUI pins crête's defaults (`quadratic` / `reference`) and states them in About under NATIVE DECODERS, next to the live LFE setting. Anything needing a non-default axis is a CLI job.
+
+`make gui-ffmpeg` builds `crete-gui-ffmpeg`, the GUI with the same compact LGPL-only FFmpeg tier as `crete-ffmpeg`: folder scans, drag-and-drop, and the file dialogs additionally accept `.m4a .mp4 .m4b .aac .mp3 .opus .ogg .oga .mka .webm .wma .wv .ape .mpc .tak .mkv .thd .dts .ac3 .eac3 .ec3`, with the same strict routing (native formats always use crête's own decoders; DSD is never routed through FFmpeg). The header shows `+ffmpeg`, and the About panel lists the linked FFmpeg version and every extra codec — ALAC, AAC, MP3, Opus, Vorbis, WMA v1/v2/Pro/Lossless, WavPack, APE, Musepack, TAK, plus the disc-audio set (Dolby TrueHD/MLP, AC-3, E-AC-3, DTS / DTS-ES / 96-24 / HD HRA / HD MA / Express).
 
 ---
 

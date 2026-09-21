@@ -1152,9 +1152,27 @@ inline AudioData decode_dff(const std::vector<uint8_t>& buf,
 // Unified decoder dispatch
 // ════════════════════════════════════════════════════════════════════════════
 
+// ── One audio stream inside a container, as the picker sees it ─────────────
+//
+// A music Blu-ray rip commonly carries several mixes of the same album --
+// LPCM 5.1, DTS-HD MA 5.1, TrueHD 7.1, an AC-3 core, stereo variants -- and
+// they are NOT the same measurement. Declared here rather than in
+// audio_ffmpeg.hpp so a front-end can name the type in a build with no FFmpeg
+// tier, where probe_streams() simply returns nothing.
+struct StreamInfo {
+    int         index       = -1;   // container index, as ffprobe prints it
+    std::string codec;              // "TRUEHD", "DTS", "PCM_S24LE", ...
+    std::string profile;            // "DTS-HD MA", "Dolby TrueHD + Dolby Atmos"
+    int         channels    = 0;
+    int         sample_rate = 0;
+    bool        is_default  = false;  // what FFmpeg would choose unaided
+    bool        decodable   = true;   // false if this build has no decoder
+};
+
 #ifdef CRETE_HAS_FFMPEG
 // Defined in audio_ffmpeg.hpp (included at the end of this header).
 inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream);
+inline std::vector<StreamInfo> probe_streams(const std::string& path);
 #endif
 
 // Formats crête decodes natively. These are the validated paths (vs MAAT for
@@ -1311,6 +1329,21 @@ inline AudioData decode_file(const std::string& path,
         return decode_dff(buf, dsd_opt);
     else
         throw std::runtime_error("Unsupported format: " + ext);
+}
+
+// Enumerate the audio streams in a container. Returns empty for a native
+// format (the file IS the stream, so there is nothing to choose) and for any
+// build without the FFmpeg tier. Never throws: an unreadable container is not
+// an error here, it just means the picker has nothing to offer and the decode
+// will report the real problem when it runs.
+inline std::vector<StreamInfo> list_audio_streams(const std::string& path) {
+#ifdef CRETE_HAS_FFMPEG
+    if (is_native_format(get_extension(path))) return {};
+    try { return probe_streams(path); } catch (...) { return {}; }
+#else
+    (void)path;
+    return {};
+#endif
 }
 
 } // namespace audio

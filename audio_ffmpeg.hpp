@@ -41,6 +41,121 @@ extern "C" {
 
 namespace audio {
 
+// ── Profile naming, shared by the decoder and the stream probe ─────────────
+//
+// av_get_profile_name() is tried FIRST and is expected to fail here. crete's
+// vendored FFmpeg is configured --enable-small, which makes
+// NULL_IF_CONFIG_SMALL(ff_truehd_profiles) expand to NULL, so every decoder in
+// the compact build has codec->profiles == NULL and the lookup returns NULL
+// for every stream -- including DTS-HD MA, which the system ffprobe names
+// without trouble. Measured 2026-09-19 on all six DSOTM Blu-ray carriers: 6/6
+// empty through av_get_profile_name, 6/6 correct through the table below. The
+// earlier note that "detection costs nothing, profile carries it" was verified
+// against a full ffprobe, not against the build crete actually links.
+//
+// The profile NUMBER survives --enable-small (it is a plain int on the
+// context); only the name TABLE is compiled out. So crete names it itself.
+// These AV_PROFILE_* values are public ABI constants from libavcodec/defs.h,
+// and the strings match FFmpeg's own so anything grepping crete's output
+// against ffprobe's still matches. Keeping the av_get_profile_name() call
+// first means a crete linked against a full FFmpeg picks up profiles for
+// codecs this table does not list.
+//
+// Lives here, called from both decode_with_ffmpeg() and probe_streams(), so
+// the stream the picker labels "Dolby TrueHD + Dolby Atmos" is the one the
+// decoder reports under that name. Two copies of this table would eventually
+// disagree, and the disagreement would be invisible.
+inline std::string profile_name_for(const AVCodec* dec, AVCodecID codec_id,
+                                    int profile) {
+    if (const char* prof = av_get_profile_name(dec, profile)) return prof;
+    if (profile == AV_PROFILE_UNKNOWN) return {};
+    const char* name = nullptr;
+    switch (codec_id) {
+        case AV_CODEC_ID_TRUEHD:
+        case AV_CODEC_ID_MLP:
+            if (profile == AV_PROFILE_TRUEHD_ATMOS)
+                name = "Dolby TrueHD + Dolby Atmos";
+            break;
+        case AV_CODEC_ID_EAC3:
+            if (profile == AV_PROFILE_EAC3_DDP_ATMOS)
+                name = "Dolby Digital Plus + Dolby Atmos";
+            break;
+        case AV_CODEC_ID_DTS:
+            switch (profile) {
+                case AV_PROFILE_DTS:               name = "DTS";            break;
+                case AV_PROFILE_DTS_ES:            name = "DTS-ES";         break;
+                case AV_PROFILE_DTS_96_24:         name = "DTS 96/24";      break;
+                case AV_PROFILE_DTS_HD_HRA:        name = "DTS-HD HRA";     break;
+                case AV_PROFILE_DTS_HD_MA:         name = "DTS-HD MA";      break;
+                case AV_PROFILE_DTS_EXPRESS:       name = "DTS Express";    break;
+                case AV_PROFILE_DTS_HD_MA_X:       name = "DTS-HD MA + DTS:X";      break;
+                case AV_PROFILE_DTS_HD_MA_X_IMAX:  name = "DTS-HD MA + DTS:X IMAX"; break;
+                default: break;
+            }
+            break;
+        default: break;
+    }
+    return name ? std::string(name) : std::string{};
+}
+
+// ── Enumerate a container's audio streams, without decoding one ────────────
+//
+// A music Blu-ray rip routinely carries several mixes of the same album and
+// they are NOT the same measurement, so the CLI reports which one it measured
+// and --stream overrides it. A GUI cannot report-then-retype an index: it has
+// to show the choice before the run. This opens the container, reads stream
+// parameters and closes it -- no decoder is opened and no frame is decoded, so
+// it is cheap enough to call when the user picks a file.
+//
+// It carries the SAME raised probesize as decode_with_ffmpeg(). Without that,
+// a TrueHD stream interleaved among five others reports profile=unknown and an
+// unspecified sample format, so the picker would describe a stream differently
+// from the way the decoder later reports it.
+inline std::vector<StreamInfo> probe_streams(const std::string& path) {
+    std::vector<StreamInfo> out;
+
+    AVDictionary* fmt_opts = nullptr;
+    av_dict_set(&fmt_opts, "probesize",       "100000000", 0);
+    av_dict_set(&fmt_opts, "analyzeduration", "100000000", 0);
+    struct FOptGuard { AVDictionary** p; ~FOptGuard() { if (*p) av_dict_free(p); } } fog{&fmt_opts};
+
+    AVFormatContext* fmt = nullptr;
+    if (avformat_open_input(&fmt, path.c_str(), nullptr, &fmt_opts) < 0)
+        return out;   // not openable: caller falls back to automatic selection
+    struct FmtGuard { AVFormatContext** p; ~FmtGuard() { if (*p) avformat_close_input(p); } } fg{&fmt};
+
+    if (avformat_find_stream_info(fmt, nullptr) < 0) return out;
+
+    // Which index FFmpeg would pick unaided -- the picker marks it so "auto"
+    // is not a mystery. Ranks by bitrate and channel count, which need NOT
+    // agree with the container's default disposition: on a 6-audio-stream
+    // DSOTM remux it returns the 13.8 Mbps LPCM track, not the default-flagged
+    // TrueHD.
+    int best = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+
+    for (unsigned i = 0; i < fmt->nb_streams; ++i) {
+        AVCodecParameters* par = fmt->streams[i]->codecpar;
+        if (par->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+
+        StreamInfo si;
+        si.index       = static_cast<int>(i);
+        si.channels    = par->ch_layout.nb_channels;
+        si.sample_rate = par->sample_rate;
+        si.is_default  = (static_cast<int>(i) == best);
+
+        const AVCodec* dec = avcodec_find_decoder(par->codec_id);
+        si.decodable = (dec != nullptr);
+        if (const char* n = avcodec_get_name(par->codec_id)) {
+            si.codec = n;
+            for (auto& c : si.codec)
+                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        si.profile = profile_name_for(dec, par->codec_id, par->profile);
+        out.push_back(std::move(si));
+    }
+    return out;
+}
+
 // want_stream: the container's audio-stream index to decode (as ffprobe prints
 // it), or -1 to let FFmpeg choose.
 inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream = -1) {
@@ -193,57 +308,9 @@ inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream = -
     // parser, no dec3 box reader -- because AVCodecContext::profile carries
     // it for both carriers. It NEEDS the raised probesize above: at FFmpeg's
     // default 5 MB probe a TrueHD stream interleaved among five others
-    // reports profile=unknown.
-    //
-    // av_get_profile_name() is tried FIRST and is expected to fail here.
-    // crete's vendored FFmpeg is configured --enable-small, which makes
-    // NULL_IF_CONFIG_SMALL(ff_truehd_profiles) expand to NULL, so every
-    // decoder in the compact build has codec->profiles == NULL and the
-    // lookup returns NULL for every stream -- including DTS-HD MA, which
-    // the system ffprobe names without trouble. Measured 2026-09-19 on all
-    // six DSOTM Blu-ray carriers: 6/6 empty through av_get_profile_name,
-    // 6/6 correct through the table below. The earlier note that "detection
-    // costs nothing, profile carries it" was verified against a full
-    // ffprobe, not against the build crete actually links.
-    //
-    // The profile NUMBER survives --enable-small (it is a plain int on the
-    // context); only the name TABLE is compiled out. So crete names it
-    // itself. These AV_PROFILE_* values are public ABI constants from
-    // libavcodec/defs.h, and the strings match FFmpeg's own so anything
-    // grepping crete's output against ffprobe's still matches. Keeping the
-    // av_get_profile_name() call first means a crete linked against a full
-    // FFmpeg picks up profiles for codecs this table does not list.
-    if (const char* prof = av_get_profile_name(dec, ctx->profile)) {
-        ad.codec_profile = prof;
-    } else if (ctx->profile != AV_PROFILE_UNKNOWN) {
-        const char* name = nullptr;
-        switch (ctx->codec_id) {
-            case AV_CODEC_ID_TRUEHD:
-            case AV_CODEC_ID_MLP:
-                if (ctx->profile == AV_PROFILE_TRUEHD_ATMOS)
-                    name = "Dolby TrueHD + Dolby Atmos";
-                break;
-            case AV_CODEC_ID_EAC3:
-                if (ctx->profile == AV_PROFILE_EAC3_DDP_ATMOS)
-                    name = "Dolby Digital Plus + Dolby Atmos";
-                break;
-            case AV_CODEC_ID_DTS:
-                switch (ctx->profile) {
-                    case AV_PROFILE_DTS:               name = "DTS";            break;
-                    case AV_PROFILE_DTS_ES:            name = "DTS-ES";         break;
-                    case AV_PROFILE_DTS_96_24:         name = "DTS 96/24";      break;
-                    case AV_PROFILE_DTS_HD_HRA:        name = "DTS-HD HRA";     break;
-                    case AV_PROFILE_DTS_HD_MA:         name = "DTS-HD MA";      break;
-                    case AV_PROFILE_DTS_EXPRESS:       name = "DTS Express";    break;
-                    case AV_PROFILE_DTS_HD_MA_X:       name = "DTS-HD MA + DTS:X";      break;
-                    case AV_PROFILE_DTS_HD_MA_X_IMAX:  name = "DTS-HD MA + DTS:X IMAX"; break;
-                    default: break;
-                }
-                break;
-            default: break;
-        }
-        if (name) ad.codec_profile = name;
-    }
+    // reports profile=unknown. Naming lives in profile_name_for() so the
+    // stream picker and this decode cannot label the same stream differently.
+    ad.codec_profile = profile_name_for(dec, ctx->codec_id, ctx->profile);
     ad.sample_rate = static_cast<uint32_t>(in_rate);
     // Lossy codecs have no PCM "bit depth"; bits_per_raw_sample is 0 there.
     ad.bit_depth = (ctx->bits_per_raw_sample > 0)
