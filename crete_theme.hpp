@@ -307,6 +307,59 @@ inline bool Segmented(const char* id, const char* const* opts, int n, int* cur,
     return changed;
 }
 
+// ── Accent strip ────────────────────────────────────────────────────────────
+//
+// A tinted band with a left accent bar, wrapping however many rows of controls
+// the caller emits. Two things it fixes over drawing the rect inline:
+//
+//   1. The height is MEASURED, not reserved. The old bands hardcoded 34 px and
+//      then emitted a row containing Segmented buttons, whose FramePadding
+//      makes them ~25 px tall on top of the band's own padding -- so the
+//      controls overflowed the tint by a few pixels at the bottom. Same class
+//      of bug as the results-table footer, which was fixed the same way: when
+//      you replace a fixed reservation, replace it with a measurement, not a
+//      bigger constant. The background is drawn on a lower draw channel AFTER
+//      the content, so it can use the real height.
+//
+//   2. Adjacent bands merge. An SACD image IS a DSD source, so both strips
+//      applied at once and rendered as two separate tinted blocks with a rule
+//      and a gap between them -- reading as two unrelated things rather than
+//      one "how this source is decoded" region. Rows inside one Begin/End
+//      share a single background and a single accent bar.
+//
+// Not re-entrant: one strip at a time, which is all any layout here needs.
+inline ImDrawListSplitter& strip_splitter() {
+    static ImDrawListSplitter sp;
+    return sp;
+}
+inline ImVec2& strip_origin() { static ImVec2 o; return o; }
+inline float&  strip_width()  { static float w = 0.0f; return w; }
+
+inline void AccentStripBegin() {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    strip_origin() = ImGui::GetCursorScreenPos();
+    strip_width()  = ImGui::GetContentRegionAvail().x;
+    strip_splitter().Split(dl, 2);
+    strip_splitter().SetCurrentChannel(dl, 1);   // content sits above the tint
+    ImGui::Dummy(ImVec2(0, 6));                  // top padding
+}
+
+// Separator between two rows of the SAME strip: vertical space only, never a
+// rule -- a rule would re-introduce the visual break the strip exists to close.
+inline void AccentStripGap() { ImGui::Dummy(ImVec2(0, 4)); }
+
+inline void AccentStripEnd() {
+    ImGui::Dummy(ImVec2(0, 6));                  // bottom padding
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 o = strip_origin();
+    const float  y1 = ImGui::GetCursorScreenPos().y;
+    strip_splitter().SetCurrentChannel(dl, 0);
+    dl->AddRectFilled(ImVec2(o.x - 6, o.y), ImVec2(o.x + strip_width(), y1),
+                      u32(P().accentSoft));
+    dl->AddRectFilled(ImVec2(o.x - 6, o.y), ImVec2(o.x - 3, y1), u32(P().accent));
+    strip_splitter().Merge(dl);
+}
+
 // A solid accent primary button (flush-left label per Modernist).
 inline bool PrimaryButton(const char* label, const ImVec2& size = ImVec2(0, 0)) {
     ImGui::PushStyleColor(ImGuiCol_Button,        P().accent);

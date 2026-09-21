@@ -175,6 +175,8 @@ Since 0.11.0 results stay in the window only by default — writing a log file i
 | a **cue sheet** + its monolithic audio | each `TRACK` analysed separately, sliced from one decode |
 | an **SACD `.iso`** | every track from the disc TOC; an **SACD IMAGE** strip appears with an `Auto / Stereo / Multichannel` area selector |
 
+Tracks list in **album order**: a folder is sorted numerically rather than lexicographically, so `2 - Track` precedes `10 - Track` (plain string ordering put track 10 third, which made albums with unpadded numbering look randomly ordered). Zero-padded numbering is unaffected. In the GUI the TRACK column is the default sort and ascending restores exactly the order the analysis produced — the TOC order for a cue sheet or an SACD image. Sorting by any other column changes only the view, never the underlying order or the selected track.
+
 A **multi-stream container** (a Blu-ray `.mkv` carrying several mixes of one album) raises an **AUDIO STREAM** picker listing every stream with its codec, profile, channel count and sample rate, marking the one FFmpeg would choose unaided and flagging any Atmos/DTS:X stream as *bed only*. This is the GUI's equivalent of `--stream N`, shown *before* the run rather than reported after it. It appears for a single selected file; when a whole folder is analysed, crête's "measured stream N of M" warning still lands in the error log.
 
 Two measurement axes are deliberately **not** exposed: `--dr-mean` and `--dr-blocks` are documented A/B-comparison flags, so the GUI pins crête's defaults (`quadratic` / `reference`) and states them in About under NATIVE DECODERS, next to the live LFE setting. Anything needing a non-default axis is a CLI job.

@@ -127,6 +127,10 @@ struct AppState {
     bool side_open = false;
     int  side_tab  = 0;   // 0 About/Settings, 1 DR Guide
     int  selected_track = 0;
+    // Display order for the results table: indices into `results`,
+    // album order by default. The table sorts THIS, so `results` keeps
+    // the order the analysis produced and `selected_track` stays valid.
+    std::vector<int> row_order;
     std::string analyzed_path;   // path that produced the current results
 
     // Cached DSD probe — recomputed only when path_buf changes, so the folder
@@ -473,7 +477,8 @@ static void analysis_worker(AppState* app) {
 static void start_analysis(AppState* app) {
     if (app->is_analyzing.load()) return;
     { std::lock_guard<std::mutex> lk(app->mtx);
-      app->results.clear(); app->error_log.clear(); app->analysis_done = false; }
+      app->results.clear(); app->row_order.clear();
+      app->error_log.clear(); app->analysis_done = false; }
     app->progress.store(0.0f); app->current_file.store(0);
     app->cancel_requested.store(false); app->is_analyzing.store(true); app->selected_track = 0;
     app->analyzed_path = app->path_buf;            // remember what we analyzed
@@ -566,16 +571,8 @@ static void band_source(AppState& app, bool analyzing) {
 // a detail -- it changes every number. Auto prefers stereo: it is the layer
 // crete's DR references are built on, the one comparable with every other
 // release of the album, and on most discs the uncompressed one.
-static void band_sacd(AppState& app) {
+static void row_sacd(AppState& app) {
     const theme::Palette& p = theme::P();
-    ImVec2 c0 = ImGui::GetCursorScreenPos();
-    float w = ImGui::GetContentRegionAvail().x;
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    float pad = 10.0f, h = 34.0f;
-    dl->AddRectFilled(ImVec2(c0.x-6, c0.y), ImVec2(c0.x+w, c0.y+h), theme::u32(p.accentSoft));
-    dl->AddRectFilled(ImVec2(c0.x-6, c0.y), ImVec2(c0.x-3, c0.y+h), theme::u32(p.accent));
-    ImGui::Dummy(ImVec2(0, pad*0.4f));
-
     ImGui::PushStyleColor(ImGuiCol_Text, p.accentInk);
     ImGui::PushFont(theme::g_head); ImGui::TextUnformatted("SACD IMAGE"); ImGui::PopFont();
     ImGui::PopStyleColor();
@@ -591,8 +588,6 @@ static void band_sacd(AppState& app) {
         ? "multichannel mix — a different recording from the stereo layer"
         : (app.sacd_area_idx == 1 ? "2-channel layer"
                                   : "prefers the 2-channel layer"));
-    ImGui::Dummy(ImVec2(0, 8));
-    theme::Rule(2.0f);
 }
 
 // ── Audio-stream picker (multi-stream containers) ───────────────────────────
@@ -653,17 +648,8 @@ static void band_streams(AppState& app) {
     theme::Rule(1.0f);
 }
 
-static void band_dsd(AppState& app) {
+static void row_dsd(AppState& app) {
     const theme::Palette& p = theme::P();
-    // accentSoft inset with a left accent bar
-    ImVec2 c0 = ImGui::GetCursorScreenPos();
-    float w = ImGui::GetContentRegionAvail().x;
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    float pad = 10.0f, h = 34.0f;
-    dl->AddRectFilled(ImVec2(c0.x-6, c0.y), ImVec2(c0.x+w, c0.y+h), theme::u32(p.accentSoft));
-    dl->AddRectFilled(ImVec2(c0.x-6, c0.y), ImVec2(c0.x-3, c0.y+h), theme::u32(p.accent));
-    ImGui::Dummy(ImVec2(0, pad*0.4f));
-
     ImGui::PushStyleColor(ImGuiCol_Text, p.accentInk);
     ImGui::PushFont(theme::g_head); ImGui::TextUnformatted("DSD SOURCE"); ImGui::PopFont();
     ImGui::PopStyleColor();
@@ -692,7 +678,19 @@ static void band_dsd(AppState& app) {
     theme::Segmented("dsdrate", DSD_RATE_LABELS, 4, &app.dsd_rate_idx, direct ? 0b1110u : 0u);
     ImGui::SameLine(0, 6);
     ImGui::TextDisabled(rate_441 ? "kHz" : "kHz · filter n/a");
-    ImGui::Dummy(ImVec2(0, 8));
+}
+
+// The two rows above describe ONE thing -- how this source is decoded -- so
+// they share a single tinted strip. An SACD image is also a DSD source, so
+// both apply at once; as separate bands they rendered as two disconnected
+// blocks with a rule between them.
+static void band_source_options(AppState& app, bool sacd, bool dsd) {
+    if (!sacd && !dsd) return;
+    theme::AccentStripBegin();
+    if (sacd) row_sacd(app);
+    if (sacd && dsd) theme::AccentStripGap();
+    if (dsd)  row_dsd(app);
+    theme::AccentStripEnd();
     theme::Rule(2.0f);
 }
 
@@ -1050,8 +1048,12 @@ static void band_results(AppState& app) {
         : 0.0f;
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10, 3));
     if (ImGui::BeginTable("Results", ncols, flags, ImVec2(0, avail_h - footer_h))) {
-        ImGui::TableSetupColumn("DR", ImGuiTableColumnFlags_WidthFixed|ImGuiTableColumnFlags_DefaultSort, 120);
-        ImGui::TableSetupColumn("TRACK", ImGuiTableColumnFlags_WidthStretch);
+        // TRACK carries DefaultSort, not DR. With it on DR the table sorted
+        // by DR score the instant it first rendered, silently throwing away
+        // the album order that grp::run goes to some trouble to preserve --
+        // so an album listed in what looked like random order.
+        ImGui::TableSetupColumn("DR", ImGuiTableColumnFlags_WidthFixed, 120);
+        ImGui::TableSetupColumn("TRACK", ImGuiTableColumnFlags_WidthStretch|ImGuiTableColumnFlags_DefaultSort);
         ImGui::TableSetupColumn(tbl_multi ? "PEAK (MAX)" : "PEAK",
                                 ImGuiTableColumnFlags_WidthFixed, 78);
         ImGui::TableSetupColumn("RMS", ImGuiTableColumnFlags_WidthFixed, 74);
@@ -1061,11 +1063,30 @@ static void band_results(AppState& app) {
         ImGui::TableSetupScrollFreeze(0,1);
         ImGui::TableHeadersRow();
 
+        // Sort an INDEX VIEW, never app.results itself. Two reasons:
+        //   - app.results is the album order the analysis produced. Reordering
+        //     it in place destroys the only record of that order, so there is
+        //     no way back to it once the user clicks a column.
+        //   - app.selected_track indexes app.results, so permuting the vector
+        //     silently moved the detail panel onto a different track.
+        // Cleared by start_analysis; this rebuild is the safety net for any
+        // other way the two can fall out of step (a re-run of the SAME album
+        // yields the same count, so a size check alone would keep a stale
+        // permutation).
+        if (app.row_order.size() != app.results.size()) {
+            app.row_order.resize(app.results.size());
+            for (int i = 0; i < (int)app.row_order.size(); ++i) app.row_order[i] = i;
+            if (ImGuiTableSortSpecs* sp0 = ImGui::TableGetSortSpecs())
+                sp0->SpecsDirty = true;   // re-apply the active sort to new rows
+        }
+
         if (ImGuiTableSortSpecs* sort = ImGui::TableGetSortSpecs())
             if (sort->SpecsDirty && sort->SpecsCount>0) {
                 auto& sp = sort->Specs[0]; bool asc = sp.SortDirection==ImGuiSortDirection_Ascending;
-                std::sort(app.results.begin(), app.results.end(),
-                    [&](const dr::TrackResult&a,const dr::TrackResult&b){
+                const auto& R = app.results;
+                std::stable_sort(app.row_order.begin(), app.row_order.end(),
+                    [&](int ia, int ib){
+                        const dr::TrackResult& a = R[ia]; const dr::TrackResult& b = R[ib];
                         switch(sp.ColumnIndex){
                             case 0: return asc? a.dr_score<b.dr_score : a.dr_score>b.dr_score;
                             case 2: return asc? a.peak_dbfs<b.peak_dbfs : a.peak_dbfs>b.peak_dbfs;
@@ -1073,13 +1094,19 @@ static void band_results(AppState& app) {
                             case 4: return asc? a.integrated_lufs<b.integrated_lufs : a.integrated_lufs>b.integrated_lufs;
                             case 5: return asc? a.plr_db<b.plr_db : a.plr_db>b.plr_db;
                             case 6: return asc? a.duration_secs<b.duration_secs : a.duration_secs>b.duration_secs;
-                            default: return asc? a.filename<b.filename : a.filename>b.filename;
+                            // TRACK: album order. Ascending restores exactly the
+                            // order the analysis produced -- which for a cue or
+                            // an SACD is the TOC order, and for a folder is the
+                            // natural-sorted listing (grp::natural_less), so
+                            // "2 - x" precedes "10 - x".
+                            default: return asc? ia<ib : ia>ib;
                         }});
                 sort->SpecsDirty=false;
             }
 
         char b[64];
-        for (int i=0;i<(int)app.results.size();++i) {
+        for (int row=0; row<(int)app.row_order.size(); ++row) {
+            const int i = app.row_order[row];          // index into app.results
             const auto& t = app.results[i];
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
@@ -1393,8 +1420,7 @@ static void render_ui(AppState& app) {
     ImGui::BeginChild("content", ImVec2(ImGui::GetContentRegionAvail().x - side_w, 0), false);
     band_header(app);
     band_source(app, analyzing);
-    if (source_is_sacd(app)) band_sacd(app);
-    if (source_is_dsd(app)) band_dsd(app);
+    band_source_options(app, source_is_sacd(app), source_is_dsd(app));
     refresh_stream_probe(app);
     if (!app.streams.empty()) band_streams(app);
 

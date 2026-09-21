@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <functional>
@@ -76,6 +77,70 @@ struct Options {
     dr::BlockSet   blocks   = dr::BlockSet::Reference;
     int            stream   = -1;   // container audio-stream index, -1 = auto
 };
+
+// ── Natural (numeric-aware) ordering ───────────────────────────────────────
+//
+// Album order, for the very common case where it is encoded in the filename.
+// A plain lexicographic sort compares "10" against "2" one character at a
+// time and puts track 10 third:
+//
+//     1 - Track    10 - Track    11 - Track    2 - Track    20 - Track  ...
+//
+// which is what made an album list "willy nilly". Zero-padded numbering
+// ("01".."14") happens to sort correctly either way, which is why this went
+// unnoticed -- most of the reference corpus is padded.
+//
+// Digit runs compare by VALUE, everything else case-insensitively, with a
+// raw-byte tiebreak at the end so the result is a total order (std::sort has
+// undefined behaviour on a comparator that is not a strict weak ordering, and
+// "mostly ordered" is not a thing it tolerates).
+//
+// Deliberately NOT metadata-driven: crete parses no tags, and inventing a tag
+// reader here would make listing order depend on how a file was tagged rather
+// than on what the folder plainly shows.
+inline int natural_compare(const std::string& a, const std::string& b) {
+    auto lower = [](char c) {
+        return static_cast<unsigned char>(
+            std::tolower(static_cast<unsigned char>(c)));
+    };
+    auto is_digit = [](char c) {
+        return std::isdigit(static_cast<unsigned char>(c)) != 0;
+    };
+
+    size_t i = 0, j = 0;
+    while (i < a.size() && j < b.size()) {
+        if (is_digit(a[i]) && is_digit(b[j])) {
+            const size_t zi = i, zj = j;
+            while (i < a.size() && a[i] == '0') ++i;
+            while (j < b.size() && b[j] == '0') ++j;
+            size_t di = i, dj = j;
+            while (di < a.size() && is_digit(a[di])) ++di;
+            while (dj < b.size() && is_digit(b[dj])) ++dj;
+            const size_t la = di - i, lb = dj - j;
+            // More significant digits => larger value (leading zeros stripped).
+            if (la != lb) return la < lb ? -1 : 1;
+            for (size_t k = 0; k < la; ++k)
+                if (a[i + k] != b[j + k]) return a[i + k] < b[j + k] ? -1 : 1;
+            // Same value: order by how it was written, so "01" and "1" have a
+            // stable relative position instead of comparing equal.
+            const size_t pad_a = i - zi, pad_b = j - zj;
+            if (pad_a != pad_b) return pad_a < pad_b ? -1 : 1;
+            i = di; j = dj;
+        } else {
+            const unsigned char ca = lower(a[i]), cb = lower(b[j]);
+            if (ca != cb) return ca < cb ? -1 : 1;
+            ++i; ++j;
+        }
+    }
+    if (i < a.size()) return 1;
+    if (j < b.size()) return -1;
+    if (a != b) return a < b ? -1 : 1;   // differed only by case
+    return 0;
+}
+
+inline bool natural_less(const std::string& a, const std::string& b) {
+    return natural_compare(a, b) < 0;
+}
 
 // ── Path -> groups ─────────────────────────────────────────────────────────
 
@@ -141,8 +206,8 @@ inline std::vector<Group> collect(const std::string& path,
         }
         else if (audio::is_supported_format(fp)) audio_paths.push_back(fp);
     }
-    std::sort(cue_paths.begin(), cue_paths.end());
-    std::sort(audio_paths.begin(), audio_paths.end());
+    std::sort(cue_paths.begin(), cue_paths.end(), natural_less);
+    std::sort(audio_paths.begin(), audio_paths.end(), natural_less);
 
     // Pass 2: parse each cue, resolve its referenced audio file, claim it.
     std::vector<fs::path> claimed_paths;
