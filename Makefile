@@ -342,7 +342,7 @@ setup-ffmpeg: ffmpeg-ensure
 # prefix whose provenance you simply do not trust).
 .PHONY: ffmpeg-rebuild
 ffmpeg-rebuild:
-	./$(FFMPEG_SCRIPT)
+	./$(FFMPEG_SCRIPT) "$(FFMPEG_VERSION)" "$(abspath $(FFMPEG_PREFIX))"
 
 # ============================================================================
 # FFmpeg (optional, compact static build → single self-contained binary)
@@ -388,6 +388,10 @@ FFMPEG_STAMP      = $(FFMPEG_PREFIX)/crete-ffmpeg-build.id
 # exactly the "someone forgot to extend the fingerprint" failure the whole-file
 # hash was introduced to remove.
 FFMPEG_AUTOBUILD ?= 1
+# Passed to the build script when ffmpeg-ensure has to run it. Matches the
+# script's own default and the version both Jenkinsfiles pin, so the three
+# cannot drift apart silently.
+FFMPEG_VERSION   ?= 7.1
 FFMPEG_SCRIPT_MD5 = $(shell (md5sum < $(FFMPEG_SCRIPT) 2>/dev/null || md5 -q $(FFMPEG_SCRIPT) 2>/dev/null) | cut -d' ' -f1)
 FFMPEG_STAMP_MD5  = $(shell sed -n 's/^script_md5=//p' $(FFMPEG_STAMP) 2>/dev/null)
 
@@ -400,7 +404,7 @@ ffmpeg-ensure:
 	        echo ">> compact FFmpeg is STALE ($(FFMPEG_SCRIPT) changed since it was built)"; \
 	        echo ">> rebuilding — a cached build with the wrong decoder set fails at"; \
 	        echo ">> decode time, not at link time, which is far harder to read."; \
-	        ./$(FFMPEG_SCRIPT); \
+	        ./$(FFMPEG_SCRIPT) "$(FFMPEG_VERSION)" "$(abspath $(FFMPEG_PREFIX))"; \
 	    fi; \
 	elif PKG_CONFIG_PATH=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --exists $(FFMPEG_LIBS) 2>/dev/null; then \
 	    echo ">> using an externally-provided FFmpeg at $(abspath $(FFMPEG_PREFIX)) (no crete stamp)"; \
@@ -408,7 +412,7 @@ ffmpeg-ensure:
 	    echo ">> fails, check for truehd/mlp/eac3/ac3/dca."; \
 	else \
 	    echo ">> compact FFmpeg not built — building it now via $(FFMPEG_SCRIPT)"; \
-	    ./$(FFMPEG_SCRIPT); \
+	    ./$(FFMPEG_SCRIPT) "$(FFMPEG_VERSION)" "$(abspath $(FFMPEG_PREFIX))"; \
 	fi
 
 # Recursively-expanded (=) on purpose: pkg-config only runs when an FFmpeg
