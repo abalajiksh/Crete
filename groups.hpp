@@ -288,9 +288,26 @@ inline size_t count_tracks(const std::vector<Group>& groups) {
 // Result of measuring one group. `errlog` carries this group's warnings and
 // its decode error, if any; a group that threw contributes no tracks but is
 // not otherwise special -- a partial album still reports the tracks that read.
+//
+// `notes` holds the same lines as `errlog`, one per entry and without the
+// trailing newline, so a machine-readable format can carry them as a list
+// instead of a blob a consumer would have to parse. `failed` counts groups
+// that produced no tracks at all, and `degraded` counts tracks whose input
+// was measurably damaged -- together they are what lets the CLI return a
+// distinct exit code instead of the flat 0 that made a corrupt album look
+// like a clean one.
 struct GroupResult {
     std::vector<dr::TrackResult> tracks;
     std::string                  errlog;
+    std::vector<std::string>     notes;
+    size_t                       failed   = 0;
+    size_t                       degraded = 0;
+
+    // One place that appends, so errlog and notes cannot drift apart.
+    void note(const std::string& line) {
+        errlog += line + "\n";
+        notes.push_back(line);
+    }
 };
 
 // `progress` is called once per track, with the name about to be measured,
@@ -337,14 +354,25 @@ inline GroupResult analyse(const Group& g, const Options& opt,
         // whichever FFmpeg ranks highest would make the number unreproducible
         // without this line.
         if (opt.stream < 0 && ad.audio_stream_count > 1) {
-            out.errlog += "Warning: " + basename + " has "
+            out.note("Warning: " + basename + " has "
                 + std::to_string(ad.audio_stream_count)
                 + " audio streams; measured stream "
                 + std::to_string(ad.stream_index)
                 + " (" + ad.codec + ", "
                 + std::to_string(ad.num_channels()) + " ch, "
                 + std::to_string(ad.sample_rate)
-                + " Hz). Use --stream N to choose.\n";
+                + " Hz). Use --stream N to choose.");
+        }
+
+        // Integrity findings from the decoder: a failed frame CRC, a declared
+        // length the file does not hold. These do NOT stop the measurement --
+        // the numbers below are whatever the damaged bytes decode to -- but
+        // they mark every one of them as untrustworthy, which is the whole
+        // point. Each one counts toward `degraded`, so the run's exit status
+        // can say so too.
+        for (const auto& w : ad.warnings) {
+            out.note("Warning: " + basename + ": " + w);
+            out.degraded++;
         }
 
         // File-level MQA check, stamped onto every track from this decode.
@@ -389,8 +417,8 @@ inline GroupResult analyse(const Group& g, const Options& opt,
                 if (progress) progress(track_name);
 
                 if (start >= end) {
-                    out.errlog += std::string("Warning: empty cue range for ")
-                                  + track_name + "\n";
+                    out.note(std::string("Warning: empty cue range for ")
+                             + track_name);
                     continue;
                 }
 
@@ -410,8 +438,35 @@ inline GroupResult analyse(const Group& g, const Options& opt,
                 out.tracks.back().codec_profile      = ad.codec_profile;
             }
         }
+
+        // Result-level sanity check: on integer PCM a sample peak above
+        // 0 dBFS is arithmetically impossible -- the samples are bounded by
+        // their own word length -- so seeing one is proof the decode went
+        // wrong, whatever the CRCs said. It is the check that catches the
+        // damage no checksum covers, because WAV and AIFF carry none at all.
+        //
+        // Deliberately NOT applied to float PCM, to decimated DSD or to
+        // FFmpeg's float decoders: all three can legitimately exceed full
+        // scale (DSD's retained noise shaping alone reads +1.7 dBFS at
+        // 352.8 kHz out), so the invariant only holds where integers enforce
+        // it. ad.integer_pcm is set by exactly those decoders that do.
+        if (ad.integer_pcm) {
+            for (const auto& t : out.tracks) {
+                if (t.peak_dbfs > 0.0) {
+                    char buf[96];
+                    std::snprintf(buf, sizeof(buf), "%.2f", t.peak_dbfs);
+                    out.note("Warning: " + basename + ": CORRUPT -- sample peak "
+                             + buf + " dBFS on " + std::to_string(ad.bit_depth)
+                             + "-bit integer PCM, which cannot exceed 0 dBFS. "
+                               "The decode produced values outside the format's "
+                               "range; every number for this track is unreliable.");
+                    out.degraded++;
+                }
+            }
+        }
     } catch (const std::exception& e) {
-        out.errlog += "Error: " + basename + ": " + e.what() + "\n";
+        out.note("Error: " + basename + ": " + e.what());
+        out.failed++;
     }
     return out;
 }
@@ -430,6 +485,14 @@ inline GroupResult analyse(const Group& g, const Options& opt,
 struct RunResult {
     std::vector<dr::TrackResult> tracks;
     std::string                  errlog;
+    std::vector<std::string>     notes;
+    size_t                       failed   = 0;   // groups that yielded nothing
+    size_t                       degraded = 0;   // tracks with damaged input
+
+    // True when the run measured something but not everything, or measured
+    // something it could prove was damaged. Distinct from "nothing decoded",
+    // which the caller sees as an empty track list.
+    bool partial() const { return failed > 0 || degraded > 0; }
 };
 
 inline RunResult run(const std::vector<Group>& groups, const Options& opt,
@@ -474,7 +537,12 @@ inline RunResult run(const std::vector<Group>& groups, const Options& opt,
     out.tracks.reserve(count_tracks(groups));
     for (size_t gi = 0; gi < ngroups; ++gi)
         for (auto& t : slots[gi].tracks) out.tracks.push_back(std::move(t));
-    for (size_t gi = 0; gi < ngroups; ++gi) out.errlog += slots[gi].errlog;
+    for (size_t gi = 0; gi < ngroups; ++gi) {
+        out.errlog += slots[gi].errlog;
+        for (auto& n : slots[gi].notes) out.notes.push_back(std::move(n));
+        out.failed   += slots[gi].failed;
+        out.degraded += slots[gi].degraded;
+    }
     return out;
 }
 

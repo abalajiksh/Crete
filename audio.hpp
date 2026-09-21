@@ -10,6 +10,7 @@
 // ============================================================================
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -62,6 +63,24 @@ struct AudioData {
     // measure the delivered stream, name the premium layer separately.
     std::string codec_profile;
 
+    // True when the source format bounds every sample to [-1, 1) by
+    // construction -- integer PCM in WAV/RF64/Wave64/AIFF, and FLAC. It is
+    // what licenses the "a peak above 0 dBFS is impossible" check in
+    // grp::analyse(): float PCM, decimated DSD and FFmpeg's float decoders
+    // can all legitimately exceed full scale, so the invariant holds only
+    // where the integers themselves cannot.
+    bool integer_pcm = false;
+
+    // Integrity findings from the decode: a CRC mismatch, a short read, a
+    // declared length the file does not hold. Empty on an intact file.
+    //
+    // These NEVER change what was measured. crete is a meter, not a repair
+    // tool: a damaged file still reports whatever its bytes decode to, and
+    // this says the input was not intact so the number cannot be trusted.
+    // Keeping the two separate is what makes the measurement path on a good
+    // file bit-identical to the one that existed before these checks.
+    std::vector<std::string> warnings;
+
     size_t num_channels() const { return channels.size(); }
     size_t num_samples()  const { return channels.empty() ? 0 : channels[0].size(); }
 };
@@ -75,6 +94,16 @@ inline std::vector<uint8_t> read_file(const std::string& path) {
     std::vector<uint8_t> buf(static_cast<size_t>(sz));
     f.read(reinterpret_cast<char*>(buf.data()), sz);
     return buf;
+}
+
+// Render a shortfall as a percentage, for the truncation warnings. One
+// decimal is enough to tell "a few frames short" from "half the file".
+inline std::string fmt_pct(uint64_t part, uint64_t whole) {
+    if (whole == 0) return "0.0%";
+    double p = 100.0 * static_cast<double>(part) / static_cast<double>(whole);
+    char b[32];
+    std::snprintf(b, sizeof(b), "%.1f%%", p);
+    return b;
 }
 
 // Little-endian readers
@@ -162,7 +191,8 @@ inline bool w64_id_is(const uint8_t* p, const char* fourcc) {
 // plain RIFF file decodes byte-identically to before this was split out.
 inline AudioData decode_wave_payload(const uint8_t* fmt, size_t fmt_size,
                                      const uint8_t* data_ptr, size_t data_size,
-                                     const char* codec) {
+                                     const char* codec,
+                                     uint64_t declared_data_size = 0) {
     AudioData ad;
     ad.codec = codec;
 
@@ -201,6 +231,21 @@ inline AudioData decode_wave_payload(const uint8_t* fmt, size_t fmt_size,
     for (auto& ch : ad.channels) ch.resize(n_frames);
 
     bool is_float = (audio_fmt == 3);
+    ad.integer_pcm = !is_float;
+
+    // A truncated capture declares more data than it holds. The walker has
+    // already clamped the read to what is present (that clamp is what stops
+    // this being a segfault); this is the part that says so out loud, rather
+    // than silently metering a track that stops early.
+    if (declared_data_size > data_size) {
+        uint64_t missing = declared_data_size - data_size;
+        ad.warnings.push_back(
+            std::string(codec) + ": TRUNCATED -- the data chunk declares "
+            + std::to_string(declared_data_size) + " bytes but the file holds "
+            + std::to_string(data_size) + " (" + std::to_string(missing)
+            + " missing, " + fmt_pct(missing, declared_data_size)
+            + "). Measured the audio that is present.");
+    }
 
     for (size_t f = 0; f < n_frames; ++f) {
         for (uint16_t c = 0; c < n_channels; ++c) {
@@ -271,8 +316,11 @@ inline AudioData decode_wav(const std::vector<uint8_t>& buf) {
     const uint8_t* fmt_ptr  = nullptr;  size_t   fmt_size  = 0;
     const uint8_t* data_ptr = nullptr;  uint64_t data_size = 0;
 
-    uint64_t ds64_data_size = 0;
-    bool     have_ds64      = false;
+    uint64_t ds64_data_size    = 0;
+    bool     have_ds64         = false;
+    // What the data chunk claimed, before the clamp below. Kept so a
+    // truncated file can be reported as truncated rather than just read short.
+    uint64_t declared_data_size = 0;
 
     // Parse chunks
     size_t pos = 12;
@@ -312,6 +360,7 @@ inline AudioData decode_wav(const std::vector<uint8_t>& buf) {
             // A truncated capture — an interrupted recording, a partial copy —
             // declares more data than it holds. Read what is actually there
             // instead of running off the end of the buffer.
+            declared_data_size = chunk_size;
             data_size = std::min<uint64_t>(chunk_size, avail);
         }
 
@@ -322,7 +371,7 @@ inline AudioData decode_wav(const std::vector<uint8_t>& buf) {
 
     return decode_wave_payload(fmt_ptr, fmt_size, data_ptr,
                                static_cast<size_t>(data_size),
-                               rf64 ? "RF64" : "WAV");
+                               rf64 ? "RF64" : "WAV", declared_data_size);
 }
 
 // Sony Wave64.
@@ -335,6 +384,7 @@ inline AudioData decode_w64(const std::vector<uint8_t>& buf) {
 
     const uint8_t* fmt_ptr  = nullptr;  size_t   fmt_size  = 0;
     const uint8_t* data_ptr = nullptr;  uint64_t data_size = 0;
+    uint64_t declared_data_size = 0;
 
     size_t pos = 40;                         // 16 riff GUID + 8 size + 16 wave GUID
     while (pos + 24 <= buf.size()) {
@@ -350,6 +400,7 @@ inline AudioData decode_w64(const std::vector<uint8_t>& buf) {
             fmt_size = static_cast<size_t>(body);
         } else if (w64_id_is(id, "data")) {
             data_ptr  = chunk;
+            declared_data_size = size - 24;   // Wave64 sizes include the header
             data_size = body;
         }
 
@@ -360,7 +411,8 @@ inline AudioData decode_w64(const std::vector<uint8_t>& buf) {
     }
 
     return decode_wave_payload(fmt_ptr, fmt_size, data_ptr,
-                               static_cast<size_t>(data_size), "WAVE64");
+                               static_cast<size_t>(data_size), "WAVE64",
+                               declared_data_size);
 }
 
 // Entry point for the whole RIFF family. Dispatch is by MAGIC, not extension,
@@ -402,26 +454,43 @@ inline AudioData decode_aiff(const std::vector<uint8_t>& buf) {
 
     uint32_t compression_type = 0;  // for AIFF-C
 
+    // Every length here comes from the file, so every one of them is clamped
+    // to what the buffer actually holds before it is used as a pointer or a
+    // count. A truncated AIFF used to walk straight off the end of the buffer
+    // and SEGFAULT -- the same defect the RIFF walker had before 0.14.0, in
+    // the decoder that never got the same treatment.
+    uint64_t declared_ssnd = 0;
     size_t pos = 12;
     while (pos + 8 <= buf.size()) {
-        uint32_t chunk_size = rd32be(buf.data() + pos + 4);
+        uint32_t chunk_size  = rd32be(buf.data() + pos + 4);
         const uint8_t* chunk = buf.data() + pos + 8;
+        const size_t   avail = buf.size() - (pos + 8);
+        const size_t   body  = std::min<size_t>(chunk_size, avail);
 
-        if (std::memcmp(buf.data()+pos, "COMM", 4) == 0) {
-            n_channels     = rd16be(chunk);
-            n_frames       = rd32be(chunk + 2);
+        if (std::memcmp(buf.data()+pos, "COMM", 4) == 0 && body >= 18) {
+            n_channels      = rd16be(chunk);
+            n_frames        = rd32be(chunk + 2);
             bits_per_sample = rd16be(chunk + 6);
-            sample_rate    = extended_to_double(chunk + 8);
+            sample_rate     = extended_to_double(chunk + 8);
 
-            if (is_aifc && chunk_size >= 22) {
+            if (is_aifc && body >= 22) {
                 compression_type = rd32be(chunk + 18);
             }
-        } else if (std::memcmp(buf.data()+pos, "SSND", 4) == 0) {
+        } else if (std::memcmp(buf.data()+pos, "SSND", 4) == 0 && body >= 8) {
             ssnd_offset = rd32be(chunk);
-            ssnd_data = chunk + 8 + ssnd_offset;
-            ssnd_size = chunk_size - 8 - ssnd_offset;
+            // offset is a file-supplied displacement into this chunk: it can
+            // point past the chunk, and on a damaged file it does.
+            const uint64_t skip = 8ull + ssnd_offset;
+            if (skip <= body) {
+                ssnd_data      = chunk + skip;
+                ssnd_size      = body - static_cast<size_t>(skip);
+                // What the chunk CLAIMED, before the clamp -- so a short file
+                // can be reported as short rather than just measured short.
+                declared_ssnd  = (chunk_size > skip) ? chunk_size - skip : 0;
+            }
         }
 
+        if (chunk_size > avail) break;   // truncated: nothing further to walk
         pos += 8 + chunk_size;
         if (chunk_size & 1) pos++;
     }
@@ -445,6 +514,33 @@ inline AudioData decode_aiff(const std::vector<uint8_t>& buf) {
     size_t frame_size = bytes_per_sample * n_channels;
     if (frame_size == 0) throw std::runtime_error("AIFF: invalid frame size");
     size_t actual_frames = std::min<size_t>(n_frames, ssnd_size / frame_size);
+
+    // AIFF proper is integer PCM, and decode_aiff accepts only NONE and sowt
+    // (float lives in the fl32/fl64 AIFF-C extensions, which are rejected
+    // above), so every sample here is bounded to [-1, 1) by construction.
+    ad.integer_pcm = true;
+
+    // COMM declares the frame count; SSND holds the bytes. A file cut short
+    // has fewer bytes than COMM accounts for, and the min() above quietly
+    // absorbed it.
+    if (actual_frames < n_frames) {
+        uint64_t missing = static_cast<uint64_t>(n_frames) - actual_frames;
+        ad.warnings.push_back(
+            "AIFF: TRUNCATED -- COMM declares " + std::to_string(n_frames)
+            + " frames but SSND holds " + std::to_string(actual_frames)
+            + " (" + std::to_string(missing) + " missing, "
+            + fmt_pct(missing, static_cast<uint64_t>(n_frames))
+            + "). Measured the audio that is present.");
+    } else if (declared_ssnd > ssnd_size) {
+        // Enough frames for COMM, but the chunk itself was cut: say so.
+        uint64_t missing = declared_ssnd - ssnd_size;
+        ad.warnings.push_back(
+            "AIFF: TRUNCATED -- the SSND chunk declares "
+            + std::to_string(declared_ssnd) + " bytes but the file holds "
+            + std::to_string(ssnd_size) + " (" + std::to_string(missing)
+            + " missing, " + fmt_pct(missing, declared_ssnd)
+            + "). Measured the audio that is present.");
+    }
 
     ad.channels.resize(n_channels);
     for (auto& ch : ad.channels) ch.resize(actual_frames);
@@ -494,6 +590,60 @@ inline AudioData decode_aiff(const std::vector<uint8_t>& buf) {
 // ════════════════════════════════════════════════════════════════════════════
 
 namespace flac {
+
+// ── Frame checksums ────────────────────────────────────────────────────────
+//
+// FLAC protects every frame twice: a CRC-8 over the frame header and a CRC-16
+// over the whole frame. crete used to read both and throw them away, which
+// meant the one integrity check the format hands you for free went unused --
+// a bit-rotted file decoded to plausible-looking garbage and reported a DR for
+// it. These verify them.
+//
+// CRC-8:  x^8 + x^2 + x^1 + x^0        (0x07),  init 0
+// CRC-16: x^16 + x^15 + x^2 + x^0      (0x8005), init 0
+// Both are plain MSB-first, no reflection and no final XOR.
+inline const uint8_t* crc8_table() {
+    static const std::array<uint8_t, 256> t = [] {
+        std::array<uint8_t, 256> a{};
+        for (int i = 0; i < 256; ++i) {
+            uint8_t c = static_cast<uint8_t>(i);
+            for (int b = 0; b < 8; ++b)
+                c = static_cast<uint8_t>((c & 0x80) ? ((c << 1) ^ 0x07) : (c << 1));
+            a[static_cast<size_t>(i)] = c;
+        }
+        return a;
+    }();
+    return t.data();
+}
+
+inline const uint16_t* crc16_table() {
+    static const std::array<uint16_t, 256> t = [] {
+        std::array<uint16_t, 256> a{};
+        for (int i = 0; i < 256; ++i) {
+            uint16_t c = static_cast<uint16_t>(i << 8);
+            for (int b = 0; b < 8; ++b)
+                c = static_cast<uint16_t>((c & 0x8000) ? ((c << 1) ^ 0x8005) : (c << 1));
+            a[static_cast<size_t>(i)] = c;
+        }
+        return a;
+    }();
+    return t.data();
+}
+
+inline uint8_t crc8(const uint8_t* d, size_t n) {
+    const uint8_t* tb = crc8_table();
+    uint8_t c = 0;
+    for (size_t i = 0; i < n; ++i) c = tb[c ^ d[i]];
+    return c;
+}
+
+inline uint16_t crc16(const uint8_t* d, size_t n) {
+    const uint16_t* tb = crc16_table();
+    uint16_t c = 0;
+    for (size_t i = 0; i < n; ++i)
+        c = static_cast<uint16_t>((c << 8) ^ tb[(c >> 8) ^ d[i]]);
+    return c;
+}
 
 // ── Bit reader (MSB-first) ─────────────────────────────────────────────────
 class BitReader {
@@ -826,6 +976,15 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
 
     double norm = 1.0 / (1LL << (si.bits_per_sample - 1));
 
+    ad.integer_pcm = true;   // FLAC is integer PCM; samples cannot exceed FS
+
+    // Integrity tallies. A frame whose CRC fails is still DECODED and still
+    // contributes its samples -- rejecting it would change the numbers on
+    // every file that currently decodes, and crete's job is to report what
+    // the bytes say, not to repair them. What changes is that the damage is
+    // now named instead of silently metered.
+    size_t frames_ok = 0, crc8_bad = 0, crc16_bad = 0;
+
     // Decode audio frames
     while (pos + 2 < buf.size()) {
         // Fast byte-level pre-filter: 0xFF followed by 0xF8 or 0xF9
@@ -875,8 +1034,14 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
             if (sr_code == 12) br.read_bits(8);
             else if (sr_code == 13 || sr_code == 14) br.read_bits(16);
 
-            // CRC-8 (skip)
-            br.read_bits(8);
+            // CRC-8 over the frame header. The header is a whole number of
+            // bytes by construction (32 fixed bits, then a UTF-8 coded frame
+            // number and the optional 8/16-bit block-size and sample-rate
+            // fields), so position_bytes() is exactly its length here.
+            const size_t header_len   = br.position_bytes();
+            const uint32_t crc8_read  = br.read_bits(8);
+            const bool header_ok =
+                flac::crc8(buf.data() + frame_start, header_len) == crc8_read;
 
             // Determine bits per sample for each subframe
             int bps = si.bits_per_sample;
@@ -928,9 +1093,17 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
                     ad.channels[c].push_back(subframes[src][i] * norm);
             }
 
-            // Align to byte boundary and skip CRC-16
+            // CRC-16 over the whole frame, header included, up to but not
+            // including the two checksum bytes themselves.
             br.align();
-            br.read_bits(16);
+            const size_t crc16_at    = br.position_bytes();
+            const uint32_t crc16_read = br.read_bits(16);
+            const bool frame_ok =
+                flac::crc16(buf.data() + frame_start, crc16_at) == crc16_read;
+
+            frames_ok++;
+            if (!header_ok) crc8_bad++;
+            if (!frame_ok)  crc16_bad++;
 
             pos = frame_start + br.position_bytes();
         }
@@ -942,6 +1115,41 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
 
     if (ad.channels.empty() || ad.channels[0].empty())
         throw std::runtime_error("FLAC: no audio frames decoded");
+
+    if (crc16_bad > 0 || crc8_bad > 0) {
+        ad.warnings.push_back(
+            "FLAC: CORRUPT -- " + std::to_string(crc16_bad) + " of "
+            + std::to_string(frames_ok) + " frames failed the CRC-16 check ("
+            + fmt_pct(crc16_bad, frames_ok) + (crc8_bad ? ", " + std::to_string(crc8_bad)
+              + " with a bad header CRC-8" : "")
+            + "). The decoded audio is not what was encoded; every number "
+              "below is unreliable.");
+    }
+
+    // STREAMINFO carries the stream's total sample count. crete read it as an
+    // allocation hint and never checked the decode against it, so a file that
+    // stopped early just measured short. A shortfall here is the signature of
+    // a truncated file or of frames lost to a resync.
+    if (si.total_samples > 0) {
+        const size_t got = ad.num_samples();
+        if (got < si.total_samples) {
+            uint64_t missing = si.total_samples - got;
+            ad.warnings.push_back(
+                "FLAC: TRUNCATED -- STREAMINFO declares "
+                + std::to_string(si.total_samples) + " samples per channel but "
+                + std::to_string(got) + " decoded (" + std::to_string(missing)
+                + " missing, " + fmt_pct(missing, si.total_samples)
+                + "). Measured the audio that is present.");
+        } else if (got > si.total_samples) {
+            // More audio than the header accounts for: the resync loop
+            // accepted frames that are not part of this stream.
+            ad.warnings.push_back(
+                "FLAC: CORRUPT -- decoded " + std::to_string(got)
+                + " samples per channel against STREAMINFO's "
+                + std::to_string(si.total_samples)
+                + ". Frames were accepted that do not belong to this stream.");
+        }
+    }
 
     return ad;
 }

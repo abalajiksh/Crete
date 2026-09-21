@@ -322,6 +322,51 @@ Track times are stored internally as CDDA frames (1/75 sec) and converted to PCM
 
 ---
 
+## Damaged files
+
+A meter's worst failure is not refusing a file — it is measuring a broken one and reporting a number as if nothing happened. Before 0.17.0 crête did exactly that: a FLAC with one bad sector in it was scored, averaged into the album DR, and returned exit 0 with no error field anywhere in the JSON, while the reference `flac` decoder refused the same file outright. A single flipped byte was worse, producing numbers *identical* to the clean file.
+
+crête now verifies what each format lets it verify, and says so.
+
+| check | formats | what it catches |
+|---|---|---|
+| **frame CRC-8 + CRC-16** | FLAC | altered audio data — the bit-flip nothing else can see |
+| **declared vs decoded length** | FLAC (STREAMINFO), WAV/RF64/Wave64 (`data`), AIFF (COMM/SSND) | truncation, interrupted copies, frames lost to a resync |
+| **sample peak ≤ 0 dBFS** | any integer PCM | a decode that produced values the format cannot represent |
+
+**A damaged file is still measured.** crête is a meter, not a repair tool: it reports what the bytes decode to and marks every affected number as untrustworthy. That separation is deliberate — it is what keeps the measurement path on an intact file bit-identical to the one that existed before these checks, verified across 62 files spanning FLAC, WAV (integer and float), AIFF, RF64, Wave64, ALAC, TrueHD, AC-3 and DTS-HD MA in mono, stereo, quad, 5.1 and 7.1.
+
+```
+Warning: 04 - damaged.flac: FLAC: CORRUPT -- 1 of 215 frames failed the CRC-16 check (0.5%).
+Warning: 04 - damaged.flac: FLAC: TRUNCATED -- STREAMINFO declares 882000 samples per channel but 877904 decoded (4096 missing, 0.5%).
+Warning: 04 - damaged.flac: CORRUPT -- sample peak 45.32 dBFS on 16-bit integer PCM, which cannot exceed 0 dBFS.
+Error:   05 - unreadable.flac: FLAC: invalid magic
+```
+
+Every one of those lines also appears in `-f json` under **`warnings`**, which is **always present** — an empty array is the positive statement "nothing was wrong", rather than the absence of evidence a missing key would be. `num_tracks` counts what was *measured*, so a file that failed to decode contributes a warning and no track; the two together are what tell a consumer something is missing.
+
+**Exit status:**
+
+| code | meaning |
+|---|---|
+| `0` | every input decoded cleanly |
+| `1` | nothing could be analysed |
+| `2` | completed, but some input failed to decode or was damaged — the numbers are unreliable, including any album value computed from them |
+
+### The limit, stated plainly
+
+**WAV and AIFF carry no checksum.** Altered *sample values* in them are undetectable — by crête or by any other meter — because a run of zeros inside a `data` chunk is indistinguishable from a passage of digital silence that the artist put there. Only length and range can be checked in those formats. FLAC is the one that can prove itself.
+
+This is pinned rather than glossed: the INTEGRITY suite asserts that a WAV with 4 KB of zeros written into its audio comes back **clean**, so the limitation stays visible in a green run instead of being quietly assumed away.
+
+### Testing
+
+`scripts/make_integrity_corpus.sh` builds the corpus from a fixed seed, and the zip is deterministic (fixed mtimes, sorted entry list) so two runs on two machines produce the same sha256 — a corpus CI pins by checksum has to be reproducible in the artifact that is actually compared. It is the only crête corpus that is **not** commercial music, so unlike every reference suite it can be redistributed, regenerated anywhere, and needs no oracle — it gates crête's reporting contract, not a DR value. The harness suite is `tests/test_integrity.py` (marker `integrity`): 19 tests, ~5 s, zero-dep binary. It passes on 0.17.0 and fails 13 tests on 0.16.1.
+
+Generating that corpus immediately found a **reachable segfault**: a truncated AIFF walked off the end of the buffer, because the AIFF chunk walker used file-supplied lengths and an SSND offset without bounds-checking either — the same defect the RIFF walker had fixed in 0.14.0, in the decoder that never got the same treatment. Fixed, and the suite now sweeps 21 truncation offsets per format to keep it fixed.
+
+---
+
 ## Output Formats
 
 **Official Album Data reference:** https://dr.loudness-war.info/album/view/200279

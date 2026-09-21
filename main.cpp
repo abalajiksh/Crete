@@ -687,12 +687,24 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
 #ifdef CRETE_HAS_JSON
 
 void print_json(const std::vector<dr::TrackResult>& tracks,
-                const std::string& folder_path) {
+                const std::string& folder_path,
+                const std::vector<std::string>& notes) {
     json j;
     j["version"] = std::string(PROGRAM_NAME) + " " + PROGRAM_VERSION;
     j["folder_path"] = folder_path;
     j["album_dr"] = dr::album_dr(tracks);
     j["num_tracks"] = tracks.size();
+
+    // Integrity and selection notes for this run: failed decodes, CRC
+    // mismatches, truncation, the multi-stream choice. ALWAYS present, so a
+    // consumer can test it without first testing for the key -- an empty
+    // array is the positive statement "nothing was wrong", which is exactly
+    // what a silently damaged file used to be indistinguishable from.
+    //
+    // num_tracks counts what was MEASURED. A file that failed to decode
+    // contributes a note here and no track, so the two together are what
+    // tell a consumer that something is missing.
+    j["warnings"] = notes;
 
     // Self-documenting standards map: which spec governs each reported field.
     // Mirrors MAAT DROffline's per-metric tags. Per-channel momentary/short-term
@@ -917,7 +929,24 @@ void print_usage(const char* argv0) {
               << "Cue sheets: any .cue file in the input folder is parsed\n"
               << "  automatically; each TRACK becomes its own analysed entry,\n"
               << "  sliced from the referenced monolithic audio file.\n"
-              << "Algorithm: TT Dynamic Range (3s blocks, top-20% percentile)\n";
+              << "Algorithm: TT Dynamic Range (3s blocks, top-20% percentile)\n\n"
+              << "Integrity: crete verifies what the format lets it verify and says\n"
+              << "  so. FLAC frames are checked against their CRC-8 and CRC-16 and\n"
+              << "  the decode against STREAMINFO's sample count; WAV/RF64/Wave64\n"
+              << "  and AIFF are checked against their declared data length; and on\n"
+              << "  any integer-PCM source a sample peak above 0 dBFS is reported as\n"
+              << "  a decode fault, because it is arithmetically impossible.\n"
+              << "  A damaged file is still MEASURED -- crete is a meter, not a\n"
+              << "  repair tool -- but every affected number is flagged, listed in\n"
+              << "  JSON under \"warnings\", and reflected in the exit status.\n"
+              << "  LIMIT: WAV and AIFF carry no checksum, so altered SAMPLE VALUES\n"
+              << "  in them are undetectable by any meter. Only length and range\n"
+              << "  can be checked there. FLAC is the format that can prove itself.\n\n"
+              << "Exit status:\n"
+              << "  0  every input decoded cleanly\n"
+              << "  1  nothing could be analysed\n"
+              << "  2  completed, but some input failed to decode or was damaged --\n"
+              << "     the numbers reported are unreliable, including any album value\n";
 }
 
 void print_version() {
@@ -1101,6 +1130,13 @@ int main(int argc, char* argv[]) {
 
     bool any_results = false;
 
+    // Set when the run measured something but could not vouch for all of it:
+    // a file that failed to decode, or one whose bytes were provably damaged.
+    // It is what separates exit 2 from exit 0 -- before this, an album with a
+    // corrupt track scored it, averaged it into the album DR and returned
+    // success, which is indistinguishable from a clean run to any script.
+    bool any_partial = false;
+
 
     for (const auto& path : paths) {
         std::vector<std::string> warnings;
@@ -1145,6 +1181,9 @@ int main(int argc, char* argv[]) {
         if (!quiet) std::cerr << "\r" << std::string(80, ' ') << "\r";
         if (!run.errlog.empty()) std::cerr << run.errlog;
 
+        if (run.partial()) any_partial = true;
+        const std::vector<std::string> run_notes = run.notes;
+
         std::vector<dr::TrackResult> results = std::move(run.tracks);
 
         if (results.empty()) continue;
@@ -1184,7 +1223,7 @@ int main(int argc, char* argv[]) {
                 break;
             case OutputFormat::Json:
 #ifdef CRETE_HAS_JSON
-                print_json(results, display_name);
+                print_json(results, display_name, run_notes);
 #endif
                 break;
         }
@@ -1200,6 +1239,14 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: no audio could be analysed"
                      " (no supported files, or every file failed to decode)\n";
         return 1;
+    }
+    if (any_partial) {
+        std::cerr << "Warning: completed with errors -- some input could not be"
+                     " decoded, or was damaged. See the warnings above;"
+                     " the numbers reported for affected tracks are"
+                     " unreliable, and any album value computed from them"
+                     " is too.\n";
+        return 2;
     }
     return 0;
 }
