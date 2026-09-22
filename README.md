@@ -306,6 +306,20 @@ Dispatch is by **content, not extension**: `.iso` names every disc image ever
 made, so crête checks for `SACDMTOC` at LSN 510 and quietly ignores anything
 else rather than trying to meter a data DVD.
 
+**This path is now gated.** It had no automated test at all until 0.17.0 — the
+reader and the DST decoder were validated by hand once and then left, which is
+uncomfortable for code whose failure mode is silence: each of the three format
+traps found while writing it produced audible output and a plausible DR. The
+`sacd` suite measures a **reduced** image — the first tracks of each area, the
+multichannel one relocated so the file need not span the 1.85 GB gap before it,
+229 MB instead of 4 GB. Every audio sector in it is the disc's own bytes; only
+the TOC fields describing extent are rewritten, and the builder
+(`scripts/make_sacd_test_image.py --verify`) measures every kept track in both
+the reduced and the full image and requires identical results, so its own
+address arithmetic cannot become a test that certifies its own mistake. 6
+passed / 2 skipped on its first weekly (#77); the 2 skips are the `.dsf` parity
+tier below.
+
 ### Cue sheet support
 
 When a folder contains a `.cue` file, crête:
@@ -361,7 +375,9 @@ This is pinned rather than glossed: the INTEGRITY suite asserts that a WAV with 
 
 ### Testing
 
-`scripts/make_integrity_corpus.sh` builds the corpus from a fixed seed, and the zip is deterministic (fixed mtimes, sorted entry list) so two runs on two machines produce the same sha256 — a corpus CI pins by checksum has to be reproducible in the artifact that is actually compared. It is the only crête corpus that is **not** commercial music, so unlike every reference suite it can be redistributed, regenerated anywhere, and needs no oracle — it gates crête's reporting contract, not a DR value. The harness suite is `tests/test_integrity.py` (marker `integrity`): 19 tests, ~5 s, zero-dep binary. It passes on 0.17.0 and fails 13 tests on 0.16.1.
+`scripts/make_integrity_corpus.sh` builds the corpus from a fixed seed, and the zip is deterministic (fixed mtimes, sorted entry list) so two runs on two machines produce the same sha256 — a corpus CI pins by checksum has to be reproducible in the artifact that is actually compared. It is the only crête corpus that is **not** commercial music, so unlike every reference suite it can be redistributed, regenerated anywhere, and needs no oracle — it gates crête's reporting contract, not a DR value. The harness suite is `tests/test_integrity.py` (marker `integrity`): 19 tests, ~5 s, zero-dep binary. It passes on 0.17.0 and fails 13 tests on 0.16.1 — a regression suite that cannot fail against the code it was written for is decoration. **19/19 in CI on its first weekly** (#77).
+
+Two things that run were worth knowing. **No reference file trips any of the new checks**: crête's exit 2 appears nowhere in a run spanning 51 albums and 11,931 comparisons, which is the corpus-wide version of a 255-file local sweep that also found none. And **the checks moved no measurement** — see *Pending work*.
 
 Generating that corpus immediately found a **reachable segfault**: a truncated AIFF walked off the end of the buffer, because the AIFF chunk walker used file-supplied lengths and an SSND offset without bounds-checking either — the same defect the RIFF walker had fixed in 0.14.0, in the decoder that never got the same treatment. Fixed, and the suite now sweeps 21 truncation offsets per format to keep it fixed.
 
@@ -650,6 +666,10 @@ and an interface, no decoder code — so crête stays MIT.
 
 Most of this section is a resolved record (kept for provenance). Closed since: **FIX 12 corpus re-validation** (validated — per-channel DR flags collapsed from 83/77 to 8/5), and the **DSD output-rate parity decision** (settled — 44.1 kHz is the parity-guaranteed rate, see below).
 
+**Weekly #77 (0.17.0): 200 tests, 184 passed, 16 skipped, 0 failed, 0 broken. 51 albums, all PASS. 11,931 comparisons, 44 flagged (0.37 %), zero catastrophic.** Two album-DR mismatches, both long documented: `BoneyM_10k_DSD128@44100` (a 0.020 dB miss of a `.5` boundary, not a rounding-rule problem) and `Thriller_DSD64@352800` (the 352.8 kHz rate dependence). `Min. PSR` remains the worst metric by average delta (0.598 dB, max 2.89) and remains deliberately out of scope.
+
+**The integrity work of 0.17.0 moved nothing, and that is measured rather than argued.** Every one of the 15 per-suite detailed reports in #77 is **identical** to the corresponding report from the last archived weekly, #73 — the same 11,931 comparisons, the same 44 flags, the same per-metric maxima and averages, the same two album mismatches — with the sole textual difference being one added header line. #73 recorded **0.13.1** and #77 records **0.17.0**, so that identity spans five releases (0.14.0, 0.15.0, 0.16.0, 0.16.1, 0.17.0): the RF64/Wave64 containers, the joint true-peak LFE guard, the DST decoder, the shared input collector with its natural-order fix, and the integrity checks. Each of those was individually argued to be a no-op on this corpus; this is the corpus agreeing, on every number it holds.
+
 Three further items closed in 0.13.1:
 
 - **Cross-arch identity** — measured on both CI agents, 8/8 each. The two Linux agents produce *identical* deltas against the same baseline, so the x86-64 vs aarch64 claim behind `-ffp-contract=off` now has real files behind it instead of being an untested assertion. Gated weekly. (A separate, genuinely platform-level finding fell out of it: Linux and macOS differ by one ULP on `20·log10(x)`, identically on both architectures — `libm` rounding, not FP contraction. A macOS-produced JSON cannot be equality-compared against a Linux one.)
@@ -664,7 +684,7 @@ v0.15.0 also adds **`codec_profile`** (see *Immersive carriers*) and **SACD ISO 
 
 v0.16.0 adds the **DST decoder**, so SACD multichannel areas measure rather than being refused — see *SACD disc images*. Written from ISO/IEC 14496-3 Subpart 10; lossless, so the numbers are the disc's. It carries its own correctness assertion (every frame must consume its own coded length), which exists because the bug found while writing it satisfied every other plausibility check available: frames parsed, mispredictions looked healthy at 0.75 %, and the output was 1-bit data that decimated to audible sound, while actually being the prediction filter free-running on its own output.
 
-Two items are still genuinely open, neither a release blocker. First, an **external oracle for the disc-audio formats**: TrueHD / DTS-HD MA / AC-3 decode is gated against crête's own recorded values and against the LPCM carrier of the same master, but against nothing outside crête. The same now applies to DST — the check available is that crête on an ISO must equal crête on an external extraction of the same disc, which is a comparison worth running once. Second, **DST speed**: roughly 2× realtime for six channels. All channels share one arithmetic decoder so no parallelism exists inside a frame, but the prediction history is reinitialised per frame, so frames are independent and could be decoded in parallel.
+Two items are still genuinely open, neither a release blocker. First, an **external oracle for the disc-audio and SACD formats**: TrueHD / DTS-HD MA / AC-3 decode is gated against crête's own recorded values and against the LPCM carrier of the same master, but against nothing outside crête, and the same is true of DST. For SACD the right comparison is written and is the strongest gate in that suite — crête on the ISO must equal crête on the `.dsf` extracted from the same disc, two independent container readers over one decode chain, no snapshot — but it **is not running in CI**: it needs the DSD64 corpus staged beside the SACD one, and wiring that through the harness's corpus-reuse mechanism would make the whole SACD suite skip whenever that sibling was not ready. Until then the suite gates drift against recorded values, not correctness against an oracle. Second, **DST speed**: roughly 2× realtime for six channels. All channels share one arithmetic decoder so no parallelism exists inside a frame, but the prediction history is reinitialised per frame, so frames are independent and could be decoded in parallel.
 
 ### FIX 12 — per-channel DR and album rounding (0.11.3, validated)
 
@@ -681,7 +701,7 @@ Note: joint DR is the mean of the per-channel values, so correcting the RMS term
 
 DSD DR is output-rate dependent: at 352.8 kHz the retained ultrasonic noise-shaping inflates the 2nd-highest block peak far more than it inflates RMS, so DR reads +1…+3 higher than at 44.1 kHz. crête and MAAT agree on the direction but not the magnitude.
 
-**The shipping default, `--dsd-out-rate 44100`, is the rate crête's parity claims apply to.** At that rate album DR is clean across all 8 DSD albums, and in the most recent weekly the continuous per-track DR comparison flags nothing on any 44.1 kHz DSD album. Every DSD album-level mismatch on record occurs only at 352.8 kHz. **Results at 88.2 / 176.4 / 352.8 kHz are offered for analysis, not parity** — treat them as a different measurement, not a more precise one.
+**The shipping default, `--dsd-out-rate 44100`, is the rate crête's parity claims apply to.** At that rate the **continuous** per-track DR comparison flags nothing on any of the 8 DSD albums (Weekly #77: the only `DR (PMF) raw` flags in the whole run are 3 tracks of `Thriller_DSD64@352800`), and album DR matches on 7 of 8. The exception is not rate-related: `BoneyM_10k_DSD128@44100` misses a `.5` boundary by **0.020 dB**, which no aggregation rule can fix and which is documented as an accuracy question rather than a rounding one. At 352.8 kHz, by contrast, `Thriller_DSD64` mismatches at album level *and* on 4 of 9 tracks with a maximum integer delta of 2. **Results at 88.2 / 176.4 / 352.8 kHz are offered for analysis, not parity** — treat them as a different measurement, not a more precise one.
 
 The cause is quantified rather than assumed. Band-limiting a 352.8 kHz decode to 20 Hz–20 kHz removes roughly **78 %** of the inflation (3.05 dB of a 3.92 dB gap on one measured track) and returns the affected tracks to their 44.1 kHz integer DR — which is simply a worse-quality version of what decimating to 44.1 kHz already does, with libdsddpcm's 641-tap brickwall. Unfiltered, the ultrasonic content alone drives the meter past full scale (a sample peak of **+1.7 dBFS** on one track). There is no `--bandpass` flag for this reason: it would produce a third number with no reference implementation to validate it against.
 
@@ -697,7 +717,7 @@ The harness repo re-measured all 11 QUALIFICATION albums (Thriller × 5 rates, E
 - ~~`BoneyM_10k_DSD128_352` PASS with zero comparisons~~ — an album contributing **zero** metric comparisons now fails outright.
 - ~~Baseline-relative regression harness~~ — implemented: a fully-green run snapshots per-album per-metric max |Δ| into `baselines/<suite>.json`; subsequent runs fail only when a metric worsens beyond baseline + margin, capped by an absolute backstop that still catches gross breakage.
 
-Still open: a **cross-arch identity smoke check** — the same FLAC through the x86-64 and aarch64 binaries must be bit-identical (the regression test for the `-ffp-contract=off` guarantee).
+~~Still open: a cross-arch identity smoke check.~~ **Done**, and gated weekly — see the top of this section. The comparator asserts *equality*, not a tolerance, on every numeric field of the lossless carriers, because equality is the claim; lossy carriers get their own tier, since FFmpeg's AC-3 decoder is float with per-architecture SIMD and is not required to be bit-identical across them. It is deliberately UNSTABLE-not-FAILED when an agent is offline: a weekly must not collapse because one machine is off, and "could not check" must not read like "checked and passed".
 
 ### MAAT as the DSD metric oracle — done (2026-07)
 
