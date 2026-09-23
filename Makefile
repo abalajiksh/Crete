@@ -180,7 +180,7 @@ CLI_TARGET = crete$(EXE_EXT)
 # and the FFmpeg-enabled decoder (crete-ffmpeg) never overwrite each other.
 FFMPEG_TARGET = crete-ffmpeg$(EXE_EXT)
 CLI_HEADERS = analysis.hpp audio.hpp channels.hpp dsd_decode.hpp mqa_detect.hpp cue.hpp groups.hpp \
-              sacd.hpp dst.hpp dvd.hpp \
+              sacd.hpp dst.hpp dvd.hpp dvda.hpp \
               $(LIBDSDDPCM_DIR)/include/dsddpcm.h
 
 # ── GUI target ──────────────────────────────────────────────────────────────
@@ -291,6 +291,13 @@ DSD2WAV_TARGET = dsd2wav$(EXE_EXT)
 $(DSD2WAV_TARGET): dsd2wav.cpp audio.hpp dsd_decode.hpp $(LIBDSDDPCM_OBJ)
 	$(CXX) $(CXXFLAGS) -O2 -DNDEBUG -o $@ dsd2wav.cpp $(LIBDSDDPCM_OBJ) $(LDFLAGS) $(CLI_LDFLAGS)
 
+# ── dvda-info (DVD-Audio title-set structure) ────────────────────────────────
+# Parsing only -- no decode, no libdsddpcm, no FFmpeg -- so it links against
+# nothing and runs in a second on a 4.5 GB title set.
+DVDA_INFO_TARGET = dvda-info$(EXE_EXT)
+$(DVDA_INFO_TARGET): dvda_info.cpp dvda.hpp dvd.hpp
+	$(CXX) $(CXXFLAGS) -O2 -DNDEBUG -o $@ dvda_info.cpp $(LDFLAGS) $(CLI_LDFLAGS)
+
 # ── Install ─────────────────────────────────────────────────────────────────
 install: release
 	install -Dm755 $(CLI_TARGET) $(DESTDIR)$(PREFIX)/bin/crete$(EXE_EXT)
@@ -307,7 +314,7 @@ install-gui-ffmpeg: gui-ffmpeg
 # ── Clean ───────────────────────────────────────────────────────────────────
 clean:
 	rm -f crete crete.exe crete-gui crete-gui.exe crete-ffmpeg crete-ffmpeg.exe crete-gui-ffmpeg crete-gui-ffmpeg.exe \
-	      dsd2wav dsd2wav.exe
+	      dsd2wav dsd2wav.exe dvda-info dvda-info.exe
 	rm -rf $(BUILD_ROOT)
 
 distclean: clean
