@@ -212,8 +212,66 @@ Two measurement axes are deliberately **not** exposed: `--dr-mean` and `--dr-blo
 | TrueHD / MLP | `.mkv`, `.thd` | Lossless disc audio, up to 7.1. **Channel bed only** — see below |
 | DTS / DTS-HD MA | `.mkv`, `.dts` | Core + lossless MA extension |
 | E-AC-3 / AC-3 | `.mkv`, `.mp4`, `.eac3`, `.ec3`, `.ac3` | Lossy disc audio. **Channel bed only** |
+| DVD LPCM | `.vob`, `.aob` | Lossless — DVD's own LPCM framing, not plain PCM |
+| DVD-Video | `.vob` | MPEG program stream: AC-3 / DTS / LPCM beside MPEG-2 video |
+| DVD-Audio | `.aob` | MPEG program stream: MLP or LPCM, no video |
 
 `.mkv` and `.mp4` are video containers; crête ignores video and subtitles, so music Blu-ray rips work directly.
+
+#### DVD title sets
+
+A DVD does not store a title as one file. The spec caps a file at 1 GB, so the
+program stream is split at a pack boundary and numbered:
+
+```
+VIDEO_TS/VTS_02_1.VOB  VTS_02_2.VOB  VTS_02_3.VOB    one 43-minute title
+AUDIO_TS/ATS_01_1.AOB  ...           ATS_01_5.AOB    one DVD-Audio title set
+```
+
+**Point crête at any one fragment and it measures the whole title set.** The
+pieces are one stream and metering them separately would be wrong twice over:
+each is metered alone, and the split lands wherever 1 GB fell, so the 3 s DR
+block straddling it belongs to neither piece. crête reads them through a single
+demuxer, so the boundary costs nothing — measured on the test corpus, the
+joined MLP duration is 19 ms *longer* than the two pieces measured separately,
+that being the frame the split cut in half.
+
+It also removes a trap. The FFmpeg stream **index is not stable across
+fragments of one title** — on the DSOTM 50th DVD the same three substreams come
+back as `2=ac3 3=ac3 4=lpcm` in the first fragment and `2=lpcm 3=ac3 4=ac3` in
+the second, because the index follows order of first appearance in the program
+stream. Reading the set as one stream means one probe and one answer, which is
+what makes `--stream` meaningful here at all.
+
+One caveat on `--stream` for `.vob`: the compact FFmpeg reports **one more
+audio stream than the disc carries**. It cannot identify the MPEG-2 video
+elementary stream, content-probes it, and matches it as MP3 — so a disc with
+three audio streams lists four, the extra decoding to a fraction of a second of
+noise. A full FFmpeg types it correctly. Automatic selection is unaffected (it
+ranks by bitrate and the phantom has none) and every genuine stream is
+reachable by index; only the listing is wrong.
+
+#### DVD-Audio title sets hold more than one mix
+
+A DVD-Audio title set can carry several audio **groups**. Fleetwood Mac's
+*Rumours* (2001, Warner) holds a 96 kHz 5.1 mix, a 96 kHz stereo mix and a
+48 kHz version in one `ATS_01`, and **the group boundary does not align with
+the file fragments** — on that disc the 6-channel to 2-channel change falls
+partway through `ATS_01_3.AOB`, so even a single `.aob` can cross one.
+
+crête measures the first group, says so, and exits 2:
+
+```
+Warning: audio format changes partway through this stream (a DVD-Audio title
+set holds several audio groups); measured the first group only, 6 ch / 96000 Hz
+```
+
+Left to itself FFmpeg decodes straight through the change into a resampler
+configured for the previous format, reporting nothing but a `Parity check
+failed` and a `DTS discontinuity` on stderr — the numbers stay in range and
+nothing says they are meaningless. Choosing *which* group to measure would need
+the `ATS_01_0.IFO` group table parsed; the first is the one the disc presents
+first, and it is the 5.1 mix on every DVD-Audio seen here.
 
 #### Choosing the audio stream
 

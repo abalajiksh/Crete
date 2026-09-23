@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "dsd_decode.hpp"
+#include "dvd.hpp"
 #include "sacd.hpp"
 
 namespace audio {
@@ -1379,8 +1380,9 @@ struct StreamInfo {
 
 #ifdef CRETE_HAS_FFMPEG
 // Defined in audio_ffmpeg.hpp (included at the end of this header).
-inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream);
-inline std::vector<StreamInfo> probe_streams(const std::string& path);
+inline AudioData decode_with_ffmpeg(const std::vector<std::string>& parts,
+                                    int want_stream);
+inline std::vector<StreamInfo> probe_streams(const std::vector<std::string>& parts);
 #endif
 
 // Formats crête decodes natively. These are the validated paths (vs MAAT for
@@ -1448,7 +1450,12 @@ inline bool is_ffmpeg_extra_format(const std::string& ext) {
         // NOTE: these carry the channel BED only. Atmos/DTS:X objects are not
         // rendered by FFmpeg; see the profile note in that script.
         || ext == ".mkv" || ext == ".thd"  || ext == ".dts"
-        || ext == ".ac3" || ext == ".eac3" || ext == ".ec3";
+        || ext == ".ac3" || ext == ".eac3" || ext == ".ec3"
+        // DVD program streams. .vob is DVD-Video (AC-3 / DTS / LPCM beside
+        // MPEG-2 video), .aob is DVD-Audio (MLP or LPCM, no video). Both are
+        // MPEG-PS and both split one title across numbered fragments, which
+        // dvd.hpp groups back together -- see decode_file.
+        || ext == ".vob" || ext == ".aob";
 #else
     (void)ext;
     return false;
@@ -1514,8 +1521,11 @@ inline AudioData decode_file(const std::string& path,
     // Native decoders own their formats; everything else falls back to FFmpeg.
     // DSD (.dsf/.dff) is intentionally excluded — FFmpeg's DSD decimation
     // differs from foo_input_sacd's chains and would break DSD parity.
-    if (!is_native_format(ext))
-        return decode_with_ffmpeg(path, want_stream);
+    if (!is_native_format(ext)) {
+        // A DVD title set is several files and ONE stream. dvd::fragments_of
+        // returns {path} for everything else, so this is unconditional.
+        return decode_with_ffmpeg(dvd::fragments_of(path), want_stream);
+    }
 #endif
 
     if (want_stream >= 0)
@@ -1547,7 +1557,7 @@ inline AudioData decode_file(const std::string& path,
 inline std::vector<StreamInfo> list_audio_streams(const std::string& path) {
 #ifdef CRETE_HAS_FFMPEG
     if (is_native_format(get_extension(path))) return {};
-    try { return probe_streams(path); } catch (...) { return {}; }
+    try { return probe_streams(dvd::fragments_of(path)); } catch (...) { return {}; }
 #else
     (void)path;
     return {};

@@ -35,6 +35,9 @@ extern "C" {
 }
 
 #include <cctype>
+#include <filesystem>
+#include <fstream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -98,6 +101,138 @@ inline std::string profile_name_for(const AVCodec* dec, AVCodecID codec_id,
     return name ? std::string(name) : std::string{};
 }
 
+// ── Reading several files as ONE stream (DVD title sets) ───────────────────
+//
+// A DVD title is split across VTS_02_1.VOB, _2, _3 (or ATS_01_1.AOB ...) at a
+// pack boundary wherever 1 GB fell. The pieces are one MPEG program stream and
+// must be demuxed as one -- see dvd.hpp for why measuring them separately is
+// wrong twice over.
+//
+// FFmpeg's `concat:` protocol would do this, but it is a PROTOCOL and the
+// compact build enables none beyond file, so this feeds a custom AVIOContext
+// instead. That is the better answer anyway: it keeps the compact tier's
+// "--disable-protocols except file" posture intact, and it works on a plain
+// file list without the protocol's quoting rules.
+struct ConcatSource {
+    std::vector<std::string> paths;
+    std::vector<int64_t>     starts;    // global offset of each part
+    int64_t                  total = 0;
+    size_t                   cur   = 0; // which part `fh` holds
+    std::ifstream            fh;
+    int64_t                  pos   = 0; // global read position
+
+    explicit ConcatSource(const std::vector<std::string>& p) : paths(p) {
+        starts.reserve(paths.size());
+        for (const auto& f : paths) {
+            starts.push_back(total);
+            std::error_code ec;
+            auto sz = std::filesystem::file_size(f, ec);
+            if (ec) throw std::runtime_error("FFmpeg: cannot size " + f);
+            total += static_cast<int64_t>(sz);
+        }
+        open_part(0);
+    }
+
+    void open_part(size_t i) {
+        fh.close();
+        fh.clear();
+        fh.open(paths[i], std::ios::binary);
+        if (!fh) throw std::runtime_error("FFmpeg: cannot open " + paths[i]);
+        cur = i;
+    }
+
+    // Which part contains a global offset. Linear: a DVD title is at most 9
+    // fragments, so a binary search would be ceremony.
+    size_t part_at(int64_t off) const {
+        size_t i = 0;
+        while (i + 1 < paths.size() && off >= starts[i + 1]) ++i;
+        return i;
+    }
+
+    int read(uint8_t* buf, int size) {
+        if (size <= 0) return 0;
+        if (pos >= total) return AVERROR_EOF;
+
+        // One read never crosses a part: FFmpeg is happy with a short read and
+        // will simply ask again, and stitching two files into one buffer would
+        // hide a truncated fragment behind a full-looking result.
+        size_t want_part = part_at(pos);
+        if (want_part != cur) open_part(want_part);
+        int64_t part_end = (want_part + 1 < paths.size()) ? starts[want_part + 1] : total;
+        int64_t room     = part_end - pos;
+        if (room < size) size = static_cast<int>(room);
+
+        fh.seekg(pos - starts[want_part]);
+        fh.read(reinterpret_cast<char*>(buf), size);
+        std::streamsize got = fh.gcount();
+        if (got <= 0) return AVERROR_EOF;
+        pos += got;
+        return static_cast<int>(got);
+    }
+
+    int64_t seek(int64_t offset, int whence) {
+        if (whence == AVSEEK_SIZE) return total;
+        int64_t np = pos;
+        if      (whence == SEEK_SET) np = offset;
+        else if (whence == SEEK_CUR) np = pos + offset;
+        else if (whence == SEEK_END) np = total + offset;
+        else return -1;
+        if (np < 0 || np > total) return -1;
+        pos = np;
+        return pos;
+    }
+};
+
+inline int concat_read(void* opaque, uint8_t* buf, int size) {
+    return static_cast<ConcatSource*>(opaque)->read(buf, size);
+}
+inline int64_t concat_seek(void* opaque, int64_t offset, int whence) {
+    return static_cast<ConcatSource*>(opaque)->seek(offset, whence);
+}
+
+// Owns the AVIOContext and its buffer for as long as the AVFormatContext does.
+// The buffer must be freed from avio->buffer, not from the pointer originally
+// handed over: FFmpeg may reallocate it.
+struct ConcatIO {
+    ConcatSource  src;
+    AVIOContext*  avio = nullptr;
+
+    explicit ConcatIO(const std::vector<std::string>& paths) : src(paths) {
+        constexpr int kBuf = 1 << 16;
+        auto* buffer = static_cast<unsigned char*>(av_malloc(kBuf));
+        if (!buffer) throw std::runtime_error("FFmpeg: out of memory for AVIO buffer");
+        avio = avio_alloc_context(buffer, kBuf, 0, &src, concat_read, nullptr, concat_seek);
+        if (!avio) { av_free(buffer); throw std::runtime_error("FFmpeg: avio_alloc_context failed"); }
+    }
+    ~ConcatIO() {
+        if (avio) { av_freep(&avio->buffer); avio_context_free(&avio); }
+    }
+    ConcatIO(const ConcatIO&) = delete;
+    ConcatIO& operator=(const ConcatIO&) = delete;
+};
+
+// Open `parts` as one container. A single path opens normally; several are
+// stitched by ConcatIO. The returned ConcatIO must outlive the AVFormatContext,
+// so callers declare it FIRST -- destruction runs in reverse.
+inline std::unique_ptr<ConcatIO> open_parts(AVFormatContext** fmt,
+                                            const std::vector<std::string>& parts,
+                                            AVDictionary** fmt_opts) {
+    std::unique_ptr<ConcatIO> cio;
+    if (parts.size() > 1) {
+        cio.reset(new ConcatIO(parts));
+        *fmt = avformat_alloc_context();
+        if (!*fmt) throw std::runtime_error("FFmpeg: avformat_alloc_context failed");
+        (*fmt)->pb     = cio->avio;
+        (*fmt)->flags |= AVFMT_FLAG_CUSTOM_IO;
+        if (avformat_open_input(fmt, nullptr, nullptr, fmt_opts) < 0)
+            throw std::runtime_error("FFmpeg: cannot open title set starting at " + parts.front());
+    } else {
+        if (avformat_open_input(fmt, parts.front().c_str(), nullptr, fmt_opts) < 0)
+            throw std::runtime_error("FFmpeg: cannot open " + parts.front());
+    }
+    return cio;
+}
+
 // ── Enumerate a container's audio streams, without decoding one ────────────
 //
 // A music Blu-ray rip routinely carries several mixes of the same album and
@@ -111,18 +246,23 @@ inline std::string profile_name_for(const AVCodec* dec, AVCodecID codec_id,
 // a TrueHD stream interleaved among five others reports profile=unknown and an
 // unspecified sample format, so the picker would describe a stream differently
 // from the way the decoder later reports it.
-inline std::vector<StreamInfo> probe_streams(const std::string& path) {
+inline std::vector<StreamInfo> probe_streams(const std::vector<std::string>& parts) {
     std::vector<StreamInfo> out;
+    if (parts.empty()) return out;
 
     AVDictionary* fmt_opts = nullptr;
     av_dict_set(&fmt_opts, "probesize",       "100000000", 0);
     av_dict_set(&fmt_opts, "analyzeduration", "100000000", 0);
     struct FOptGuard { AVDictionary** p; ~FOptGuard() { if (*p) av_dict_free(p); } } fog{&fmt_opts};
 
+    std::unique_ptr<ConcatIO> cio;
     AVFormatContext* fmt = nullptr;
-    if (avformat_open_input(&fmt, path.c_str(), nullptr, &fmt_opts) < 0)
-        return out;   // not openable: caller falls back to automatic selection
     struct FmtGuard { AVFormatContext** p; ~FmtGuard() { if (*p) avformat_close_input(p); } } fg{&fmt};
+    try {
+        cio = open_parts(&fmt, parts, &fmt_opts);
+    } catch (const std::exception&) {
+        return out;   // not openable: caller falls back to automatic selection
+    }
 
     if (avformat_find_stream_info(fmt, nullptr) < 0) return out;
 
@@ -158,8 +298,11 @@ inline std::vector<StreamInfo> probe_streams(const std::string& path) {
 
 // want_stream: the container's audio-stream index to decode (as ffprobe prints
 // it), or -1 to let FFmpeg choose.
-inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream = -1) {
+inline AudioData decode_with_ffmpeg(const std::vector<std::string>& parts,
+                                    int want_stream = -1) {
     AudioData ad;
+    if (parts.empty()) throw std::runtime_error("FFmpeg: no input");
+    const std::string& path = parts.front();
 
     // ── Open container ──────────────────────────────────────────────────
     // FFmpeg's defaults (5 MB probe, 0 analyzeduration) are not enough for a
@@ -174,10 +317,10 @@ inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream = -
     av_dict_set(&fmt_opts, "analyzeduration", "100000000", 0);   // 100 s
     struct FOptGuard { AVDictionary** p; ~FOptGuard() { if (*p) av_dict_free(p); } } fog{&fmt_opts};
 
+    std::unique_ptr<ConcatIO> cio;
     AVFormatContext* fmt = nullptr;
-    if (avformat_open_input(&fmt, path.c_str(), nullptr, &fmt_opts) < 0)
-        throw std::runtime_error("FFmpeg: cannot open " + path);
     struct FmtGuard { AVFormatContext** p; ~FmtGuard() { if (*p) avformat_close_input(p); } } fg{&fmt};
+    cio = open_parts(&fmt, parts, &fmt_opts);
 
     if (avformat_find_stream_info(fmt, nullptr) < 0)
         throw std::runtime_error("FFmpeg: no stream info in " + path);
@@ -288,9 +431,13 @@ inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream = -
         if (in_fmt == AV_SAMPLE_FMT_NONE)
             throw std::runtime_error("FFmpeg: decoder produced an unknown "
                                      "sample format in " + path);
+        // Input layout is out_layout as well: this is a pure sample-format
+        // conversion with no remapping, and out_layout now carries whatever
+        // the first FRAME declared (see the adoption above), which ctx may
+        // not.
         if (swr_alloc_set_opts2(&swr,
-                &out_layout,     AV_SAMPLE_FMT_DBLP, in_rate,
-                &ctx->ch_layout, in_fmt,             in_rate,
+                &out_layout, AV_SAMPLE_FMT_DBLP, in_rate,
+                &out_layout, in_fmt,             in_rate,
                 0, nullptr) < 0 || !swr)
             throw std::runtime_error("FFmpeg: swr alloc failed");
         if (swr_init(swr) < 0)
@@ -329,7 +476,70 @@ inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream = -
     std::vector<std::vector<double>> scratch(nch);   // persistent per-channel buffers
     std::vector<uint8_t*>            out_planes(nch);
 
+    // ── Guard against a mid-stream format change ────────────────────────
+    // The resampler is built once, from the first decoded frame, and every
+    // later frame is pushed through it on the assumption that it matches. If
+    // one does not, swr_convert reads the wrong planes at the wrong width and
+    // the output is silently wrong -- the failure mode this project keeps
+    // finding, where the numbers stay plausible.
+    //
+    // It is reachable, and not only in theory. A DVD-Audio title set holds
+    // several audio GROUPS: Fleetwood Mac's Rumours (2001) carries a 96 kHz
+    // 5.1 mix, a 96 kHz stereo mix and a 48 kHz version in one ATS, and the
+    // group boundary does NOT align with the file fragments -- measured on
+    // that disc the 6ch -> 2ch change happens partway through ATS_01_3.AOB,
+    // so even a single .aob can cross one. FFmpeg reports it only as
+    // "Parity check failed" and "DTS discontinuity" on stderr and carries on.
+    //
+    // crete measures up to the change and says so, rather than metering two
+    // different programs as one. Choosing WHICH group would need the
+    // ATS_01_0.IFO group table parsed; the first is the one the disc presents
+    // first, and it is the 5.1 mix on every DVD-Audio seen here.
+    int  first_fmt   = -1;
+    int  first_ch    = -1;
+    int  first_rate  = -1;
+    bool fmt_changed = false;
+
     auto drain = [&](const AVFrame* f) {
+        if (f) {
+            if (first_fmt < 0) {
+                first_fmt  = f->format;
+                first_ch   = f->ch_layout.nb_channels;
+                first_rate = f->sample_rate;
+                // THE FRAME WINS over the container's answer.
+                //
+                // nch, in_rate, out_layout, ad.channels and the scratch
+                // buffers were all sized from ctx, i.e. from what
+                // avformat_find_stream_info PREDICTED. On a multi-group
+                // DVD-Audio title set that prediction is not merely
+                // incomplete, it can describe a DIFFERENT group from the one
+                // playback starts in: probing deeply enough to reach the
+                // stereo group of Rumours makes the container report 2 ch for
+                // a stream whose first frame is 6 ch. Everything downstream
+                // would then be sized wrong and the numbers meaningless.
+                //
+                // This is the same decision already taken for sample_fmt a few
+                // lines above -- "the frame's format is what the decoder
+                // actually produced; the context's is what the probe
+                // predicted" -- extended to the layout and the rate, because
+                // the probe can be wrong about those in exactly the same way.
+                if (first_ch != nch || first_rate != in_rate) {
+                    nch     = first_ch;
+                    in_rate = first_rate;
+                    av_channel_layout_uninit(&out_layout);
+                    av_channel_layout_copy(&out_layout, &f->ch_layout);
+                    ad.sample_rate = static_cast<uint32_t>(in_rate);
+                    ad.channels.assign(nch, {});
+                    scratch.assign(nch, {});
+                    out_planes.assign(nch, nullptr);
+                }
+            } else if (f->format                != first_fmt ||
+                       f->ch_layout.nb_channels != first_ch  ||
+                       f->sample_rate           != first_rate) {
+                fmt_changed = true;
+                return;   // do not feed a resampler configured for the old format
+            }
+        }
         if (f) ensure_swr(static_cast<AVSampleFormat>(f->format));
         if (!swr) return;          // flush before any frame decoded: nothing buffered
         int in_samples = f ? f->nb_samples : 0;
@@ -367,6 +577,14 @@ inline AudioData decode_with_ffmpeg(const std::string& path, int want_stream = -
     avcodec_send_packet(ctx, nullptr);
     while (avcodec_receive_frame(ctx, frm) >= 0) drain(frm);
     drain(nullptr);
+
+    if (fmt_changed) {
+        ad.warnings.push_back(
+            "audio format changes partway through this stream (a DVD-Audio title "
+            "set holds several audio groups); measured the first group only, "
+            + std::to_string(first_ch) + " ch / "
+            + std::to_string(first_rate) + " Hz");
+    }
 
     if (ad.channels.empty() || ad.channels[0].empty())
         throw std::runtime_error("FFmpeg: decoded no audio from " + path);

@@ -196,7 +196,7 @@ struct AppState {
 #ifdef CRETE_HAS_FFMPEG
                                    + "FFmpeg: .m4a .mp4 .m4b .aac .mp3 .opus .ogg .oga "
                                      ".mka .webm .wma .wv .ape .mpc .tak "
-                                     ".mkv .thd .dts .ac3 .eac3 .ec3\n"
+                                     ".mkv .thd .dts .ac3 .eac3 .ec3 .vob .aob\n"
 #endif
                                    ;
                 }
@@ -1273,7 +1273,7 @@ static void side_panel(AppState& app) {
         ImGui::Dummy(ImVec2(0,2));
         ImGui::TextWrapped("Accepted extensions: .m4a .mp4 .m4b .aac .mp3 .opus "
             ".ogg .oga .mka .webm .wma .wv .ape .mpc .tak "
-            ".mkv .thd .dts .ac3 .eac3 .ec3");
+            ".mkv .thd .dts .ac3 .eac3 .ec3 .vob .aob");
         ImGui::Dummy(ImVec2(0,6));
 #endif
 

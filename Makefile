@@ -180,7 +180,7 @@ CLI_TARGET = crete$(EXE_EXT)
 # and the FFmpeg-enabled decoder (crete-ffmpeg) never overwrite each other.
 FFMPEG_TARGET = crete-ffmpeg$(EXE_EXT)
 CLI_HEADERS = analysis.hpp audio.hpp channels.hpp dsd_decode.hpp mqa_detect.hpp cue.hpp groups.hpp \
-              sacd.hpp dst.hpp \
+              sacd.hpp dst.hpp dvd.hpp \
               $(LIBDSDDPCM_DIR)/include/dsddpcm.h
 
 # ── GUI target ──────────────────────────────────────────────────────────────

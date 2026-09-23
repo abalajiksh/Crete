@@ -58,16 +58,36 @@ DECODERS="alac,aac,aac_latm,mp3,mp3float,opus,vorbis,flac,\
 wmav1,wmav2,wmalossless,wmapro,wavpack,ape,mpc7,mpc8,tak,\
 truehd,mlp,eac3,ac3,dca,\
 pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,\
-pcm_f32le,pcm_f32be,pcm_u8,pcm_s8"
+pcm_f32le,pcm_f32be,pcm_u8,pcm_s8,\
+pcm_dvd,pcm_bluray"
 
 # wav/aiff/flac demuxers are redundant with crête's native paths (which always
 # win in decode_file) but are cheap to keep and make this FFmpeg usable solo.
 # truehd/dts/eac3/ac3 here are the RAW elementary-stream demuxers - matroska and
 # mov already cover the disc rips, these just make bare .thd/.dts files work too.
+# mpegps is the DVD one: both VIDEO_TS/*.VOB and AUDIO_TS/*.AOB are MPEG
+# program streams. pcm_dvd/pcm_bluray above are the LPCM flavours those carry
+# (DVD LPCM has its own 6-byte header and big-endian samples, so the plain
+# pcm_s24be decoder cannot read it).
 DEMUXERS="mov,mp3,ogg,matroska,webm_dash_manifest,aac,asf,flac,wav,aiff,\
-ape,wv,mpc,mpc8,tak,truehd,dts,eac3,ac3"
+ape,wv,mpc,mpc8,tak,truehd,dts,eac3,ac3,mpegps"
 
 # mlp parser handles both MLP and TrueHD framing.
+# KNOWN WART, measured and left alone. In a VOB this build reports ONE MORE
+# audio stream than the disc carries: it cannot identify the MPEG-2 video
+# elementary stream, content-probes it, and matches it as MP3 -- so a DVD with
+# three audio streams lists four, the extra one decoding to 0.34 s at 16 kHz
+# with a +23 dBFS peak. A full FFmpeg types the same stream as mpeg2video.
+#
+# Adding the mpegvideo PARSER and then the mpeg2video DECODER was tried and
+# changed nothing, so neither is carried: the misdetection is in the demuxer's
+# probe, not in codec availability. It cannot be filtered on crete's side
+# either, because MPEG-1/2 audio is a LEGAL DVD audio format -- an MP3-ish
+# stream in a VOB is not on its face wrong.
+#
+# Consequence is confined to the stream LISTING. Auto-selection still returns
+# the real stream (av_find_best_stream ranks by bitrate, and the phantom has
+# none), and --stream reaches every genuine one.
 PARSERS="aac,aac_latm,mpegaudio,flac,vorbis,opus,tak,mlp,ac3,dca"
 
 # ── Fetch ───────────────────────────────────────────────────────────────────

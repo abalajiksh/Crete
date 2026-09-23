@@ -59,7 +59,7 @@ inline std::string open_file(const char* title = "Select Audio File") {
 #ifdef CRETE_HAS_FFMPEG
         "Audio Files\0*.wav;*.rf64;*.bw64;*.w64;*.flac;*.aif;*.aiff;*.dsf;*.dff;*.iso;"
         "*.m4a;*.mp4;*.m4b;*.aac;*.mp3;*.opus;*.ogg;*.oga;"
-        "*.mkv;*.thd;*.dts;*.ac3;*.eac3;*.ec3;"
+        "*.mkv;*.thd;*.dts;*.ac3;*.eac3;*.ec3;*.vob;*.aob;"
         "*.mka;*.webm;*.wma;*.wv;*.ape;*.mpc;*.tak\0"
 #else
         "Audio Files\0*.wav;*.rf64;*.bw64;*.w64;*.flac;*.aif;*.aiff;*.dsf;*.dff;*.iso\0"
@@ -78,7 +78,7 @@ inline std::string open_file(const char* title = "Select Audio File") {
 #ifdef CRETE_HAS_FFMPEG
         "\" of type {\"wav\",\"rf64\",\"bw64\",\"w64\",\"flac\",\"aif\",\"aiff\",\"dsf\",\"dff\",\"iso\","
         "\"m4a\",\"mp4\",\"m4b\",\"aac\",\"mp3\",\"opus\",\"ogg\",\"oga\","
-        "\"mkv\",\"thd\",\"dts\",\"ac3\",\"eac3\",\"ec3\","
+        "\"mkv\",\"thd\",\"dts\",\"ac3\",\"eac3\",\"ec3\",\"vob\",\"aob\","
         "\"mka\",\"webm\",\"wma\",\"wv\",\"ape\",\"mpc\",\"tak\"})' 2>/dev/null");
 #else
         "\" of type {\"wav\",\"rf64\",\"bw64\",\"w64\",\"flac\",\"aif\",\"aiff\",\"dsf\",\"dff\",\"iso\"})' 2>/dev/null");
@@ -89,7 +89,7 @@ inline std::string open_file(const char* title = "Select Audio File") {
 #ifdef CRETE_HAS_FFMPEG
     const char* pattern = "*.wav *.rf64 *.bw64 *.w64 *.flac *.aif *.aiff *.dsf *.dff *.iso "
         "*.m4a *.mp4 *.m4b *.aac *.mp3 *.opus *.ogg *.oga "
-        "*.mkv *.thd *.dts *.ac3 *.eac3 *.ec3 "
+        "*.mkv *.thd *.dts *.ac3 *.eac3 *.ec3 *.vob *.aob "
         "*.mka *.webm *.wma *.wv *.ape *.mpc *.tak";
 #else
     const char* pattern = "*.wav *.rf64 *.bw64 *.w64 *.flac *.aif *.aiff *.dsf *.dff *.iso";
