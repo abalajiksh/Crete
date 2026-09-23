@@ -1376,6 +1376,11 @@ struct StreamInfo {
     int         sample_rate = 0;
     bool        is_default  = false;  // what FFmpeg would choose unaided
     bool        decodable   = true;   // false if this build has no decoder
+    // Container duration, 0 when it declares none. Carried so the memory
+    // planner can size a LOSSY stream, where file size says nothing useful:
+    // a 40 MB AC-3 decodes to several GB of f64, and a file-size rule of
+    // thumb under-reads that by more than ten times.
+    double      duration_secs = 0.0;
 };
 
 #ifdef CRETE_HAS_FFMPEG

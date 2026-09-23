@@ -446,10 +446,33 @@ static void analysis_worker(AppState* app) {
         app->progress.store(n ? (float)d / (float)n : 0.0f);
     };
 
+    // Fit the pool to the machine, exactly as the CLI does. The GUI has no
+    // --jobs and no --memory-limit, so it takes the automatic answer -- which
+    // matters MORE here than on the CLI: a desktop is running a browser and
+    // everything else, so "all cores x a whole decoded album each" is a worse
+    // bet than it is on an idle build agent. A note goes to the error log
+    // rather than a dialog; it is information, not a fault.
+    const budget::Host host = budget::probe_host();
+    const budget::Plan plan = budget::plan_jobs(
+        host, grp::largest_estimate(groups, gopt), groups.size(), 0, 0);
+    if (plan.reduced || plan.oversized) {
+        std::lock_guard<std::mutex> lk(app->mtx);
+        if (plan.oversized)
+            app->error_log += "Warning: the largest item needs about "
+                            + budget::human(plan.per_worker) + " but only "
+                            + budget::human(plan.budget)
+                            + " is available. This may be killed by the OS.\n";
+        else
+            app->error_log += "Note: using " + std::to_string(plan.jobs) + " of "
+                            + std::to_string(host.cpus) + " cores -- each worker needs about "
+                            + budget::human(plan.per_worker) + " and "
+                            + budget::human(plan.budget) + " is available.\n";
+    }
+
     // grp::run decodes and analyses groups in parallel, preserving order, and
     // polls cancel_requested between groups. Measurement is identical to the
     // CLI's because it IS the CLI's -- same function, same options struct.
-    auto run = grp::run(groups, gopt, 0, progress, &app->cancel_requested);
+    auto run = grp::run(groups, gopt, plan.jobs, progress, &app->cancel_requested);
 
     app->progress.store(1.0f);
     app->current_file.store(n);

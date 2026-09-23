@@ -179,7 +179,7 @@ CLI_TARGET = crete$(EXE_EXT)
 # FFmpeg tiers emit a distinctly-named binary so the in-house decoder (crete)
 # and the FFmpeg-enabled decoder (crete-ffmpeg) never overwrite each other.
 FFMPEG_TARGET = crete-ffmpeg$(EXE_EXT)
-CLI_HEADERS = analysis.hpp audio.hpp channels.hpp dsd_decode.hpp mqa_detect.hpp cue.hpp groups.hpp \
+CLI_HEADERS = analysis.hpp audio.hpp budget.hpp channels.hpp dsd_decode.hpp mqa_detect.hpp cue.hpp groups.hpp \
               sacd.hpp dst.hpp dvd.hpp \
               $(LIBDSDDPCM_DIR)/include/dsddpcm.h
 

@@ -27,6 +27,7 @@
 
 #include "analysis.hpp"
 #include "audio.hpp"
+#include "budget.hpp"
 #include "cue.hpp"
 #include "mqa_detect.hpp"
 #include "sacd.hpp"
@@ -494,6 +495,88 @@ struct RunResult {
     // which the caller sees as an empty track list.
     bool partial() const { return failed > 0 || degraded > 0; }
 };
+
+// ── How much memory a group will need ──────────────────────────────────────
+//
+// Sized on what the worker HOLDS AT ONCE, which differs by group shape:
+//
+//   plain file   the decoded file, whole
+//   cue sheet    the same -- the monolith is decoded once and then sliced, so
+//                a 70-minute CD image costs its full length, not a track's
+//   SACD image   the LARGEST TRACK only. An area is decoded track by track
+//                from its own sector ranges, never as one buffer; the stereo
+//                area of a 43-minute disc would be 14.6 GB of f64 at 352.8 kHz
+//                out, which is exactly why it is not done that way.
+inline uint64_t estimate_bytes(const Group& g, const Options& opt) {
+    const unsigned out_rate = opt.dsd.out_rate ? opt.dsd.out_rate : 44100;
+
+    if (g.is_sacd) {
+        const auto& a = g.sacd_area;
+        uint64_t total_lsn = 0, max_lsn = 0;
+        for (const auto& t : a.tracks) {
+            total_lsn += t.length_lsn;
+            max_lsn = std::max<uint64_t>(max_lsn, t.length_lsn);
+        }
+        // Sector share of the area's declared playing time. Exact for a plain
+        // DSD area; for a DST area the compression ratio varies per track, so
+        // this is proportional rather than precise -- good enough to size a
+        // buffer, and an ISO is one group so it never gates parallelism.
+        double secs = (total_lsn && a.playtime_secs > 0)
+                    ? a.playtime_secs * (double(max_lsn) / double(total_lsn))
+                    : a.playtime_secs;
+        double decoded = double(a.channels ? a.channels : 2) * out_rate * secs * 8.0;
+        uint64_t est = uint64_t(double(max_lsn) * 2048.0 + budget::MEM_K * decoded);
+        return std::max(est, budget::WORKER_FLOOR);
+    }
+
+    // A DVD title set is several files read as one stream, so its cost is
+    // the whole set, not the fragment that named it.
+    const std::vector<std::string> parts = dvd::fragments_of(g.audio_path);
+    std::error_code ec;
+    uint64_t fsz = 0;
+    for (const auto& p : parts) {
+        uint64_t n = std::filesystem::file_size(p, ec);
+        if (!ec) fsz += n;
+    }
+
+    budget::Shape sh = budget::peek(g.audio_path);
+
+#ifdef CRETE_HAS_FFMPEG
+    // No native header answered -- a container. File size is a USELESS proxy
+    // here: a 40 MB AC-3 track decodes to several GB of f64, so the generic
+    // ratio under-reads it by more than ten times and would happily start a
+    // worker per core on it. The probe already knows channels and rate; it
+    // now reports duration too, which is everything the model needs.
+    if (!sh.known) {
+        const auto streams = audio::probe_streams(parts);
+        double best = 0;
+        for (const auto& si : streams) {
+            if (!si.decodable || si.channels <= 0 || si.sample_rate <= 0) continue;
+            if (opt.stream >= 0 && si.index != opt.stream) continue;
+            best = std::max(best, double(si.channels) * si.sample_rate * si.duration_secs);
+            if (opt.stream >= 0) break;
+        }
+        // No --stream given: take the HEAVIEST stream. Which one FFmpeg picks
+        // unaided is documented here as unstable across remuxes of the same
+        // content, so planning for the cheapest would be planning for luck.
+        if (best > 0)
+            return std::max<uint64_t>(uint64_t(double(fsz) + budget::MEM_K * best * 8.0),
+                                      budget::WORKER_FLOOR);
+    }
+#endif
+
+    return budget::estimate_bytes(fsz, sh, out_rate);
+}
+
+// The peak over ALL groups, not the mean. The pool is order-preserving and
+// hands out work by an atomic cursor, so nothing stops every worker sitting on
+// a long track at the same moment -- which is what the Weekly #69/#70 dsd512
+// kills came down to.
+inline uint64_t largest_estimate(const std::vector<Group>& groups, const Options& opt) {
+    uint64_t m = 0;
+    for (const auto& g : groups) m = std::max(m, estimate_bytes(g, opt));
+    return m;
+}
 
 inline RunResult run(const std::vector<Group>& groups, const Options& opt,
                      int jobs, const ProgressFn& progress,

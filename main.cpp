@@ -905,8 +905,12 @@ void print_usage(const char* argv0) {
               << "                                 Default: FFmpeg's own choice, which ranks by\n"
               << "                                 bitrate/channels and is reported when the\n"
               << "                                 file holds more than one audio stream.\n"
-              << "  -j, --jobs <N>                 Parallel file workers (default: all cores;\n"
-              << "                                 1 = sequential). Does not change any numbers.\n"
+              << "  -j, --jobs <N>                 Parallel file workers. Default fits the pool\n"
+              << "                                 to free memory as well as core count; an\n"
+              << "                                 explicit N is obeyed. Changes no numbers.\n"
+              << "  --memory-limit <SIZE>          Memory crete may plan for: 8G, 512M, or a\n"
+              << "                                 percentage of RAM (40%). Default: detected,\n"
+              << "                                 honouring a container limit.\n"
               << "  -q, --quiet                    Suppress progress output\n"
               << "  -v, --version                  Show version\n"
               << "  -h, --help                     Show this help\n\n"
@@ -969,7 +973,17 @@ void print_version() {
               // how a whole weekly came to be labelled with the wrong block set.
               << "DR settings: blocks=" << dr::block_set_name(g_dr_blocks)
               << " mean=" << dr::rms_mean_name(g_rms_mean)
-              << " lfe=" << dr::lfe_scoring_name(g_lfe) << "\n"
+              << " lfe=" << dr::lfe_scoring_name(g_lfe) << "\n";
+    {   // What the default worker count will be sized against on THIS host.
+        // Printed for the same reason the DR axes are: a run is only
+        // reproducible if you can see what the machine told crete.
+        const budget::Host h = budget::probe_host();
+        std::cout << "Host: " << h.cpus << " cpu (" << h.cpu_source << "), "
+                  << budget::human(h.total_ram) << " ram, "
+                  << budget::human(h.usable_ram) << " usable (" << h.ram_source << ")"
+                  << (h.confined ? " [container limit]" : "") << "\n";
+    }
+    std::cout
               << "DSD chains to " << g_dsd_opt.out_rate << " Hz (filter: "
               << dsd::filter_name(g_dsd_opt.filter) << "):\n";
     const int rates[4]     = { 2822400, 5644800, 11289600, 22579200 };
@@ -985,12 +999,42 @@ void print_version() {
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
+// Parse --memory-limit: "8G", "512M", "2000000000", or "40%" of physical RAM.
+// The percentage form is the one worth having on a shared machine -- "take at
+// most a third of this box" means the same thing wherever it is pasted.
+inline bool parse_memory_limit(const std::string& v, uint64_t& out) {
+    if (v.empty()) return false;
+    char* end = nullptr;
+    double n = std::strtod(v.c_str(), &end);
+    if (end == v.c_str() || n <= 0) return false;
+    std::string suf(end);
+    while (!suf.empty() && (suf.back() == ' ' || suf.back() == 'B' || suf.back() == 'b'))
+        suf.pop_back();
+    if (suf == "%") {
+        if (n > 100.0) return false;
+        uint64_t total = budget::probe_host().total_ram;
+        if (!total) return false;
+        out = uint64_t(double(total) * n / 100.0);
+        return out > 0;
+    }
+    double mult = 1.0;
+    if      (suf == "K" || suf == "k") mult = 1024.0;
+    else if (suf == "M" || suf == "m") mult = 1024.0 * 1024;
+    else if (suf == "G" || suf == "g") mult = 1024.0 * 1024 * 1024;
+    else if (suf == "T" || suf == "t") mult = 1024.0 * 1024 * 1024 * 1024;
+    else if (!suf.empty()) return false;
+    out = uint64_t(n * mult);
+    return out > 0;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;
     }
 
+    // --memory-limit, in bytes. 0 = detect from the host.
+    uint64_t mem_limit = 0;
     OutputFormat format = OutputFormat::Standard;
     std::string output_file;
     bool quiet = false;
@@ -1011,6 +1055,17 @@ int main(int argc, char* argv[]) {
             jobs = std::atoi(argv[++i]);
             if (jobs < 1) {
                 std::cerr << "Error: --jobs must be >= 1\n";
+                return 1;
+            }
+        } else if (arg == "--memory-limit" && i+1 < argc) {
+            // Accepts bytes, a K/M/G/T suffix, or a percentage of detected
+            // physical RAM. The percentage form is the useful one on a shared
+            // machine: "take at most a third of this box".
+            std::string v = argv[++i];
+            if (!parse_memory_limit(v, mem_limit)) {
+                std::cerr << "Error: --memory-limit wants a size (8G, 512M, "
+                             "2000000000) or a percentage (50%), got '"
+                          << v << "'\n";
                 return 1;
             }
         } else if ((arg == "-f" || arg == "--format") && i+1 < argc) {
@@ -1176,7 +1231,47 @@ int main(int argc, char* argv[]) {
             }
         };
 
-        auto run = grp::run(groups, gopt, jobs, progress);
+        // ── Fit the worker count to the machine ────────────────────────
+        // Default is one worker per CPU, and a worker holds a whole decoded
+        // track in f64. On a 16 GB box a DSD512 album wants ~3.7 GB each, so
+        // the default asks for far more than exists and the OOM killer takes
+        // the process -- with empty stderr, which reads as a crash. Size the
+        // pool to the memory that is actually there.
+        const budget::Host host = budget::probe_host();
+        const uint64_t largest  = grp::largest_estimate(groups, gopt);
+        const budget::Plan plan = budget::plan_jobs(host, largest, groups.size(),
+                                                    jobs, mem_limit);
+
+        // Say so when memory, not the CPU count, decided -- otherwise crete
+        // just looks slow on a big machine for no stated reason.
+        if (!quiet && plan.reduced)
+            std::cerr << "Note: using " << plan.jobs << " of " << host.cpus
+                      << " cores -- each worker needs about "
+                      << budget::human(plan.per_worker) << " and "
+                      << budget::human(plan.budget) << " is available. "
+                      << "Override with --jobs or --memory-limit.\n";
+
+        // Fewer workers cannot help when ONE group already exceeds the budget;
+        // this is the warning that would have told the user what happened
+        // instead of leaving them an exit-137 with no output.
+        if (plan.oversized)
+            std::cerr << "Warning: the largest item needs about "
+                      << budget::human(plan.per_worker) << " but only "
+                      << budget::human(plan.budget) << " is available"
+                      << (host.confined ? " (container limit)" : "")
+                      << ". This may be killed by the OS. Lower --dsd-out-rate,"
+                         " measure fewer files at once, or free memory.\n";
+
+        // Not gated on --quiet: like the oversized warning above, this
+        // predicts a kill. --quiet suppresses progress, not bad news.
+        if (plan.forced && plan.budget &&
+            uint64_t(plan.jobs) * plan.per_worker > plan.budget)
+            std::cerr << "Warning: --jobs " << plan.jobs << " needs about "
+                      << budget::human(uint64_t(plan.jobs) * plan.per_worker)
+                      << " but only " << budget::human(plan.budget)
+                      << " is available. Proceeding as instructed.\n";
+
+        auto run = grp::run(groups, gopt, plan.jobs, progress);
 
         if (!quiet) std::cerr << "\r" << std::string(80, ' ') << "\r";
         if (!run.errlog.empty()) std::cerr << run.errlog;

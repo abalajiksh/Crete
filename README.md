@@ -134,7 +134,9 @@ crete -f detail /path/to/album/
 crete -f json /path/to/album/          # cli-json builds only
 crete -o dr_log.txt /path/to/album/
 crete -q /path/to/album/               # suppress progress, useful in CI
-crete -j 2 /path/to/album/             # cap parallel file workers (default: all cores)
+crete -j 2 /path/to/album/             # pin parallel file workers (default: automatic)
+crete --memory-limit 4G /path/to/album/   # plan for at most 4 GB
+crete --memory-limit 40% /path/to/album/  # ...or a share of this machine
 
 crete --dsd-mode multistage /path/to/dsd/           # default chain (measurement-grade)
 crete --dsd-mode direct     /path/to/dsd/           # DSD64 -> 44.1 kHz only
@@ -146,6 +148,43 @@ crete --dr-blocks legacy    /path/to/album/         # pre-0.14.0 3 s block set (
 
 crete-ffmpeg /path/to/album/           # cli-json-ffmpeg build: adds ALAC/MP3/AAC/Opus
 ```
+
+### Memory and parallelism
+
+crête decodes whole tracks to 64-bit float, so one worker can hold several GB:
+a 4:18 track at 192 kHz / 4 ch peaks near 4 GB. Running one worker per core on
+a machine that cannot feed them is how you get killed by the OS — and an
+OOM-killed process exits with **empty stderr**, which reads as a crash rather
+than as "you asked for too much".
+
+So the default worker count is fitted to **free memory as well as core count**.
+crête reads the host's RAM (honouring a **container/cgroup limit** where one is
+in force, rather than the physical machine underneath), estimates what each
+item will cost from its header, and sizes the pool to fit. When memory rather
+than cores decides, it says so:
+
+```
+Note: using 3 of 12 cores -- each worker needs about 3.7 GB and 12 GB is
+available. Override with --jobs or --memory-limit.
+```
+
+The estimate is a measured model, not a rule of thumb — peak resident memory
+fits `file_bytes + K × (channels × rate × seconds × 8)`, with K measured at
+2.0–2.5 across WAV, FLAC and the FFmpeg decoders. File size alone is not usable:
+measured file→peak ratios span 6.9×–13.4× on lossless and are off by more than
+ten times on lossy, where a 7 MB AC-3 clip decodes to ~600 MB.
+
+- **`--jobs N` still wins.** An explicit `-j` is obeyed exactly; crête warns if
+  it does not expect it to fit, then proceeds. Automatic sizing is what changes,
+  not the flag.
+- **`--memory-limit`** overrides what crête plans for: `8G`, `512M`, or `40%`.
+  Useful on a shared machine, or where the detected figure is wrong.
+- If a **single item** exceeds the budget, no worker count can help, so crête
+  warns before starting rather than letting the OS end the run.
+
+**None of this changes a measurement.** Worker count and memory limits affect
+only scheduling; the JSON `tracks` array is byte-identical across job counts,
+and results stay in album order regardless.
 
 `--dsd-mode` (chain), `--dsd-filter` (final-stage filter), and `--dsd-out-rate` select the DSD→PCM decode; none affect PCM formats. `crete --version` prints the resolved chain, decimation, tap count, and group delay for each DSD rate at the current settings. See *DSD decimation* below for the support matrix.
 

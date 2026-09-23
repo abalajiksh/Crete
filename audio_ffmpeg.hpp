@@ -291,6 +291,15 @@ inline std::vector<StreamInfo> probe_streams(const std::vector<std::string>& par
                 c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         }
         si.profile = profile_name_for(dec, par->codec_id, par->profile);
+
+        // Per-stream duration where the container gives one, else the
+        // container's own. Both are in their own time base.
+        if (fmt->streams[i]->duration > 0) {
+            si.duration_secs = double(fmt->streams[i]->duration)
+                             * av_q2d(fmt->streams[i]->time_base);
+        } else if (fmt->duration > 0) {
+            si.duration_secs = double(fmt->duration) / AV_TIME_BASE;
+        }
         out.push_back(std::move(si));
     }
     return out;
@@ -463,6 +472,25 @@ inline AudioData decode_with_ffmpeg(const std::vector<std::string>& parts,
     ad.bit_depth = (ctx->bits_per_raw_sample > 0)
         ? static_cast<uint32_t>(ctx->bits_per_raw_sample) : 0;
     ad.channels.resize(nch);
+
+    // Reserve from the container's declared duration. The frame count is not
+    // known up front on a compressed stream, so without this each channel
+    // vector grows geometrically and the run PEAKS at roughly 1.5x its final
+    // size while the old buffer is still alive beside the new one -- measured
+    // at 25-35% above the model on AC-3, TrueHD and DTS-HD MA clips. Purely an
+    // allocation change: the same values are inserted in the same order into
+    // a vector that already has room, so nothing measured moves.
+    //
+    // A short or absent duration is harmless -- insert() still grows -- so
+    // this is a hint, never a bound.
+    if (fmt->duration > 0 && in_rate > 0) {
+        const double secs = double(fmt->duration) / AV_TIME_BASE;
+        const double frames = secs * double(in_rate);
+        if (frames > 0 && frames < 4e10) {
+            for (auto& ch : ad.channels)
+                ch.reserve(static_cast<size_t>(frames) + 4096);
+        }
+    }
 
     // ── Decode loop ─────────────────────────────────────────────────────
     AVPacket* pkt = av_packet_alloc();
