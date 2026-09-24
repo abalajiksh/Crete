@@ -1,0 +1,273 @@
+// ============================================================================
+// Jenkinsfile.release -- publish a crete release tag to OBS and Homebrew
+//
+// Runs when a vX.Y.Z tag is pushed to codeberg.org/abksh/Crete:
+//
+//   1. resolve the tag and check it against the Makefile's VERSION
+//   2. assemble the OBS upload set from the tag (scripts/make_obs_source.sh),
+//      keeping the changelog history already on OBS
+//   3. smoke-build the FFmpeg CLI tier from that tarball on this agent
+//   4. commit it to OBS home:abksh:crete/crete and WAIT until every
+//      repository has built and published this version
+//   5. only then point the Homebrew formulae at the tag and push the tap
+//
+// The Homebrew step waits on OBS because there is no macOS agent: the 15
+// Linux builds of the identical source are the best evidence available that
+// the tag builds at all. They do not prove the macOS build -- a failure there
+// surfaces on a user's `brew install`. Re-run by hand (DRY_RUN) if unsure.
+//
+// Every step is idempotent. Re-running for a tag that is already out finds
+// OBS's tarball byte-identical (the tarball is deterministic), skips the
+// commit, passes the wait immediately, and finds the formulae unchanged.
+//
+// ── ONE-TIME JENKINS SETUP (done by a human, not by this file) ──────────────
+// Credentials (Manage Jenkins > Credentials):
+//   obs-abksh              Username with password -- the OBS account.
+//   codeberg-homebrew-tap  SSH username with private key -- a Codeberg DEPLOY
+//                          KEY with write access on abksh/homebrew-crete ONLY
+//                          (repo Settings > Deploy keys). Not a personal key.
+// Job: Pipeline, "Pipeline script from SCM", Git:
+//   Repository URL      https://codeberg.org/abksh/Crete.git
+//   Refspec (Advanced)  +refs/tags/*:refs/remotes/origin/tags/*
+//   Branch Specifier    refs/tags/v*
+//   Script Path         packaging/Jenkinsfile.release
+//   Lightweight checkout  OFF (it cannot resolve a tag wildcard)
+// The existing Codeberg webhook (/git/notifyCommit?url=<Crete repo>) then
+// polls this job on every push, and the tag spec makes only a NEW tag build.
+// The first poll after the job is created will build the newest existing
+// tag -- harmless, see "idempotent" above.
+// Agent 'bee' needs: git python3 osc make g++ pkg-config nasm openssh
+//   (Fedora: dnf install git python3 osc make gcc-c++ pkgconf-pkg-config nasm openssh-clients)
+// ============================================================================
+
+def isManual() {
+    return !currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause').isEmpty()
+}
+
+// Codeberg's published SSH host keys, pinned so the tap push cannot be
+// redirected. (SHA256 fingerprints: ED25519 mIlxA9k46MmM6qdJOdMnAQpzGxF4WIVVL+fj+wZbw0g,
+// RSA 6QQmYi4ppFS4/+zSZ5S4IU+4sa6rwvQ4PbhCtPEBekQ, ECDSA T9FYDEHELhVkulEKKwge5aVhVTbqCW0MIRwAfpARs/E)
+CODEBERG_KNOWN_HOSTS = '''\
+codeberg.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIVIC02vnjFyL+I4RHfvIGNtOgJMe769VTF1VR4EB3ZB
+codeberg.org ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC8hZi7K1/2E2uBX8gwPRJAHvRAob+3Sn+y2hxiEhN0buv1igjYFTgFO2qQD8vLfU/HT/P/rqvEeTvaDfY1y/vcvQ8+YuUYyTwE2UaVU5aJv89y6PEZBYycaJCPdGIfZlLMmjilh/Sk8IWSEK6dQr+g686lu5cSWrFW60ixWpHpEVB26eRWin3lKYWSQGMwwKv4LwmW3ouqqs4Z4vsqRFqXJ/eCi3yhpT+nOjljXvZKiYTpYajqUC48IHAxTWugrKe1vXWOPxVXXMQEPsaIRc2hpK+v1LmfB7GnEGvF1UAKnEZbUuiD9PBEeD5a1MZQIzcoPWCrTxipEpuXQ5Tni4mN
+codeberg.org ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBL2pDxWr18SoiDJCGZ5LmxPygTlPu+cCKSkpqkvCyQzl5xmIMeKNdfdBpfbCGDPoZQghePzFZkKJNR/v9Win3Sc=
+'''
+
+// osc reads the password literally (checked with %, $, # and ;), so it is
+// written as-is. The file lives in the workspace for the duration of one
+// withCredentials block and is removed by a trap, and again in post{}.
+WRITE_OSCRC = '''
+umask 077
+mkdir -p .release
+OSCRC="$PWD/.release/oscrc"
+trap 'rm -f "$OSCRC"' EXIT
+cat > "$OSCRC" <<EOF
+[general]
+apiurl = https://api.opensuse.org
+[https://api.opensuse.org]
+user = $OBS_USER
+pass = $OBS_PASS
+credentials_mgr_class = osc.credentials.PlaintextConfigFileCredentialsManager
+EOF
+osc() { command osc --config "$OSCRC" -A https://api.opensuse.org "$@"; }
+'''
+
+pipeline {
+    agent { label 'bee' }
+
+    options {
+        disableConcurrentBuilds()
+        timeout(time: 4, unit: 'HOURS')
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+    }
+
+    triggers {
+        // Hook-triggered polling only, like the test job: the Codeberg
+        // webhook's notifyCommit schedules the poll, the tag spec decides.
+        pollSCM('')
+    }
+
+    parameters {
+        booleanParam(name: 'DRY_RUN', defaultValue: false,
+            description: 'Build and show everything, publish nothing. Honoured only on a manual ' +
+                         '"Build with Parameters" -- a tag-triggered build always publishes.')
+    }
+
+    environment {
+        OBS_PROJECT      = 'home:abksh:crete'
+        OBS_PACKAGE      = 'crete'
+        TAP_REMOTE       = 'ssh://git@codeberg.org/abksh/homebrew-crete.git'
+        TAP_AUTHOR_NAME  = 'Ashwin Balaji'
+        TAP_AUTHOR_EMAIL = 's.ashwinbalaji.de@gmail.com'
+    }
+
+    stages {
+        stage('Resolve tag') {
+            steps {
+                script {
+                    // Only a human click may make a run dry. A stale DRY_RUN
+                    // must never turn a real tag push into a silent no-op.
+                    env.DRY_RUN = (params.DRY_RUN && isManual()) ? 'true' : 'false'
+                    sh '''
+set -eu
+rm -rf .release && mkdir -p .release
+# The job's refspec maps tags to remote refs; make_obs_source.sh and the
+# changelog need real refs/tags (and the annotation), so fetch them.
+git fetch --force --no-tags origin '+refs/tags/*:refs/tags/*'
+TAG=$(git tag --points-at HEAD | grep -E '^v[0-9]+\\.[0-9]+\\.[0-9]+$' | sort -V | tail -n 1 || true)
+if [ -z "$TAG" ]; then
+    echo "ERROR: HEAD $(git rev-parse --short HEAD) carries no vX.Y.Z tag -- nothing to release."
+    exit 1
+fi
+VERSION=${TAG#v}
+MK=$(git show "$TAG:Makefile" | sed -n 's/^VERSION *?= *//p')
+if [ "$MK" != "$VERSION" ]; then
+    echo "ERROR: $TAG but its Makefile says VERSION ?= $MK. Retag after bumping."
+    exit 1
+fi
+if [ "$(git cat-file -t "$TAG")" != tag ]; then
+    echo "WARNING: $TAG is a lightweight tag; the package changelog will say 'new upstream release.'"
+fi
+printf '%s\\n' "$TAG" > .release/tag
+'''
+                    env.RELEASE_TAG = readFile('.release/tag').trim()
+                    env.RELEASE_VERSION = env.RELEASE_TAG.substring(1)
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.RELEASE_TAG}" +
+                                               (env.DRY_RUN == 'true' ? ' (dry run)' : '')
+                    echo "Releasing ${env.RELEASE_TAG}, DRY_RUN=${env.DRY_RUN}"
+                }
+            }
+        }
+
+        stage('Preflight') {
+            steps {
+                sh '''
+set -eu
+missing=""
+for t in git python3 osc make g++ pkg-config ssh; do
+    command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+done
+case "$(uname -m)" in x86_64|i?86) command -v nasm >/dev/null 2>&1 || missing="$missing nasm" ;; esac
+if [ -n "$missing" ]; then
+    echo "ERROR: missing on this agent:$missing"
+    echo "  Fedora: dnf install git python3 osc make gcc-c++ pkgconf-pkg-config nasm openssh-clients"
+    exit 1
+fi
+osc version
+'''
+            }
+        }
+
+        stage('Assemble OBS sources') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'obs-abksh',
+                                                  usernameVariable: 'OBS_USER',
+                                                  passwordVariable: 'OBS_PASS')]) {
+                    sh WRITE_OSCRC + '''
+set -eu
+cd .release
+osc checkout --output-dir obs "$OBS_PROJECT" "$OBS_PACKAGE" >/dev/null
+cd ..
+# PREV_DIR keeps the published changelog history under the new entry.
+PREV_DIR="$PWD/.release/obs" scripts/make_obs_source.sh .release/upload "$RELEASE_TAG"
+'''
+                }
+            }
+        }
+
+        stage('Smoke build') {
+            steps {
+                sh '''
+set -eu
+# The tarball must build by itself -- OBS will build it with no network.
+# Extracted OUTSIDE the workspace: FFmpeg's version.sh asks `git describe`,
+# and inside crete's checkout it answers with crete's tag ("ffmpeg-compact
+# v0.19.x") instead of the release -- a smoke build that differs from what
+# OBS and Homebrew produce. Found running this stage by hand.
+FFV=$(sed -n 's/^FFMPEG_VERSION *?= *//p' Makefile)
+TARBALL="$PWD/.release/upload/crete-$RELEASE_VERSION.tar.gz"
+SMOKE=$(mktemp -d)
+trap 'rm -rf "$SMOKE"' EXIT
+tar -xzf "$TARBALL" -C "$SMOKE"
+cd "$SMOKE/crete-$RELEASE_VERSION"
+env -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS make cli-ffmpeg
+./crete-ffmpeg --version | head -n 1
+./crete-ffmpeg --version | head -n 1 | grep -F "crête $RELEASE_VERSION"
+./crete-ffmpeg --version | head -n 1 | grep -F "ffmpeg-compact $FFV]"
+if ldd ./crete-ffmpeg | grep -E 'libav|libsw'; then
+    echo "ERROR: linked a shared FFmpeg -- the compact one must be static."
+    exit 1
+fi
+'''
+            }
+        }
+
+        stage('Publish to OBS') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'obs-abksh',
+                                                  usernameVariable: 'OBS_USER',
+                                                  passwordVariable: 'OBS_PASS')]) {
+                    sh WRITE_OSCRC + '''
+set -eu
+PKG=.release/obs
+NEW=".release/upload/crete-$RELEASE_VERSION.tar.gz"
+if [ -f "$PKG/crete-$RELEASE_VERSION.tar.gz" ] && cmp -s "$NEW" "$PKG/crete-$RELEASE_VERSION.tar.gz"; then
+    echo ">> OBS already carries this exact $RELEASE_TAG tarball -- not committing again."
+else
+    rm -f "$PKG"/crete-*.tar.gz
+    cp .release/upload/* "$PKG"/
+    (cd "$PKG" && osc addremove >/dev/null && osc status)
+    if [ "$DRY_RUN" = true ]; then
+        echo ">> DRY RUN: would commit the above to $OBS_PROJECT/$OBS_PACKAGE"
+        (cd "$PKG" && osc diff | head -n 80)
+        exit 0
+    fi
+    (cd "$PKG" && osc commit -m "crete $RELEASE_VERSION (tag $RELEASE_TAG, $(git rev-parse --short "$RELEASE_TAG^{commit}"))")
+fi
+echo ">> waiting for every repository to build and publish $RELEASE_VERSION"
+scripts/obs_wait_release.py --osc-config "$OSCRC" "$OBS_PROJECT" "$OBS_PACKAGE" "$RELEASE_VERSION"
+'''
+                }
+            }
+        }
+
+        stage('Bump Homebrew tap') {
+            steps {
+                writeFile file: '.release/known_hosts', text: CODEBERG_KNOWN_HOSTS
+                withCredentials([sshUserPrivateKey(credentialsId: 'codeberg-homebrew-tap',
+                                                   keyFileVariable: 'TAP_KEY')]) {
+                    sh '''
+set -eu
+export GIT_SSH_COMMAND="ssh -i $TAP_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$PWD/.release/known_hosts"
+rm -rf .release/tap
+git clone --quiet --depth 1 "$TAP_REMOTE" .release/tap
+scripts/bump_homebrew_tap.py .release/tap "$RELEASE_TAG" | tee .release/bump.txt
+if grep -q '^unchanged' .release/bump.txt; then
+    exit 0
+fi
+cd .release/tap
+git diff --stat
+if [ "$DRY_RUN" = true ]; then
+    echo ">> DRY RUN: would push this to $TAP_REMOTE"
+    git diff
+    exit 0
+fi
+git -c user.name="$TAP_AUTHOR_NAME" -c user.email="$TAP_AUTHOR_EMAIL" \\
+    commit -qam "crete and crete-gui $RELEASE_VERSION"
+git push origin HEAD:main
+'''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh 'rm -f .release/oscrc'
+        }
+        success {
+            echo "${env.RELEASE_TAG} is out: OBS ${env.OBS_PROJECT} and the Homebrew tap." +
+                 (env.DRY_RUN == 'true' ? ' (DRY RUN -- nothing was published)' : '')
+        }
+    }
+}

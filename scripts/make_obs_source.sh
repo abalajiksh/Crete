@@ -18,10 +18,18 @@
 # can be tied to a source by checksum.
 #
 # Usage:
-#   scripts/make_obs_source.sh OUTDIR [REF]
+#   [PREV_DIR=dir] scripts/make_obs_source.sh OUTDIR [REF]
 #     OUTDIR  where the upload set is written (created; must be empty or new)
 #     REF     git ref to package (default HEAD). The version is read from the
 #             Makefile AT THAT REF, so package a tag for a release.
+#     PREV_DIR  an `osc co` of the package as currently published. Its
+#             crete.changes / debian.changelog are kept BELOW the new entry,
+#             so the history accumulates instead of being replaced each
+#             release. If they already hold an entry for this version (a
+#             re-run), they are reused unchanged rather than duplicated.
+#
+# The changelog line is the tag's annotation subject ("crete X.Y.Z -- ..."),
+# so writing a good tag message IS writing the package changelog.
 #
 # Output (upload all of it to the OBS package):
 #   crete-<ver>.tar.gz  crete.spec  crete.changes
@@ -130,20 +138,45 @@ with open(dest, "wb") as raw:
                 add(p)
 PY
 
+# One-line change text: the annotated tag's subject, minus a leading
+# "crête X.Y.Z — " (the entry already says which version), else a stock line.
+CHANGE="$(git for-each-ref --format='%(contents:subject)' "refs/tags/$REF" 2>/dev/null || true)"
+CHANGE="$(printf '%s' "$CHANGE" | sed -E 's/^cr(ê|e)te [0-9][0-9.]*[[:space:]]*(—|--|-)[[:space:]]*//')"
+[ -n "$CHANGE" ] || CHANGE="new upstream release."
+echo ">> changelog: $CHANGE"
+
 SHA256="$( (sha256sum "$OUT/$NAME.tar.gz" 2>/dev/null || shasum -a 256 "$OUT/$NAME.tar.gz") | cut -d' ' -f1)"
 CHANGES_DATE="$(LC_ALL=C TZ=UTC date '+%a %b %e %H:%M:%S UTC %Y')"
 DEB_DATE="$(LC_ALL=C TZ=UTC date '+%a, %d %b %Y %H:%M:%S +0000')"
 
+# The change text is free-form (a tag message), so escape what sed treats as
+# special in a replacement: the | delimiter, & and backslash.
+CHANGE_SED="$(printf '%s' "$CHANGE" | sed -e 's/[\\|&]/\\&/g')"
 fill() {
     sed -e "s|@VERSION@|$VERSION|g" -e "s|@SHA256@|$SHA256|g" \
         -e "s|@CHANGES_DATE@|$CHANGES_DATE|g" -e "s|@DEB_DATE@|$DEB_DATE|g" \
+        -e "s|@CHANGE@|$CHANGE_SED|g" \
         "$TPL/$1" > "$OUT/$2"
 }
 fill crete.spec.in       crete.spec
-fill crete.changes.in    crete.changes
 fill crete.dsc.in        crete.dsc
-fill debian.changelog.in debian.changelog
 fill PKGBUILD.in         PKGBUILD
+fill crete.changes.in    crete.changes
+fill debian.changelog.in debian.changelog
+
+# Keep the published history under the new entry (see PREV_DIR above).
+if [ -n "${PREV_DIR:-}" ]; then
+    if grep -q "^crete (${VERSION}-" "$PREV_DIR/debian.changelog" 2>/dev/null; then
+        echo ">> $VERSION already in the published changelogs; reusing them unchanged"
+        cp "$PREV_DIR/crete.changes" "$PREV_DIR/debian.changelog" "$OUT/"
+    else
+        for f in crete.changes debian.changelog; do
+            [ -s "$PREV_DIR/$f" ] || continue
+            { cat "$OUT/$f"; echo; cat "$PREV_DIR/$f"; } > "$OUT/$f.new"
+            mv "$OUT/$f.new" "$OUT/$f"
+        done
+    fi
+fi
 cp "$TPL/debian.control" "$TPL/debian.rules" \
    "$TPL/debian.copyright" "$OUT/"
 
