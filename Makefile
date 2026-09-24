@@ -64,7 +64,7 @@ CXXFLAGS   = -std=c++17 -Wall -Wextra -Wpedantic $(FP_DETERMINISM)
 CFLAGS     = -std=c99 -O2 -Wall -Wextra $(FP_DETERMINISM)
 LDFLAGS    =
 
-VERSION   ?= 0.19.2
+VERSION   ?= 0.19.3
 CXXFLAGS  += -DCRETE_VERSION='"$(VERSION)"'
 
 PREFIX    ?= /usr/local
@@ -200,12 +200,21 @@ IMGUI_SRCS = $(IMGUI_DIR)/imgui.cpp \
 
 IMGUI_OBJS = $(patsubst $(IMGUI_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(IMGUI_SRCS))
 
+# GUI_FFMPEG_CFLAGS / GUI_FFMPEG_LDLIBS are empty except under gui-ffmpeg, and
+# they sit BEFORE the platform (SDL2) flags on purpose. `pkg-config sdl2` emits
+# the package manager's shared -I/-L -- -I/opt/homebrew/include and
+# -L/opt/homebrew/lib on a Mac -- which also hold the host's FFmpeg headers and
+# dylibs. Appended after them, the compact FFmpeg lost both searches: the GUI
+# compiled against Homebrew's FFmpeg 9 headers and linked its --enable-gpl
+# dylibs, while reporting "+ffmpeg-compact". Measured 2026-09-24 with otool -L.
+# The CLI tiers never pass SDL2 flags, so they were not affected.
 GUI_CXXFLAGS = $(CXXFLAGS) \
+               $(GUI_FFMPEG_CFLAGS) \
                -I$(IMGUI_DIR) \
                -I$(IMGUI_DIR)/backends \
                $(GUI_PLAT_CXXFLAGS)
 
-GUI_LDFLAGS  = $(LDFLAGS) $(GUI_PLAT_LDFLAGS)
+GUI_LDFLAGS  = $(LDFLAGS) $(GUI_FFMPEG_LDLIBS) $(GUI_PLAT_LDFLAGS)
 
 # Where an INSTALLED GUI finds its fonts (the directory holding fonts/). Empty
 # by default: a dev build or a portable tree loads fonts from beside the binary
@@ -270,12 +279,15 @@ $(GUI_TARGET): $(GUI_SRC) $(IMGUI_OBJS) analysis.hpp audio.hpp dsd_decode.hpp fi
 # Note: the ImGui objects are shared with the plain gui build; the FFmpeg
 # defines are harmless to them but switching between `gui` and `gui-ffmpeg`
 # recompiles them (target-specific GUI_CXXFLAGS propagate to prerequisites).
-gui-ffmpeg: GUI_CXXFLAGS += -O2 -DNDEBUG -DCRETE_HAS_FFMPEG $(FFMPEG_CFLAGS)
-gui-ffmpeg: GUI_LDFLAGS  += $(FFMPEG_LDLIBS)
+gui-ffmpeg: GUI_CXXFLAGS      += -O2 -DNDEBUG
+gui-ffmpeg: GUI_FFMPEG_CFLAGS  = -DCRETE_HAS_FFMPEG $(FFMPEG_CFLAGS)
+gui-ffmpeg: GUI_FFMPEG_LDLIBS  = $(FFMPEG_LDLIBS)
 gui-ffmpeg: $(GUI_FFMPEG_TARGET)
 
-debug-gui-ffmpeg: GUI_CXXFLAGS += -O0 -g -fsanitize=address,undefined -DCRETE_HAS_FFMPEG $(FFMPEG_CFLAGS)
-debug-gui-ffmpeg: GUI_LDFLAGS  += -fsanitize=address,undefined $(FFMPEG_LDLIBS)
+debug-gui-ffmpeg: GUI_CXXFLAGS      += -O0 -g -fsanitize=address,undefined
+debug-gui-ffmpeg: GUI_LDFLAGS       += -fsanitize=address,undefined
+debug-gui-ffmpeg: GUI_FFMPEG_CFLAGS  = -DCRETE_HAS_FFMPEG $(FFMPEG_CFLAGS)
+debug-gui-ffmpeg: GUI_FFMPEG_LDLIBS  = $(FFMPEG_LDLIBS)
 debug-gui-ffmpeg: $(GUI_FFMPEG_TARGET)
 
 $(GUI_FFMPEG_TARGET): $(GUI_SRC) $(IMGUI_OBJS) analysis.hpp audio.hpp audio_ffmpeg.hpp dsd_decode.hpp file_dialog.hpp $(LIBDSDDPCM_OBJ) | ffmpeg-ensure
