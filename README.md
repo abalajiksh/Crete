@@ -57,6 +57,20 @@ built from source inside the package build and linked statically; nothing is
 downloaded at build time. To produce the upload set yourself:
 `scripts/make_obs_source.sh OUTDIR [REF]`.
 
+## Install (macOS, Homebrew)
+
+```bash
+brew tap abksh/crete https://codeberg.org/abksh/homebrew-crete
+brew install abksh/crete/crete        # /opt/homebrew/bin/crete
+brew install abksh/crete/crete-gui    # /opt/homebrew/bin/crete-gui
+```
+
+Same two builds as the Linux packages (`make cli-ffmpeg`, `make gui-ffmpeg`),
+compiled from the release tag with crête's own compact LGPL FFmpeg linked
+statically -- never Homebrew's `ffmpeg`, which is `--enable-gpl`. Formulae,
+not casks, so nothing is quarantined by Gatekeeper. Tap source:
+<https://codeberg.org/abksh/homebrew-crete>.
+
 ---
 
 ## Build
