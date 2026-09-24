@@ -3,7 +3,10 @@
 // cue.hpp — Minimal zero-dependency cue sheet parser
 //
 // Parses CDDA-style cue sheets to expose:
-//   - The referenced audio FILE (relative to the cue file's directory)
+//   - The referenced audio FILE(s) (relative to the cue file's directory).
+//     A sheet may name several -- one per vinyl side or per disc -- and each
+//     track's INDEX 01 time is relative to the FILE it sits in, so every
+//     track records its own file rather than the sheet holding one.
 //   - Album title / performer
 //   - Per-track number, title, performer, and INDEX 01 start time
 //
@@ -36,11 +39,12 @@ struct Track {
     std::string title;
     std::string performer;
     uint64_t    start_frame = 0;   // INDEX 01 time in CDDA frames (1/75 sec)
+    std::string file;              // raw FILE value INDEX 01 lies in
 };
 
 struct Sheet {
     std::string source_path;       // path to the .cue file itself
-    std::string referenced_file;   // raw FILE "..." value from the cue
+    std::string referenced_file;   // FIRST FILE "..." value from the cue
     std::string album_title;
     std::string album_performer;
     std::vector<Track> tracks;
@@ -140,6 +144,7 @@ inline bool parse(const std::string& cue_path, Sheet& out) {
     std::string line;
     Track* cur = nullptr;
     bool in_track = false;
+    std::string cur_file;
 
     while (std::getline(stream, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -158,7 +163,8 @@ inline bool parse(const std::string& cue_path, Sheet& out) {
             continue;
 
         if (utok == "FILE") {
-            out.referenced_file = value_after(trimmed, "FILE");
+            cur_file = value_after(trimmed, "FILE");
+            if (out.referenced_file.empty()) out.referenced_file = cur_file;
         }
         else if (utok == "TITLE") {
             std::string v = value_after(trimmed, "TITLE");
@@ -180,14 +186,21 @@ inline bool parse(const std::string& cue_path, Sheet& out) {
             // Inherit album performer; an explicit per-track PERFORMER
             // line later in the block will overwrite it.
             cur->performer = out.album_performer;
+            cur->file = cur_file;
             in_track = true;
         }
         else if (utok == "INDEX") {
             int idx = 0;
             std::string time_str;
             toks >> idx >> time_str;
-            if (in_track && cur && idx == 1)
+            // The file is re-read here, not only at TRACK: a sheet that
+            // appends gaps to the previous file puts FILE between a track's
+            // INDEX 00 and its INDEX 01, and the start time belongs to the
+            // file INDEX 01 is in.
+            if (in_track && cur && idx == 1) {
                 cur->start_frame = parse_time_to_frames(time_str);
+                cur->file = cur_file;
+            }
         }
         // Unrecognized directives are silently ignored.
     }
@@ -195,24 +208,24 @@ inline bool parse(const std::string& cue_path, Sheet& out) {
     return !out.tracks.empty();
 }
 
-// ── Locate the audio file the cue refers to ────────────────────────────────
+// ── Locate an audio file the cue refers to ─────────────────────────────────
 //
-// Joins the FILE value with the cue's parent directory. If that exact path
+// Joins a raw FILE value with the cue's parent directory. If that exact path
 // doesn't exist, falls back to a case-insensitive scan of the cue's directory
 // (common when cue files travel between OSes).
 
-inline std::string resolve_referenced_file(const Sheet& s) {
+inline std::string resolve_file(const Sheet& s, const std::string& name) {
     namespace fs = std::filesystem;
-    if (s.referenced_file.empty() || s.source_path.empty()) return "";
+    if (name.empty() || s.source_path.empty()) return "";
 
     std::error_code ec;
     fs::path cue_dir = fs::path(s.source_path).parent_path();
-    fs::path candidate = cue_dir / s.referenced_file;
+    fs::path candidate = cue_dir / name;
 
     if (fs::exists(candidate, ec)) return candidate.string();
 
     if (fs::is_directory(cue_dir, ec)) {
-        std::string want = lowercase(s.referenced_file);
+        std::string want = lowercase(name);
         for (const auto& e : fs::directory_iterator(cue_dir, ec)) {
             if (!e.is_regular_file()) continue;
             std::string fn = lowercase(e.path().filename().string());

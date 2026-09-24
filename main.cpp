@@ -949,7 +949,8 @@ void print_usage(const char* argv0) {
               << "Exit status:\n"
               << "  0  every input decoded cleanly\n"
               << "  1  nothing could be analysed\n"
-              << "  2  completed, but some input failed to decode or was damaged --\n"
+              << "  2  completed, but some input failed to decode, was damaged, or a\n"
+              << "     cue track could not be sliced and was dropped --\n"
               << "     the numbers reported are unreliable, including any album value\n";
 }
 
@@ -1337,7 +1338,8 @@ int main(int argc, char* argv[]) {
     }
     if (any_partial) {
         std::cerr << "Warning: completed with errors -- some input could not be"
-                     " decoded, or was damaged. See the warnings above;"
+                     " decoded, was damaged, or a cue track was dropped."
+                     " See the warnings above;"
                      " the numbers reported for affected tracks are"
                      " unreliable, and any album value computed from them"
                      " is too.\n";

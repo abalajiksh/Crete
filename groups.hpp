@@ -210,31 +210,43 @@ inline std::vector<Group> collect(const std::string& path,
     std::sort(cue_paths.begin(), cue_paths.end(), natural_less);
     std::sort(audio_paths.begin(), audio_paths.end(), natural_less);
 
-    // Pass 2: parse each cue, resolve its referenced audio file, claim it.
+    // Pass 2: parse each cue, resolve its referenced audio file(s), claim
+    // them. A sheet may name several FILEs (one per vinyl side or disc), and
+    // INDEX times restart in each, so every run of consecutive tracks in the
+    // same FILE becomes its own group -- sliced against its own decode, never
+    // against another file's timeline.
     std::vector<fs::path> claimed_paths;
-    claimed_paths.reserve(cue_paths.size());
     for (const auto& cp : cue_paths) {
         cue::Sheet sheet;
         if (!cue::parse(cp, sheet)) {
             warnings.push_back("Warning: failed to parse cue file: " + cp);
             continue;
         }
-        std::string ref = cue::resolve_referenced_file(sheet);
-        if (ref.empty()) {
-            warnings.push_back("Warning: cue " + fs::path(cp).filename().string()
-                               + " references missing file: " + sheet.referenced_file);
-            continue;
+        const std::string cue_name = fs::path(cp).filename().string();
+        const auto& all = sheet.tracks;
+        for (size_t i = 0, j; i < all.size(); i = j) {
+            j = i + 1;
+            while (j < all.size() && all[j].file == all[i].file) ++j;
+
+            std::string ref = cue::resolve_file(sheet, all[i].file);
+            if (ref.empty()) {
+                warnings.push_back("Warning: cue " + cue_name
+                                   + " references missing file: " + all[i].file);
+                continue;
+            }
+            if (!audio::is_supported_format(ref)) {
+                warnings.push_back("Warning: cue " + cue_name
+                                   + " references unsupported file: " + ref);
+                continue;
+            }
+            Group g;
+            g.audio_path = ref;
+            g.sheet = sheet;
+            g.sheet.tracks.assign(all.begin() + static_cast<std::ptrdiff_t>(i),
+                                  all.begin() + static_cast<std::ptrdiff_t>(j));
+            groups.push_back(std::move(g));
+            claimed_paths.emplace_back(ref);
         }
-        if (!audio::is_supported_format(ref)) {
-            warnings.push_back("Warning: cue " + fs::path(cp).filename().string()
-                               + " references unsupported file: " + ref);
-            continue;
-        }
-        Group g;
-        g.audio_path = ref;
-        g.sheet = std::move(sheet);
-        groups.push_back(std::move(g));
-        claimed_paths.emplace_back(ref);
     }
 
     // Pass 3: audio files not claimed by any cue → single-track groups.
@@ -417,9 +429,15 @@ inline GroupResult analyse(const Group& g, const Options& opt,
 
                 if (progress) progress(track_name);
 
+                // A track that cannot be sliced is DROPPED from the album,
+                // so the run cannot claim to be complete: it counts toward
+                // `degraded` and the exit status becomes 2.
                 if (start >= end) {
                     out.note(std::string("Warning: empty cue range for ")
-                             + track_name);
+                             + track_name + " -- track dropped (its start is"
+                               " not before the next track's, or past the end"
+                               " of " + basename + ")");
+                    out.degraded++;
                     continue;
                 }
 

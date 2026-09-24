@@ -422,8 +422,10 @@ tier below.
 When a folder contains a `.cue` file, crête:
 
 1. Parses the cue (`FILE`, `TRACK`, `TITLE`, `PERFORMER`, `INDEX 01`).
-2. Locates the referenced audio file (case-insensitive fallback).
-3. Decodes that file once, then slices its PCM by track boundaries and runs the full analysis pipeline on each slice.
+2. Locates each referenced audio file (case-insensitive fallback). A cue may name several `FILE`s — one per vinyl side or per disc — and `INDEX` times restart in each, so every track is sliced from the file its `INDEX 01` sits in.
+3. Decodes each file once, then slices its PCM by track boundaries and runs the full analysis pipeline on each slice.
+
+A track whose range is empty (its start is not before the next track's, or lies past the end of the file) is dropped with a warning, and the run exits **2**: an album missing a track is not a complete measurement.
 
 Each track is reported as `NN - Title.ext` (e.g. `01 - What A Shame.dff`), matching the per-track naming convention produced by `sacd_extract`, `flac --split`, and most other splitters — so a cue-sliced monolithic album pairs cleanly against the equivalent per-track album. Audio files in the same folder *not* referenced by any cue are still analysed individually.
 
