@@ -141,7 +141,7 @@ script_hash() {
     fi
 }
 cat > "$PREFIX/crete-ffmpeg-build.id" <<EOF
-script_md5=$(script_hash "$0")
+script_md5=$(script_hash "$ROOT/scripts/$(basename "$0")")
 version=$VERSION
 decoders=$DECODERS
 demuxers=$DEMUXERS
