@@ -64,7 +64,7 @@ CXXFLAGS   = -std=c++17 -Wall -Wextra -Wpedantic $(FP_DETERMINISM)
 CFLAGS     = -std=c99 -O2 -Wall -Wextra $(FP_DETERMINISM)
 LDFLAGS    =
 
-VERSION   ?= 0.19.3
+VERSION   ?= 0.19.4
 CXXFLAGS  += -DCRETE_VERSION='"$(VERSION)"'
 
 PREFIX    ?= /usr/local
