@@ -8,7 +8,54 @@ crête also **detects MQA-encoded files** and reports them unconditionally: if y
 
 The default build has **zero dependencies**. An optional third build tier statically links a compact, LGPL-only FFmpeg to add lossy/ALAC decode support — see below.
 
-**Current version: 0.13.0**
+**Current version: 0.19.2**
+
+---
+
+## Install (Linux packages)
+
+Prebuilt packages are published from the openSUSE Build Service project
+[`home:abksh:crete`](https://build.opensuse.org/package/show/home:abksh:crete/crete).
+The one-click page generates the right commands for your distribution:
+**<https://software.opensuse.org/download.html?project=home:abksh:crete&package=crete>**
+
+| Package | Installs | Built from |
+|---------|----------|------------|
+| `crete` | `/usr/bin/crete` | `make cli-ffmpeg` — native decoders + the compact FFmpeg set (no `-f json`) |
+| `crete-gui` | `/usr/bin/crete-gui`, desktop entry, fonts in `/usr/share/crete` | `make gui-ffmpeg` |
+
+| Distribution | Repository | Architectures |
+|--------------|------------|---------------|
+| openSUSE Tumbleweed | `openSUSE_Tumbleweed` (x86_64), `openSUSE_Factory_ARM` (aarch64) | x86_64, aarch64 |
+| openSUSE Leap 16.0 | `16.0` | x86_64, aarch64 |
+| Fedora 43, 44, Rawhide | `Fedora_43`, `Fedora_44`, `Fedora_Rawhide` | x86_64, aarch64 (Rawhide x86_64 only) |
+| Debian 12, 13 | `Debian_12`, `Debian_13` | x86_64 |
+| Ubuntu 22.04, 24.04, 26.04 | `xUbuntu_22.04`, `xUbuntu_24.04`, `xUbuntu_26.04` | x86_64 |
+| Arch Linux | `Arch` | x86_64 |
+
+For example (substitute the repository name from the table):
+
+```bash
+# openSUSE
+sudo zypper addrepo https://download.opensuse.org/repositories/home:abksh:crete/openSUSE_Tumbleweed/home:abksh:crete.repo
+sudo zypper install crete crete-gui
+
+# Fedora
+sudo dnf config-manager addrepo --from-repofile=https://download.opensuse.org/repositories/home:abksh:crete/Fedora_44/home:abksh:crete.repo
+sudo dnf install crete crete-gui
+
+# Debian / Ubuntu
+echo 'deb https://download.opensuse.org/repositories/home:/abksh:/crete/Debian_13/ /' | sudo tee /etc/apt/sources.list.d/crete.list
+curl -fsSL https://download.opensuse.org/repositories/home:abksh:crete/Debian_13/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/crete.gpg > /dev/null
+sudo apt update && sudo apt install crete crete-gui
+```
+
+The packages are built with crête's own compiler flags, not the distribution's,
+so the x86_64 and aarch64 binaries keep the bit-identical measurements that
+`-ffp-contract=off` exists for. The compact FFmpeg (LGPL-2.1, decode-only) is
+built from source inside the package build and linked statically; nothing is
+downloaded at build time. To produce the upload set yourself:
+`scripts/make_obs_source.sh OUTDIR [REF]`.
 
 ---
 
