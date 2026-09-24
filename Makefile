@@ -422,7 +422,7 @@ ffmpeg-ensure:
 	        echo ">> decode time, not at link time, which is far harder to read."; \
 	        ./$(FFMPEG_SCRIPT) "$(FFMPEG_VERSION)" "$(abspath $(FFMPEG_PREFIX))"; \
 	    fi; \
-	elif PKG_CONFIG_PATH=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --exists $(FFMPEG_LIBS) 2>/dev/null; then \
+	elif PKG_CONFIG_LIBDIR=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --exists $(FFMPEG_LIBS) 2>/dev/null; then \
 	    echo ">> using an externally-provided FFmpeg at $(abspath $(FFMPEG_PREFIX)) (no crete stamp)"; \
 	    echo ">> NOTE: crete cannot verify its decoder set — if a disc-audio decode"; \
 	    echo ">> fails, check for truehd/mlp/eac3/ac3/dca."; \
@@ -434,12 +434,21 @@ ffmpeg-ensure:
 # Recursively-expanded (=) on purpose: pkg-config only runs when an FFmpeg
 # target is actually built, so plain `make` / `make cli-json` never touch it.
 # NOTE: no 2>/dev/null here — a real failure must be visible, not swallowed.
-FFMPEG_CFLAGS  = $(shell PKG_CONFIG_PATH=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --cflags $(FFMPEG_LIBS))
-FFMPEG_LDLIBS  = $(shell PKG_CONFIG_PATH=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --libs --static $(FFMPEG_LIBS))
+#
+# PKG_CONFIG_LIBDIR, never PKG_CONFIG_PATH, in every lookup here and in
+# ffmpeg-ensure. PATH only PREPENDS to pkg-config's default search, so when the
+# compact prefix did not exist yet the "externally-provided FFmpeg" check found
+# the HOST's FFmpeg instead -- Homebrew's on a Mac, which is --enable-gpl --
+# skipped building the compact one, and then linked against the wrong libraries.
+# Measured 2026-09-24 building from a fresh source tarball. LIBDIR REPLACES the
+# default search, so only the prefix can answer. When the prefix exists the
+# flags are byte-identical either way (checked), so CI builds are unaffected.
+FFMPEG_CFLAGS  = $(shell PKG_CONFIG_LIBDIR=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --cflags $(FFMPEG_LIBS))
+FFMPEG_LDLIBS  = $(shell PKG_CONFIG_LIBDIR=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --libs --static $(FFMPEG_LIBS))
 
 # Loud pre-build guard — fails with an actionable message instead of silently
 # dropping the flags (which is what produced a byte-identical no-FFmpeg binary).
-FFMPEG_PRECHECK = command -v $(PKG_CONFIG) >/dev/null 2>&1 || { echo "ERROR: pkg-config not found — install it (macOS: brew install pkg-config; Ubuntu: apt install pkg-config; Fedora: dnf install pkgconf-pkg-config)"; exit 1; }; PKG_CONFIG_PATH=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --exists $(FFMPEG_LIBS) || { echo "ERROR: compact FFmpeg not found under $(abspath $(FFMPEG_PKGCONFIG)) — run ./scripts/build_ffmpeg_compact.sh (or set FFMPEG_PREFIX=/path)"; exit 1; }
+FFMPEG_PRECHECK = command -v $(PKG_CONFIG) >/dev/null 2>&1 || { echo "ERROR: pkg-config not found — install it (macOS: brew install pkg-config; Ubuntu: apt install pkg-config; Fedora: dnf install pkgconf-pkg-config)"; exit 1; }; PKG_CONFIG_LIBDIR=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --exists $(FFMPEG_LIBS) || { echo "ERROR: compact FFmpeg not found under $(abspath $(FFMPEG_PKGCONFIG)) — run ./scripts/build_ffmpeg_compact.sh (or set FFMPEG_PREFIX=/path)"; exit 1; }
 
 # ── CLI + FFmpeg (no JSON) ──────────────────────────────────────────────────
 release-ffmpeg: CXXFLAGS += -O2 -DNDEBUG -DCRETE_HAS_FFMPEG $(FFMPEG_CFLAGS)
@@ -476,7 +485,7 @@ ffmpeg-info:
 	@echo "FFMPEG_PREFIX    = $(FFMPEG_PREFIX)"
 	@echo "FFMPEG_PKGCONFIG = $(abspath $(FFMPEG_PKGCONFIG))"
 	@command -v $(PKG_CONFIG) >/dev/null 2>&1 && echo "pkg-config       = $$(command -v $(PKG_CONFIG))" || echo "pkg-config       = NOT FOUND (macOS: brew install pkg-config)"
-	@PKG_CONFIG_PATH=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --exists $(FFMPEG_LIBS) 2>/dev/null && echo ".pc files        = found" || echo ".pc files        = NOT FOUND under the path above"
+	@PKG_CONFIG_LIBDIR=$(FFMPEG_PKGCONFIG) $(PKG_CONFIG) --exists $(FFMPEG_LIBS) 2>/dev/null && echo ".pc files        = found" || echo ".pc files        = NOT FOUND under the path above"
 	@echo "cflags           = $(FFMPEG_CFLAGS)"
 	@echo "libs (--static)  = $(FFMPEG_LDLIBS)"
 
