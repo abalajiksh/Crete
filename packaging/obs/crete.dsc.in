@@ -1,0 +1,10 @@
+Format: 1.0
+Source: crete
+Binary: crete, crete-gui
+Architecture: any
+Version: @VERSION@-1
+Maintainer: Ashwin Balaji <s.ashwinbalaji.de@gmail.com>
+Homepage: https://codeberg.org/abksh/Crete
+Standards-Version: 4.6.2
+Build-Depends: debhelper-compat (= 12), g++, make, pkg-config, nasm [amd64 i386], gawk, libsdl2-dev, libgl-dev
+DEBTRANSFORM-TAR: crete-@VERSION@.tar.gz

@@ -1,0 +1,63 @@
+# Maintainer: Ashwin Balaji <s.ashwinbalaji.de@gmail.com>
+# Generated from packaging/obs/PKGBUILD.in by scripts/make_obs_source.sh.
+#
+# FFmpeg tiers only: cli-ffmpeg -> /usr/bin/crete, gui-ffmpeg -> /usr/bin/crete-gui.
+# The compact FFmpeg is built from the source vendored in the tarball (OBS has
+# no network) and linked statically, as upstream CI does.
+
+pkgbase=crete
+pkgname=('crete' 'crete-gui')
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Dynamic-range and loudness meter (TT DR, EBU R128, true peak)'
+arch=('x86_64' 'aarch64')
+url='https://codeberg.org/abksh/Crete'
+license=('MIT' 'BSD-2-Clause' 'LGPL-2.1-or-later' 'OFL-1.1')
+makedepends=('gcc' 'make' 'pkgconf' 'sdl2' 'libglvnd')
+makedepends_x86_64=('nasm')   # FFmpeg's x86 asm; nothing to assemble on aarch64
+# crete pins its own flags (-ffp-contract=off) so x86_64 and aarch64 produce
+# bit-identical measurements; makepkg's CFLAGS/LTO would void that.
+options=('!lto' '!debug' '!buildflags')
+source=("crete-${pkgver}.tar.gz")
+sha256sums=('@SHA256@')
+
+build() {
+  cd "crete-${pkgver}"
+  make cli-ffmpeg
+  make gui-ffmpeg CRETE_DATADIR=/usr/share/crete
+}
+
+check() {
+  cd "crete-${pkgver}"
+  ./crete-ffmpeg --version | head -1 | grep -F "crête ${pkgver}"
+}
+
+package_crete() {
+  depends=('gcc-libs' 'glibc')
+  cd "crete-${pkgver}"
+  install -Dm755 crete-ffmpeg "${pkgdir}/usr/bin/crete"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/crete/LICENSE"
+  install -Dm644 third_party/libdsddpcm/LICENSE \
+    "${pkgdir}/usr/share/licenses/crete/libdsddpcm-LICENSE"
+  install -Dm644 third_party/ffmpeg-src/COPYING.LGPLv2.1 \
+    "${pkgdir}/usr/share/licenses/crete/ffmpeg-COPYING.LGPLv2.1"
+  install -Dm644 README.md "${pkgdir}/usr/share/doc/crete/README.md"
+}
+
+package_crete-gui() {
+  pkgdesc='Graphical front-end for the crete dynamic-range meter'
+  depends=('crete' 'sdl2' 'libglvnd' 'gcc-libs' 'glibc')
+  optdepends=('zenity: file dialogs (GNOME)' 'kdialog: file dialogs (KDE)')
+  cd "crete-${pkgver}"
+  install -Dm755 crete-gui-ffmpeg "${pkgdir}/usr/bin/crete-gui"
+  install -Dm644 packaging/obs/crete-gui.desktop \
+    "${pkgdir}/usr/share/applications/crete-gui.desktop"
+  local f
+  for f in fonts/Archivo/*.ttf fonts/Archivo/OFL.txt; do
+    install -Dm644 "$f" "${pkgdir}/usr/share/crete/$f"
+  done
+  install -Dm644 third_party/imgui/LICENSE.txt \
+    "${pkgdir}/usr/share/licenses/crete-gui/imgui-LICENSE.txt"
+  install -Dm644 fonts/Archivo/OFL.txt \
+    "${pkgdir}/usr/share/licenses/crete-gui/Archivo-OFL.txt"
+}

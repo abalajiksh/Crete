@@ -1,0 +1,108 @@
+#
+# spec file for crete -- generated from packaging/obs/crete.spec.in by
+# scripts/make_obs_source.sh. Edit the template, not the generated file.
+#
+# Builds the FFmpeg tiers only: `make cli-ffmpeg` -> /usr/bin/crete and
+# `make gui-ffmpeg` -> /usr/bin/crete-gui. The compact FFmpeg (LGPL-only,
+# decode-only) is built from the source vendored in the tarball and linked
+# statically, exactly as upstream CI builds it; OBS has no network, so nothing
+# is fetched.
+#
+# Distro CFLAGS/LDFLAGS are deliberately NOT applied. crete pins its own flags
+# (notably -ffp-contract=off) so x86_64 and aarch64 produce bit-identical
+# measurements; injecting %%optflags would give each distro a different binary
+# and void that. Hence no debuginfo package either.
+
+%global debug_package %{nil}
+%undefine _auto_set_build_flags
+%define _lto_cflags %{nil}
+
+Name:           crete
+Version:        @VERSION@
+Release:        0
+Summary:        Dynamic-range and loudness meter (TT DR, EBU R128, true peak)
+License:        MIT AND BSD-2-Clause AND LGPL-2.1-or-later AND OFL-1.1
+URL:            https://codeberg.org/abksh/Crete
+Source0:        crete-%{version}.tar.gz
+
+BuildRequires:  make
+BuildRequires:  pkgconfig
+BuildRequires:  coreutils
+BuildRequires:  sed
+BuildRequires:  gawk
+BuildRequires:  diffutils
+%ifarch x86_64 %{ix86}
+BuildRequires:  nasm
+%endif
+# Leap 15's default g++ is 7, which predates usable std::filesystem.
+%if 0%{?suse_version} && 0%{?suse_version} < 1600
+BuildRequires:  gcc13
+BuildRequires:  gcc13-c++
+%global make_cc CC=gcc-13 CXX=g++-13
+%else
+BuildRequires:  gcc
+BuildRequires:  gcc-c++
+%global make_cc %{nil}
+%endif
+BuildRequires:  pkgconfig(sdl2)
+BuildRequires:  pkgconfig(gl)
+
+%description
+crete measures TT Dynamic Range (the dr.loudness-war.info PMF procedure),
+EBU R128 integrated loudness and loudness range, true peak (4x oversampled),
+PLR/PSR and crest factor, per channel and for stereo, quad, 5.1 and 7.1.
+
+This build includes the compact FFmpeg decoder set (ALAC, AAC, MP3, Opus,
+Vorbis, WMA, WavPack, APE, Musepack, TAK, Dolby TrueHD/AC-3/E-AC-3, DTS and
+DTS-HD MA) alongside crete's native WAV/RF64/AIFF/FLAC/DSF/DFF/SACD ISO
+readers.
+
+%package gui
+Summary:        Graphical front-end for the crete dynamic-range meter
+Requires:       %{name} = %{version}-%{release}
+# File dialogs shell out to whichever of these is installed.
+Recommends:     (zenity or kdialog)
+
+%description gui
+Dear ImGui / SDL2 front-end for crete: the same measurement engine as the
+command-line tool, with per-channel meters, album tables and stream selection
+for multi-stream disc rips. Uses zenity or kdialog for file dialogs.
+
+%prep
+%autosetup -p1
+
+%build
+# See the header: crete's own flags only.
+unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS FFLAGS FCFLAGS
+make %{make_cc} cli-ffmpeg
+make %{make_cc} gui-ffmpeg CRETE_DATADIR=%{_datadir}/crete
+
+%install
+install -Dm755 crete-ffmpeg     %{buildroot}%{_bindir}/crete
+install -Dm755 crete-gui-ffmpeg %{buildroot}%{_bindir}/crete-gui
+install -Dm644 packaging/obs/crete-gui.desktop \
+               %{buildroot}%{_datadir}/applications/crete-gui.desktop
+# Archivo is the face the theme asks for first; the Sora fallback is never
+# reached when it is present, so it is not shipped.
+for f in fonts/Archivo/*.ttf fonts/Archivo/OFL.txt; do
+    install -Dm644 "$f" "%{buildroot}%{_datadir}/crete/$f"
+done
+mkdir -p %{buildroot}%{_docdir}/%{name}
+install -m644 README.md %{buildroot}%{_docdir}/%{name}/
+
+%check
+# Smoke test: the binary runs and reports the version it was packaged as.
+./crete-ffmpeg --version | head -1 | grep -F "crête %{version}"
+
+%files
+%license LICENSE third_party/libdsddpcm/LICENSE third_party/ffmpeg-src/COPYING.LGPLv2.1
+%{_docdir}/%{name}
+%{_bindir}/crete
+
+%files gui
+%license third_party/imgui/LICENSE.txt fonts/Archivo/OFL.txt
+%{_bindir}/crete-gui
+%{_datadir}/applications/crete-gui.desktop
+%{_datadir}/crete
+
+%changelog

@@ -16,6 +16,12 @@
 //   fonts/Archivo/Archivo-ExtraBold.ttf
 // (SIL Open Font License — https://fonts.google.com/specimen/Archivo)
 // Falls back to the bundled Sora, then the ImGui default, if absent.
+//
+// Installed builds: a distro package puts the binary in /usr/bin and the
+// fonts in /usr/share/crete/fonts, so "next to the binary" finds nothing and
+// the GUI would silently drop to ImGui's bitmap font. Build with
+// CRETE_DATADIR=/usr/share/crete (the Makefile turns that into the define of
+// the same name) and that directory is searched after the binary's own.
 // ============================================================================
 
 #include "imgui.h"
@@ -103,6 +109,14 @@ inline void load_fonts() {
     std::string base;
     if (char* b = SDL_GetBasePath()) { base = b; SDL_free(b); }
 
+    // The binary's own directory first, so a portable tree or a dev checkout
+    // always uses the fonts beside it; then the install data dir, if any.
+    std::string bases[2] = { base, "" };
+    int n_bases = 1;
+#ifdef CRETE_DATADIR
+    bases[n_bases++] = CRETE_DATADIR "/";
+#endif
+
     const char* reg[]  = { "fonts/Archivo/Archivo-Regular.ttf",
                            "fonts/Archivo/static/Archivo-Regular.ttf",
                            "fonts/Sora/static/Sora-Regular.ttf" };
@@ -111,10 +125,12 @@ inline void load_fonts() {
                            "fonts/Archivo/Archivo-Bold.ttf",
                            "fonts/Sora/static/Sora-Bold.ttf" };
 
-    g_body  = try_load(io, base, reg,  3, 16.0f, ranges);
-    g_head  = try_load(io, base, bold, 4, 18.0f, ranges);
-    g_brand = try_load(io, base, bold, 4, 26.0f, ranges);
-    g_big   = try_load(io, base, bold, 4, 42.0f, ranges);
+    for (int b = 0; b < n_bases && !g_body; ++b) {
+        g_body  = try_load(io, bases[b], reg,  3, 16.0f, ranges);
+        g_head  = try_load(io, bases[b], bold, 4, 18.0f, ranges);
+        g_brand = try_load(io, bases[b], bold, 4, 26.0f, ranges);
+        g_big   = try_load(io, bases[b], bold, 4, 42.0f, ranges);
+    }
 
     if (!g_body) { ImFontConfig cfg; cfg.SizePixels = 16.0f; g_body = io.Fonts->AddFontDefault(&cfg); }
     if (!g_head)  g_head  = g_body;

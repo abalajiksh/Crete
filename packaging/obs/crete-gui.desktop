@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=crête
+GenericName=Dynamic Range Meter
+Comment=Measure TT Dynamic Range, EBU R128 loudness and true peak
+Exec=crete-gui
+Icon=audio-x-generic
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=DR;dynamic range;loudness;R128;LUFS;true peak;meter;

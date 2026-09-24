@@ -64,7 +64,7 @@ CXXFLAGS   = -std=c++17 -Wall -Wextra -Wpedantic $(FP_DETERMINISM)
 CFLAGS     = -std=c99 -O2 -Wall -Wextra $(FP_DETERMINISM)
 LDFLAGS    =
 
-VERSION   ?= 0.19.1
+VERSION   ?= 0.19.2
 CXXFLAGS  += -DCRETE_VERSION='"$(VERSION)"'
 
 PREFIX    ?= /usr/local
@@ -206,6 +206,15 @@ GUI_CXXFLAGS = $(CXXFLAGS) \
                $(GUI_PLAT_CXXFLAGS)
 
 GUI_LDFLAGS  = $(LDFLAGS) $(GUI_PLAT_LDFLAGS)
+
+# Where an INSTALLED GUI finds its fonts (the directory holding fonts/). Empty
+# by default: a dev build or a portable tree loads fonts from beside the binary
+# and needs nothing. Distro packages set CRETE_DATADIR=/usr/share/crete, since
+# /usr/bin/fonts/ is not a place anything should live.
+CRETE_DATADIR ?=
+ifneq ($(CRETE_DATADIR),)
+    GUI_CXXFLAGS += -DCRETE_DATADIR='"$(CRETE_DATADIR)"'
+endif
 
 # ── Default target ──────────────────────────────────────────────────────────
 .DEFAULT_GOAL := cli

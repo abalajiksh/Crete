@@ -1,0 +1,32 @@
+Source: crete
+Section: sound
+Priority: optional
+Maintainer: Ashwin Balaji <s.ashwinbalaji.de@gmail.com>
+Build-Depends: debhelper-compat (= 12), g++, make, pkg-config,
+ nasm [amd64 i386], gawk, libsdl2-dev, libgl-dev
+Standards-Version: 4.6.2
+Homepage: https://codeberg.org/abksh/Crete
+Rules-Requires-Root: no
+
+Package: crete
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: dynamic-range and loudness meter (TT DR, EBU R128, true peak)
+ crete measures TT Dynamic Range (the dr.loudness-war.info PMF procedure),
+ EBU R128 integrated loudness and loudness range, true peak (4x
+ oversampled), PLR/PSR and crest factor, per channel and for stereo, quad,
+ 5.1 and 7.1.
+ .
+ This build includes the compact FFmpeg decoder set (ALAC, AAC, MP3, Opus,
+ Vorbis, WMA, WavPack, APE, Musepack, TAK, Dolby TrueHD/AC-3/E-AC-3, DTS
+ and DTS-HD MA) alongside the native WAV/RF64/AIFF/FLAC/DSF/DFF/SACD ISO
+ readers.
+
+Package: crete-gui
+Architecture: any
+Depends: crete (= ${binary:Version}), ${shlibs:Depends}, ${misc:Depends}
+Recommends: zenity | kdialog
+Description: graphical front-end for the crete dynamic-range meter
+ Dear ImGui / SDL2 front-end for crete: the same measurement engine as the
+ command-line tool, with per-channel meters, album tables and stream
+ selection for multi-stream disc rips.

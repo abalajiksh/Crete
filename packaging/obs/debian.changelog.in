@@ -1,0 +1,6 @@
+crete (@VERSION@-1) unstable; urgency=medium
+
+  * First openSUSE Build Service package: the FFmpeg CLI tier as
+    /usr/bin/crete and the FFmpeg GUI tier as /usr/bin/crete-gui.
+
+ -- Ashwin Balaji <s.ashwinbalaji.de@gmail.com>  @DEB_DATE@

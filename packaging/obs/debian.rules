@@ -1,0 +1,36 @@
+#!/usr/bin/make -f
+# Builds the FFmpeg tiers with crete's OWN flags. dpkg-buildflags are removed
+# from the environment on purpose: crete pins -ffp-contract=off so x86_64 and
+# aarch64 give bit-identical measurements, and distro CFLAGS would void that.
+# (Unset, not overridden: make re-exports environment variables to the FFmpeg
+# build script, so a value left in the environment would reach it.)
+include /usr/share/dpkg/pkg-info.mk
+
+BUILD = env -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS $(MAKE)
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+
+override_dh_auto_build:
+	$(BUILD) cli-ffmpeg
+	$(BUILD) gui-ffmpeg CRETE_DATADIR=/usr/share/crete
+
+override_dh_auto_test:
+	./crete-ffmpeg --version | head -1 | grep -F "crête $(DEB_VERSION_UPSTREAM)"
+
+override_dh_auto_install:
+	install -Dm755 crete-ffmpeg     debian/crete/usr/bin/crete
+	install -Dm755 crete-gui-ffmpeg debian/crete-gui/usr/bin/crete-gui
+	install -Dm644 packaging/obs/crete-gui.desktop \
+	    debian/crete-gui/usr/share/applications/crete-gui.desktop
+	for f in fonts/Archivo/*.ttf fonts/Archivo/OFL.txt; do \
+	    install -Dm644 "$$f" "debian/crete-gui/usr/share/crete/$$f"; \
+	done
+
+override_dh_auto_clean:
+	rm -rf build third_party/ffmpeg-compact crete-ffmpeg crete-gui-ffmpeg
+
+# No -g in crete's flags, so there is nothing for dwz to compress.
+override_dh_dwz:

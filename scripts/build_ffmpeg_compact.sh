@@ -92,7 +92,10 @@ PARSERS="aac,aac_latm,mpegaudio,flac,vorbis,opus,tak,mlp,ac3,dca"
 
 # ── Fetch ───────────────────────────────────────────────────────────────────
 mkdir -p "$ROOT/third_party"
-if [ ! -d "$SRC/.git" ]; then
+# A source tree without .git is used as-is: distro package builds (OBS, mock,
+# sbuild) run with NO network, so their source tarball ships FFmpeg unpacked
+# here. Test for configure, not .git, or those builds try to clone and fail.
+if [ ! -x "$SRC/configure" ]; then
     echo ">> cloning FFmpeg n$VERSION"
     git clone --depth 1 --branch "n$VERSION" \
         https://github.com/FFmpeg/FFmpeg.git "$SRC"
