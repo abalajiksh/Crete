@@ -24,7 +24,7 @@
 #             Makefile AT THAT REF, so package a tag for a release.
 #
 # Output (upload all of it to the OBS package):
-#   crete-<ver>.tar.gz  crete.spec  crete.changes  crete-rpmlintrc
+#   crete-<ver>.tar.gz  crete.spec  crete.changes
 #   crete.dsc  debian.control  debian.rules  debian.changelog  debian.copyright
 #   PKGBUILD
 # ============================================================================
@@ -144,7 +144,7 @@ fill crete.changes.in    crete.changes
 fill crete.dsc.in        crete.dsc
 fill debian.changelog.in debian.changelog
 fill PKGBUILD.in         PKGBUILD
-cp "$TPL/crete-rpmlintrc" "$TPL/debian.control" "$TPL/debian.rules" \
+cp "$TPL/debian.control" "$TPL/debian.rules" \
    "$TPL/debian.copyright" "$OUT/"
 
 echo ">> wrote $OUT"

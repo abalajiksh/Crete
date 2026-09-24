@@ -53,7 +53,7 @@ package_crete-gui() {
   install -Dm644 packaging/obs/crete-gui.desktop \
     "${pkgdir}/usr/share/applications/crete-gui.desktop"
   local f
-  for f in fonts/Archivo/*.ttf fonts/Archivo/OFL.txt; do
+  for f in fonts/Archivo/*.ttf; do
     install -Dm644 "$f" "${pkgdir}/usr/share/crete/$f"
   done
   install -Dm644 third_party/imgui/LICENSE.txt \

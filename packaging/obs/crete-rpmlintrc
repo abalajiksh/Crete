@@ -1,6 +1,0 @@
-# The GUI ships the Archivo faces it loads by path from /usr/share/crete;
-# splitting them into a system font package would make them visible to every
-# application, which is not what they are for.
-addFilter("font-in-non-font-package")
-# Built with crete's own flags, not %optflags -- see the spec header.
-addFilter("no-debuginfo")

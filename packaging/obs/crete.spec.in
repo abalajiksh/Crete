@@ -84,9 +84,12 @@ install -Dm644 packaging/obs/crete-gui.desktop \
                %{buildroot}%{_datadir}/applications/crete-gui.desktop
 # Archivo is the face the theme asks for first; the Sora fallback is never
 # reached when it is present, so it is not shipped.
-for f in fonts/Archivo/*.ttf fonts/Archivo/OFL.txt; do
+# (The OFL text goes in via %%license below, not here, to avoid a duplicate.)
+for f in fonts/Archivo/*.ttf; do
     install -Dm644 "$f" "%{buildroot}%{_datadir}/crete/$f"
 done
+# With debug_package off, openSUSE's brp scripts no longer strip either.
+%{__strip} %{buildroot}%{_bindir}/crete %{buildroot}%{_bindir}/crete-gui
 mkdir -p %{buildroot}%{_docdir}/%{name}
 install -m644 README.md %{buildroot}%{_docdir}/%{name}/
 
