@@ -170,16 +170,20 @@ printf '%s\\n' "$TAG" > .release/tag
                                 unstable("Windows build ${win.result} for ${env.RELEASE_TAG}: ${win.absoluteUrl}console")
                                 return
                             }
-                            echo "Windows binaries for ${env.RELEASE_TAG}: ${win.absoluteUrl}artifact/"
-                            // THIS build's files, not the job's latest: another
-                            // manual Crete-Windows run may have finished since.
-                            copyArtifacts(projectName: WINDOWS_JOB, selector: specific("${win.number}"),
-                                          filter: 'dist/*.zip, dist/*.zip.sha256',
-                                          target: '.release/windows', flatten: true,
-                                          fingerprintArtifacts: true)
-                            withCredentials([string(credentialsId: 'codeberg-release-token',
-                                                    variable: 'CODEBERG_TOKEN')]) {
-                                sh '''
+                            // A missing credential or a Codeberg error must not fail the
+                            // release either: OBS/Homebrew are unaffected, the build goes
+                            // UNSTABLE and the stage shows red.
+                            catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                                echo "Windows binaries for ${env.RELEASE_TAG}: ${win.absoluteUrl}artifact/"
+                                // THIS build's files, not the job's latest: another
+                                // manual Crete-Windows run may have finished since.
+                                copyArtifacts(projectName: WINDOWS_JOB, selector: specific("${win.number}"),
+                                              filter: 'dist/*.zip, dist/*.zip.sha256',
+                                              target: '.release/windows', flatten: true,
+                                              fingerprintArtifacts: true)
+                                withCredentials([string(credentialsId: 'codeberg-release-token',
+                                                        variable: 'CODEBERG_TOKEN')]) {
+                                    sh '''
 set -eu
 # Title = the tag annotation's subject, notes = its body.
 git tag -l --format='%(contents)' "$RELEASE_TAG" > .release/notes.txt
@@ -187,6 +191,7 @@ DRY=""; [ "$DRY_RUN" = true ] && DRY="--dry-run"
 scripts/codeberg_release.py $DRY --repo "$CODEBERG_REPO" --tag "$RELEASE_TAG" \\
     --notes-file .release/notes.txt .release/windows/*.zip .release/windows/*.zip.sha256
 '''
+                                }
                             }
                         }
                     }
