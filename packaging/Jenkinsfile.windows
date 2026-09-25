@@ -42,11 +42,14 @@ import groovy.transform.Field
 @Field def MSYS2 = 'C:\\msys64'
 
 // Run stages of scripts/build_windows_release.sh inside MSYS2 MINGW64.
+// stderr is merged into stdout INSIDE bash: if PowerShell sees a native
+// program's stderr it wraps each line as a red NativeCommandError record,
+// which reads like a failure in the log (git clone progress, gcc warnings).
 def buildStage(String stages) {
     powershell """
 \$env:MSYSTEM = 'MINGW64'
 \$env:CHERE_INVOKING = '1'
-& '${MSYS2}\\usr\\bin\\bash.exe' -l scripts/build_windows_release.sh src dist ${stages}
+& '${MSYS2}\\usr\\bin\\bash.exe' -lc 'scripts/build_windows_release.sh src dist ${stages} 2>&1'
 exit \$LASTEXITCODE
 """
 }
