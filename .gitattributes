@@ -1,2 +1,5 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Auto detect text files and perform LF normalization.
+# eol=lf: check out LF on EVERY platform. Without it Git uses core.eol, which
+# is CRLF on Windows and OVERRIDES core.autocrlf=false -- every shell script
+# then fails under MSYS2 bash with $'\r': command not found.
+* text=auto eol=lf
