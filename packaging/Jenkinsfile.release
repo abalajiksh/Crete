@@ -12,11 +12,11 @@
 //   5. only then point the Homebrew formulae at the tag and push the tap
 //
 // In parallel with 2-5, from the start: trigger the Crete-Windows job
-// (packaging/Jenkinsfile.windows) for the same tag. It only BUILDS the Windows
-// zip and archives it on that job -- nothing is published yet. A Windows
-// failure marks this release UNSTABLE and does not stop OBS/Homebrew: nothing
-// downstream consumes the Windows build yet, so it must not hold them hostage.
-// Revisit that when Windows artifacts are published.
+// (packaging/Jenkinsfile.windows) for the same tag, copy that build's zip and
+// .sha256, and attach them to the tag's Codeberg release
+// (scripts/codeberg_release.py -- creates the release from the tag annotation
+// if there is none; re-runs replace only assets whose bytes differ). A Windows
+// failure marks this release UNSTABLE and does not stop OBS/Homebrew.
 //
 // The Homebrew step waits on OBS because there is no macOS agent: the 15
 // Linux builds of the identical source are the best evidence available that
@@ -33,6 +33,10 @@
 //   codeberg-homebrew-tap  SSH username with private key -- a Codeberg DEPLOY
 //                          KEY with write access on abksh/homebrew-crete ONLY
 //                          (repo Settings > Deploy keys). Not a personal key.
+//   codeberg-release-token Secret text -- a Codeberg access token with
+//                          repository read+write scope, for creating releases
+//                          and uploading assets on abksh/Crete. Forgejo tokens
+//                          cannot be limited to one repository.
 // Job: Pipeline, "Pipeline script from SCM", Git:
 //   Repository URL      https://codeberg.org/abksh/Crete.git
 //   Refspec (Advanced)  +refs/tags/*:refs/remotes/origin/tags/*
@@ -109,6 +113,7 @@ pipeline {
         OBS_PROJECT      = 'home:abksh:crete'
         OBS_PACKAGE      = 'crete'
         TAP_REMOTE       = 'ssh://git@codeberg.org/abksh/homebrew-crete.git'
+        CODEBERG_REPO    = 'abksh/Crete'
         TAP_AUTHOR_NAME  = 'Ashwin Balaji'
         TAP_AUTHOR_EMAIL = 's.ashwinbalaji.de@gmail.com'
     }
@@ -161,10 +166,27 @@ printf '%s\\n' "$TAG" > .release/tag
                             // handled here instead of aborting the OBS branch.
                             def win = build(job: WINDOWS_JOB, wait: true, propagate: false,
                                             parameters: [string(name: 'CRETE_REF', value: env.RELEASE_TAG)])
-                            if (win.result == 'SUCCESS') {
-                                echo "Windows binaries for ${env.RELEASE_TAG}: ${win.absoluteUrl}artifact/"
-                            } else {
+                            if (win.result != 'SUCCESS') {
                                 unstable("Windows build ${win.result} for ${env.RELEASE_TAG}: ${win.absoluteUrl}console")
+                                return
+                            }
+                            echo "Windows binaries for ${env.RELEASE_TAG}: ${win.absoluteUrl}artifact/"
+                            // THIS build's files, not the job's latest: another
+                            // manual Crete-Windows run may have finished since.
+                            copyArtifacts(projectName: WINDOWS_JOB, selector: specific("${win.number}"),
+                                          filter: 'dist/*.zip, dist/*.zip.sha256',
+                                          target: '.release/windows', flatten: true,
+                                          fingerprintArtifacts: true)
+                            withCredentials([string(credentialsId: 'codeberg-release-token',
+                                                    variable: 'CODEBERG_TOKEN')]) {
+                                sh '''
+set -eu
+# Title = the tag annotation's subject, notes = its body.
+git tag -l --format='%(contents)' "$RELEASE_TAG" > .release/notes.txt
+DRY=""; [ "$DRY_RUN" = true ] && DRY="--dry-run"
+scripts/codeberg_release.py $DRY --repo "$CODEBERG_REPO" --tag "$RELEASE_TAG" \\
+    --notes-file .release/notes.txt .release/windows/*.zip .release/windows/*.zip.sha256
+'''
                             }
                         }
                     }
