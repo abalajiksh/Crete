@@ -116,9 +116,15 @@ def main():
         else:
             payload = json.dumps({"tag_name": a.tag, "name": title, "body": body,
                                   "draft": False, "prerelease": False}).encode()
-            _, raw = request("POST", f"{base}/releases", token, payload,
-                             {"Content-Type": "application/json"}, expect=(201,))
-            rel = json.loads(raw)
+            code, raw = request("POST", f"{base}/releases", token, payload,
+                                {"Content-Type": "application/json"}, expect=(201, 409))
+            if code == 409:
+                # Crete-Tag and Crete-Release both attach files to a new tag's
+                # release and can race to create it. The loser uses the winner's.
+                print(">> created concurrently by another job -- using that release")
+                _, rel = get_json(f"{base}/releases/tags/{q(a.tag, safe='')}", auth)
+            else:
+                rel = json.loads(raw)
     else:
         print(f">> release {a.tag} exists (id {rel['id']}): {rel.get('name')!r} -- title/notes left as they are")
 
