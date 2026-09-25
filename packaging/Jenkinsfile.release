@@ -11,7 +11,7 @@
 //      repository has built and published this version
 //   5. only then point the Homebrew formulae at the tag and push the tap
 //
-// In parallel with 2-5, from the start: trigger the Crete-windows job
+// In parallel with 2-5, from the start: trigger the Crete-Windows job
 // (packaging/Jenkinsfile.windows) for the same tag. It only BUILDS the Windows
 // zip and archives it on that job -- nothing is published yet. A Windows
 // failure marks this release UNSTABLE and does not stop OBS/Homebrew: nothing
@@ -57,7 +57,7 @@ def isManual() {
 // redirected. (SHA256 fingerprints: ED25519 mIlxA9k46MmM6qdJOdMnAQpzGxF4WIVVL+fj+wZbw0g,
 // RSA 6QQmYi4ppFS4/+zSZ5S4IU+4sa6rwvQ4PbhCtPEBekQ, ECDSA T9FYDEHELhVkulEKKwge5aVhVTbqCW0MIRwAfpARs/E)
 // The Windows build job, relative to this job's folder.
-@Field def WINDOWS_JOB = 'Crete-windows'
+@Field def WINDOWS_JOB = 'Crete-Windows'
 
 @Field def CODEBERG_KNOWN_HOSTS = '''\
 codeberg.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIVIC02vnjFyL+I4RHfvIGNtOgJMe769VTF1VR4EB3ZB
@@ -156,7 +156,7 @@ printf '%s\\n' "$TAG" > .release/tag
                 stage('Windows binaries') {
                     steps {
                         script {
-                            // Relative job name: Crete-windows sits in the same
+                            // Relative job name: Crete-Windows sits in the same
                             // folder as this job. propagate:false so the result is
                             // handled here instead of aborting the OBS branch.
                             def win = build(job: WINDOWS_JOB, wait: true, propagate: false,

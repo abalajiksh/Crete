@@ -27,7 +27,7 @@
 // terminating error, and gcc/make/git all write progress to stderr.
 //
 // ── ONE-TIME JENKINS SETUP (done by a human, not by this file) ──────────────
-// Job: Pipeline "Crete-windows", in the SAME folder as the release job (the
+// Job: Pipeline "Crete-Windows", in the SAME folder as the release job (the
 //   release job triggers it by that relative name). "Pipeline script from SCM",
 //   Git https://codeberg.org/abksh/Crete.git, branch */main,
 //   Script Path packaging/Jenkinsfile.windows, lightweight checkout ON.
