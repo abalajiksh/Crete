@@ -1,0 +1,119 @@
+// ============================================================================
+// Jenkinsfile.windows -- build crete's Windows x86_64 binaries
+//
+// Builds CRETE_REF (a tag, branch or commit) on the Windows agent and archives:
+//
+//   dist/crete-<ver>-windows-x86_64.zip (+ .sha256)   crete.exe + crete-gui.exe
+//                                                      + fonts\ + licenses\
+//   dist/harness/crete-json-ffmpeg.exe                 the test-harness binary
+//
+// Triggered by packaging/Jenkinsfile.release at the start of every release
+// (CRETE_REF = the tag), and by hand. It BUILDS only: nothing is published.
+// Uploading to a Codeberg release, and winget/Scoop manifests, come later.
+//
+// All build logic is in scripts/build_windows_release.sh so that CI and a
+// human at an MSYS2 prompt run the same thing. That script comes from THIS
+// job's checkout (main) and builds CRETE_REF in src\, so an older tag can be
+// built with the current script.
+//
+// Why MinGW-w64 (MSYS2) rather than MSVC: the whole build is GNU make + gcc,
+// FFmpeg's configure needs a POSIX shell even for an MSVC build, and it is the
+// same GCC as the Linux agents with the same -ffp-contract=off.
+//
+// Steps are `powershell`, not `bat`: each one only starts MSYS2's bash, and
+// PowerShell makes the exit code explicit with far less quoting trouble. Do
+// NOT set $ErrorActionPreference = 'Stop' in these steps -- under Windows
+// PowerShell 5.1 every line a native program writes to stderr then becomes a
+// terminating error, and gcc/make/git all write progress to stderr.
+//
+// ── ONE-TIME JENKINS SETUP (done by a human, not by this file) ──────────────
+// Job: Pipeline "Crete-windows", in the SAME folder as the release job (the
+//   release job triggers it by that relative name). "Pipeline script from SCM",
+//   Git https://codeberg.org/abksh/Crete.git, branch */main,
+//   Script Path packaging/Jenkinsfile.windows, lightweight checkout ON.
+//   No build triggers: it runs from the release job or by hand.
+// Agent: label 'windows' (kelsingra, also labelled 'alise'), launched over SSH
+//   as a standard user. Needs MSYS2 at C:\msys64 with setup-deps.ps1's packages
+//   plus mingw-w64-x86_64-python, Git for Windows, and core.eol=lf.
+// ============================================================================
+
+import groovy.transform.Field
+
+@Field def MSYS2 = 'C:\\msys64'
+
+// Run stages of scripts/build_windows_release.sh inside MSYS2 MINGW64.
+def buildStage(String stages) {
+    powershell """
+\$env:MSYSTEM = 'MINGW64'
+\$env:CHERE_INVOKING = '1'
+& '${MSYS2}\\usr\\bin\\bash.exe' -l scripts/build_windows_release.sh src dist ${stages}
+exit \$LASTEXITCODE
+"""
+}
+
+pipeline {
+    agent { label 'windows' }
+
+    options {
+        disableConcurrentBuilds()
+        timeout(time: 90, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '10'))
+        timestamps()
+    }
+
+    parameters {
+        string(name: 'CRETE_REF', defaultValue: 'main',
+               description: 'Tag (vX.Y.Z), branch or commit of crete to build. The release job passes its tag.')
+    }
+
+    stages {
+        stage('Checkout source') {
+            steps {
+                // Plain git rather than the GitSCM step: one code path resolves
+                // a tag, a branch or a SHA, and `git clean` below keeps the
+                // expensive caches (compact FFmpeg, ImGui, json.hpp) between
+                // builds while removing everything else.
+                powershell '''
+$url = 'https://codeberg.org/abksh/Crete.git'
+Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+if (-not (Test-Path src\\.git)) {
+    git init -q src
+    git -C src remote add origin $url
+}
+git -C src fetch -q --force --tags --prune origin '+refs/heads/*:refs/remotes/origin/*'
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
+$ref = $env:CRETE_REF
+$sha = $null
+foreach ($cand in @("refs/tags/$ref", "refs/remotes/origin/$ref", $ref)) {
+    $sha = git -C src rev-parse -q --verify "$cand^{commit}" 2>$null
+    if ($LASTEXITCODE -eq 0 -and $sha) { break }
+    $sha = $null
+}
+if (-not $sha) { Write-Host "ERROR: '$ref' is not a tag, branch or commit of $url"; exit 1 }
+git -C src checkout -q --force --detach $sha
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
+git -C src clean -q -ffdx -e /third_party/ffmpeg-compact/ -e /third_party/ffmpeg-src/ -e /third_party/imgui/ -e /third_party/nlohmann/
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
+git -C src log -1 --format='%h %s' | Out-File -Encoding ascii .crete-ref
+Write-Host "building $ref at $(Get-Content .crete-ref)"
+'''
+                script {
+                    def head = readFile('.crete-ref').trim()
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} ${params.CRETE_REF} (${head.tokenize(' ')[0]})"
+                }
+            }
+        }
+
+        stage('Preflight')      { steps { script { buildStage('preflight') } } }
+        stage('Harness binary') { steps { script { buildStage('harness') } } }
+        stage('Ship binaries')  { steps { script { buildStage('ship') } } }
+        stage('Package')        { steps { script { buildStage('package') } } }
+    }
+
+    post {
+        success {
+            archiveArtifacts artifacts: 'dist/*.zip, dist/*.sha256, dist/harness/*.exe',
+                             fingerprint: true
+        }
+    }
+}

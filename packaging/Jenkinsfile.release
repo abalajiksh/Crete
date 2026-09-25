@@ -11,6 +11,13 @@
 //      repository has built and published this version
 //   5. only then point the Homebrew formulae at the tag and push the tap
 //
+// In parallel with 2-5, from the start: trigger the Crete-windows job
+// (packaging/Jenkinsfile.windows) for the same tag. It only BUILDS the Windows
+// zip and archives it on that job -- nothing is published yet. A Windows
+// failure marks this release UNSTABLE and does not stop OBS/Homebrew: nothing
+// downstream consumes the Windows build yet, so it must not hold them hostage.
+// Revisit that when Windows artifacts are published.
+//
 // The Homebrew step waits on OBS because there is no macOS agent: the 15
 // Linux builds of the identical source are the best evidence available that
 // the tag builds at all. They do not prove the macOS build -- a failure there
@@ -49,6 +56,9 @@ def isManual() {
 // Codeberg's published SSH host keys, pinned so the tap push cannot be
 // redirected. (SHA256 fingerprints: ED25519 mIlxA9k46MmM6qdJOdMnAQpzGxF4WIVVL+fj+wZbw0g,
 // RSA 6QQmYi4ppFS4/+zSZ5S4IU+4sa6rwvQ4PbhCtPEBekQ, ECDSA T9FYDEHELhVkulEKKwge5aVhVTbqCW0MIRwAfpARs/E)
+// The Windows build job, relative to this job's folder.
+@Field def WINDOWS_JOB = 'Crete-windows'
+
 @Field def CODEBERG_KNOWN_HOSTS = '''\
 codeberg.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIVIC02vnjFyL+I4RHfvIGNtOgJMe769VTF1VR4EB3ZB
 codeberg.org ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC8hZi7K1/2E2uBX8gwPRJAHvRAob+3Sn+y2hxiEhN0buv1igjYFTgFO2qQD8vLfU/HT/P/rqvEeTvaDfY1y/vcvQ8+YuUYyTwE2UaVU5aJv89y6PEZBYycaJCPdGIfZlLMmjilh/Sk8IWSEK6dQr+g686lu5cSWrFW60ixWpHpEVB26eRWin3lKYWSQGMwwKv4LwmW3ouqqs4Z4vsqRFqXJ/eCi3yhpT+nOjljXvZKiYTpYajqUC48IHAxTWugrKe1vXWOPxVXXMQEPsaIRc2hpK+v1LmfB7GnEGvF1UAKnEZbUuiD9PBEeD5a1MZQIzcoPWCrTxipEpuXQ5Tni4mN
@@ -141,9 +151,29 @@ printf '%s\\n' "$TAG" > .release/tag
             }
         }
 
-        stage('Preflight') {
-            steps {
-                sh '''
+        stage('Build and publish') {
+            parallel {
+                stage('Windows binaries') {
+                    steps {
+                        script {
+                            // Relative job name: Crete-windows sits in the same
+                            // folder as this job. propagate:false so the result is
+                            // handled here instead of aborting the OBS branch.
+                            def win = build(job: WINDOWS_JOB, wait: true, propagate: false,
+                                            parameters: [string(name: 'CRETE_REF', value: env.RELEASE_TAG)])
+                            if (win.result == 'SUCCESS') {
+                                echo "Windows binaries for ${env.RELEASE_TAG}: ${win.absoluteUrl}artifact/"
+                            } else {
+                                unstable("Windows build ${win.result} for ${env.RELEASE_TAG}: ${win.absoluteUrl}console")
+                            }
+                        }
+                    }
+                }
+                stage('Linux and Homebrew') {
+                    stages {
+                    stage('Preflight') {
+                        steps {
+                            sh '''
 set -eu
 missing=""
 for t in git python3 osc make g++ pkg-config ssh; do
@@ -160,15 +190,15 @@ fi
 # ever talks to OBS through the --config file written per step.
 python3 -c 'import osc; print("osc", osc.__version__)' 2>/dev/null || echo "osc (version unknown)"
 '''
-            }
-        }
+                        }
+                    }
 
-        stage('Assemble OBS sources') {
-            steps {
-                withCredentials([usernamePassword(credentialsId: 'obs-abksh',
-                                                  usernameVariable: 'OBS_USER',
-                                                  passwordVariable: 'OBS_PASS')]) {
-                    sh WRITE_OSCRC + '''
+                    stage('Assemble OBS sources') {
+                        steps {
+                            withCredentials([usernamePassword(credentialsId: 'obs-abksh',
+                                                              usernameVariable: 'OBS_USER',
+                                                              passwordVariable: 'OBS_PASS')]) {
+                                sh WRITE_OSCRC + '''
 set -eu
 cd .release
 osc checkout --output-dir obs "$OBS_PROJECT" "$OBS_PACKAGE" >/dev/null
@@ -176,13 +206,13 @@ cd ..
 # PREV_DIR keeps the published changelog history under the new entry.
 PREV_DIR="$PWD/.release/obs" scripts/make_obs_source.sh .release/upload "$RELEASE_TAG"
 '''
-                }
-            }
-        }
+                            }
+                        }
+                    }
 
-        stage('Smoke build') {
-            steps {
-                sh '''
+                    stage('Smoke build') {
+                        steps {
+                            sh '''
 set -eu
 # The tarball must build by itself -- OBS will build it with no network.
 # Extracted OUTSIDE the workspace: FFmpeg's version.sh asks `git describe`,
@@ -204,15 +234,15 @@ if ldd ./crete-ffmpeg | grep -E 'libav|libsw'; then
     exit 1
 fi
 '''
-            }
-        }
+                        }
+                    }
 
-        stage('Publish to OBS') {
-            steps {
-                withCredentials([usernamePassword(credentialsId: 'obs-abksh',
-                                                  usernameVariable: 'OBS_USER',
-                                                  passwordVariable: 'OBS_PASS')]) {
-                    sh WRITE_OSCRC + '''
+                    stage('Publish to OBS') {
+                        steps {
+                            withCredentials([usernamePassword(credentialsId: 'obs-abksh',
+                                                              usernameVariable: 'OBS_USER',
+                                                              passwordVariable: 'OBS_PASS')]) {
+                                sh WRITE_OSCRC + '''
 set -eu
 PKG=.release/obs
 NEW=".release/upload/crete-$RELEASE_VERSION.tar.gz"
@@ -232,16 +262,16 @@ fi
 echo ">> waiting for every repository to build and publish $RELEASE_VERSION"
 scripts/obs_wait_release.py --osc-config "$OSCRC" "$OBS_PROJECT" "$OBS_PACKAGE" "$RELEASE_VERSION"
 '''
-                }
-            }
-        }
+                            }
+                        }
+                    }
 
-        stage('Bump Homebrew tap') {
-            steps {
-                writeFile file: '.release/known_hosts', text: CODEBERG_KNOWN_HOSTS
-                withCredentials([sshUserPrivateKey(credentialsId: 'codeberg-homebrew-tap',
-                                                   keyFileVariable: 'TAP_KEY')]) {
-                    sh '''
+                    stage('Bump Homebrew tap') {
+                        steps {
+                            writeFile file: '.release/known_hosts', text: CODEBERG_KNOWN_HOSTS
+                            withCredentials([sshUserPrivateKey(credentialsId: 'codeberg-homebrew-tap',
+                                                               keyFileVariable: 'TAP_KEY')]) {
+                                sh '''
 set -eu
 export GIT_SSH_COMMAND="ssh -i $TAP_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$PWD/.release/known_hosts"
 rm -rf .release/tap
@@ -261,6 +291,10 @@ git -c user.name="$TAP_AUTHOR_NAME" -c user.email="$TAP_AUTHOR_EMAIL" \\
     commit -qam "crete and crete-gui $RELEASE_VERSION"
 git push origin HEAD:main
 '''
+                            }
+                        }
+                    }
+                    }
                 }
             }
         }
