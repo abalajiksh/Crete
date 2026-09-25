@@ -206,6 +206,7 @@ crete --dsd-out-rate 352800 /path/to/dsd/           # 44100 (default) |88200|176
 
 crete --dr-mean arithmetic  /path/to/album/         # legacy <=0.12.1 DR averaging (A/B only)
 crete --dr-blocks legacy    /path/to/album/         # pre-0.14.0 3 s block set (A/B only)
+crete --dr-blocks foobar    /path/to/album/         # grid starting 244 ms in, as foobar2000 measures (experimental)
 
 crete-ffmpeg /path/to/album/           # cli-json-ffmpeg build: adds ALAC/MP3/AAC/Opus
 ```
@@ -251,7 +252,7 @@ and results stay in album order regardless.
 
 `--dr-mean` selects how the loudest 20 % of blocks are averaged when computing DR: `quadratic` (default, the PMF procedure) or `arithmetic` (what crête shipped up to 0.12.1). It applies to every format, not just DSD. See *TT Dynamic Range* below.
 
-`--dr-blocks` selects **which** 3 s blocks are ranked in the first place: `reference` (default since 0.14.0 — the PMF reference implementation: the trailing partial block is kept, normalised by its own length, and there is no gate) or `legacy` (what crête shipped up to 0.13.1: the trailing partial block is discarded and blocks are gated at `joint_rms > 1e-3`). This is a separate axis from `--dr-mean`. See *TT Dynamic Range* below.
+`--dr-blocks` selects **which** 3 s blocks are ranked in the first place: `reference` (default since 0.14.0 — the PMF reference implementation: the trailing partial block is kept, normalised by its own length, and there is no gate) `legacy` (what crête shipped up to 0.13.1: the trailing partial block is discarded and blocks are gated at `joint_rms > 1e-3`), or `foobar` (experimental: `reference` rules on a grid that starts 244 ms into the track, as measured on foobar2000 DR Meter). This is a separate axis from `--dr-mean`. See *TT Dynamic Range* below.
 
 In `-f json`, every result carries `"dr_rms_mean"` and `"dr_blocks"`, and DSD tracks additionally carry `"dsd_mode"`, `"dsd_filter"`, and `"dsd_out_rate"` — recording exactly how the numbers were produced. An unlabelled DSD result is not interpretable.
 
@@ -630,6 +631,8 @@ The 2nd-highest peak (rather than the highest) follows the foobar2000 DR Meter v
 > It is not a surround-only effect — the Turtles stereo album improves 0.0472 → 0.0221 against MAAT — and it accounts for what earlier analysis recorded as a *short-track effect*: `corr(1/duration, |Δ|)` falls from +0.465 to −0.044.
 >
 > **The full corpus decided it.** Two weeklies, same binary, same corpus, run back to back — #68 under `legacy`, #69 under `reference`. Weighted mean \|Δ\| over **2241 DR comparisons: 0.0392 → 0.0262 (−33 %)**, DR flags 29 → 19, integer `DR (PMF)` flags 10 → 5, and **not one DR row regressed**. The crête-vs-crête control suites (`cue`, `dsd_parity`, `dsd_roundtrip`, `ffmpeg_parity`, `format`) stayed at 0.000 and **no non-DR value moved anywhere**, which is what confirms the change is confined to the block accounting. `reference` is the default from v0.14.0; `--dr-blocks legacy` reproduces ≤ 0.13.1 bit-for-bit, for A/B work and for re-reading reference rows recorded under it.
+>
+> **`--dr-blocks foobar` (experimental, not the default).** Where a 3 s grid *starts* matters too: a single loud block that straddles a boundary can move a channel's DR by a dB or more. crête's grid starts at the first sample. foobar2000's DR Meter 1.0.8 — measured, not documented — starts its first full block **≈ 244 ms in**, the same time at every sample rate, and scores the trailing partial block by its own length. That was pinned with 43 purpose-cut clips (60 blocks plus a leftover of 0–3 s, at 48/96/192 kHz): `foobar` mode lands within foobar's 0.01 dB display step on 83 of 86 per-channel values, against 10 of 86 for `reference`. Against MAAT (406 per-channel values: 5.1, quad and DTS:X stems, a 96 kHz stereo album and a DSD64 album at 44.1 kHz) it lowers the median per-channel |Δ| from 0.017 to 0.011 dB and the worst from 1.64 to 0.87, and it explains the two MAAT rows the harness had exempted as unexplained. But MAAT does **not** use a fixed 244 ms — each track's best offset differs — and the one 44.1 kHz album measured got slightly worse. It stays opt-in until a full weekly A/B decides it, as #68/#69 decided `reference`. `reference` and `legacy` are byte-identical with or without this mode.
 
 ### EBU R128 integrated loudness
 

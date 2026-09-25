@@ -111,17 +111,41 @@ inline const char* rms_mean_name(RmsMean m) {
 // counting artefact; Reference adds a trailing block only when one exists.
 // No track in the 5.1 corpus is an exact multiple, which is why the two agree
 // to 3.9e-5 there -- expect a divergence on a track that is.
-enum class BlockSet { Legacy, Reference };
+//
+// Foobar (opt-in, added after 0.19.5): Reference's rules on a grid that starts
+//   FOOBAR_GRID_OFFSET_S (244 ms) into the track; the samples before it enter
+//   no block.  Measured, not documented anywhere: 43 purpose-cut clips (60
+//   blocks + a leftover of 0..3 s, at 48/96/192 kHz) through foobar2000 DR
+//   Meter v1.0.8 fit a first full block at 243.6-244.7 ms -- the same TIME at
+//   every rate -- with the trailing partial block scored by its own length:
+//   86 per-channel values, mean |d| 0.005, all within foobar's 0.01 display
+//   step bar the two clips whose leftover past the offset is ~6 ms.  Against
+//   MAAT (211 tracks / 406 per-channel values, 5.1 + quad + DTS:X stems,
+//   Turtles 96k, Thriller DSD64 @44.1k) it lowers the median |d| 0.0174 ->
+//   0.0112 and the max 1.64 -> 0.87, and explains the DTSX_REF_ANOMALIES rows
+//   (a lone loud block straddling a boundary) -- but it is WORSE on the one
+//   44.1 kHz album measured, and MAAT's own per-track optima disagree, so
+//   MAAT does not use a fixed 244 ms.  Hence opt-in, for a weekly A/B; see
+//   CLAUDE.md.  A track too short to hold one full block after the offset
+//   falls back to the Reference grid rather than being scored on a fragment.
+enum class BlockSet { Legacy, Reference, Foobar };
+
+inline constexpr double FOOBAR_GRID_OFFSET_S = 0.244;
 
 inline const char* block_set_name(BlockSet b) {
-    return b == BlockSet::Reference ? "reference" : "legacy";
+    switch (b) {
+        case BlockSet::Reference: return "reference";
+        case BlockSet::Foobar:    return "foobar";
+        default:                  return "legacy";
+    }
 }
 
 // Throws std::runtime_error on an unknown name (caller reports and exits).
 inline BlockSet block_set_from_string(const std::string& s) {
     if (s == "legacy"    || s == "classic") return BlockSet::Legacy;
     if (s == "reference" || s == "pmf" || s == "dr14") return BlockSet::Reference;
-    throw std::runtime_error("unknown --dr-blocks '" + s + "' (use legacy or reference)");
+    if (s == "foobar"    || s == "fb2k")               return BlockSet::Foobar;
+    throw std::runtime_error("unknown --dr-blocks '" + s + "' (use reference, legacy or foobar)");
 }
 
 // Throws std::runtime_error on an unknown name (caller reports and exits).
@@ -691,12 +715,22 @@ inline TTDRResult compute_tt_dr(
             if (!unscored(ch)) { result.worst_ch = static_cast<int>(ch); break; }
         return result;
     }
-    size_t n_blocks = n / block_size;
+    // Where the 3 s grid starts. 0 for Legacy and Reference, so every index
+    // below is the expression it always was (0 + x is exact) and both stay
+    // bit-identical; Foobar starts it FOOBAR_GRID_OFFSET_S in and the samples
+    // before that enter no block.
+    size_t grid = 0;
+    if (block_set == BlockSet::Foobar) {
+        const size_t off = static_cast<size_t>(std::lround(FOOBAR_GRID_OFFSET_S * sample_rate));
+        if (n >= off + block_size) grid = off;   // else: Reference grid
+    }
+    const bool keep_all = (block_set != BlockSet::Legacy);   // no gate, keep the tail
+    size_t n_blocks = (n - grid) / block_size;
     struct BlockData { double joint_rms; std::vector<double> ch_peaks, ch_rms; };
     std::vector<BlockData> block_data;
     block_data.reserve(n_blocks);
     for (size_t b = 0; b < n_blocks; ++b) {
-        size_t start = b * block_size;
+        size_t start = grid + b * block_size;
         BlockData bd;
         bd.ch_peaks.resize(nch, 0.0);
         bd.ch_rms.resize(nch, 0.0);
@@ -718,19 +752,19 @@ inline TTDRResult compute_tt_dr(
             bd.ch_rms[ch] = std::sqrt(2.0 * ch_sum_sq / static_cast<double>(block_size));
         }
         bd.joint_rms = std::sqrt(sum_sq / static_cast<double>(block_size));
-        // Reference keeps every block; Legacy gates on joint_rms. Under Legacy
+        // Reference/Foobar keep every block; Legacy gates on joint_rms. Under Legacy
         // the condition is exactly as it always was, so the retained set, its
         // order and n_top are bit-identical.
-        if (block_set == BlockSet::Reference || bd.joint_rms > 1e-3)
+        if (keep_all || bd.joint_rms > 1e-3)
             block_data.push_back(std::move(bd));
     }
-    // Reference only: the trailing partial block. Its RMS is normalised by its
+    // Reference/Foobar only: the trailing partial block. Its RMS is normalised by its
     // OWN length (dr14_t.meter's dr_rms over the remainder), not zero-padded to
     // a full block -- zero-padding was measured and is worse against both
     // oracles (mean |d| 0.0513 vs 0.0415 on the 5.1 corpus).
-    size_t tail_len = n - n_blocks * block_size;
-    if (block_set == BlockSet::Reference && tail_len > 0) {
-        size_t start = n_blocks * block_size;
+    size_t tail_len = n - grid - n_blocks * block_size;
+    if (keep_all && tail_len > 0) {
+        size_t start = grid + n_blocks * block_size;
         BlockData bd;
         bd.ch_peaks.resize(nch, 0.0);
         bd.ch_rms.resize(nch, 0.0);
@@ -753,7 +787,7 @@ inline TTDRResult compute_tt_dr(
     }
     if (block_data.empty()) { result.dr = 0.0; return result; }
     // Legacy keeps reporting the ungated full-block count it always reported.
-    if (block_set == BlockSet::Reference) result.blocks = block_data.size();
+    if (keep_all) result.blocks = block_data.size();
     size_t nb = block_data.size();
     size_t n_top = std::max<size_t>(1, std::min<size_t>(nb,
             static_cast<size_t>(std::floor(nb * 0.2))));
