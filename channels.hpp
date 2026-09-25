@@ -13,10 +13,14 @@
 //     4 ch  L  R  Ls  Rs                      (quad)
 //     5 ch  L  R  C   Ls   Rs                 (5.0)
 //     6 ch  L  R  C   LFE  Ls   Rs            (5.1)
-//     8 ch  L  R  C   LFE  Lss  Rss  Lrs Rrs  (7.1, sides then rears)
+//     8 ch  L  R  C   LFE  Lrs  Rrs  Lss Rss  (7.1, rears then sides)
 //
 // This is what FLAC mandates, what WAVE writes for the standard channel masks,
-// and what FFmpeg hands back for 5.1 / 5.1(side) / 7.1.  Layouts outside this
+// and what FFmpeg hands back for 5.1 / 5.1(side) / 7.1. For 7.1 that order is
+// FL FR FC LFE BL BR SL SR: the BACK pair precedes the SIDE pair, which is how
+// foobar2000 labels it too. Up to 0.19.5 crete printed the two pairs the other
+// way round (labels only -- both pairs carry the same BS.1770 weight, so no
+// measured value depended on it).  Layouts outside this
 // list are measured per channel but carry no speaker semantics: no LFE is
 // assumed and every channel is scored at unity weight.
 #pragma once
@@ -49,7 +53,7 @@ inline std::string label(unsigned nch, size_t i) {
         case 4: { static const char* k[] = {"L","R","Ls","Rs"};          return k[i]; }
         case 5: { static const char* k[] = {"L","R","C","Ls","Rs"};      return k[i]; }
         case 6: { static const char* k[] = {"L","R","C","LFE","Ls","Rs"}; return k[i]; }
-        case 8: { static const char* k[] = {"L","R","C","LFE","Lss","Rss","Lrs","Rrs"};
+        case 8: { static const char* k[] = {"L","R","C","LFE","Lrs","Rrs","Lss","Rss"};
                   return k[i]; }
         default: return "Ch" + std::to_string(i + 1);
     }
@@ -79,7 +83,7 @@ inline std::string layout_detail(unsigned nch) {
         case 4: return "QUAD · L R Ls Rs";
         case 5: return "5.0 · L R C Ls Rs";
         case 6: return "5.1 · L R C LFE Ls Rs";
-        case 8: return "7.1 · L R C LFE Lss Rss Lrs Rrs";
+        case 8: return "7.1 · L R C LFE Lrs Rrs Lss Rss";
         default: return layout_short(nch);
     }
 }

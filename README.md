@@ -653,7 +653,7 @@ describe a layout differently):
 | 2 | stereo | L R |
 | 3 / 4 / 5 | 3.0 / quad / 5.0 | L R C · L R Ls Rs · L R C Ls Rs |
 | 6 | 5.1 | L R C **LFE** Ls Rs |
-| 8 | 7.1 | L R C **LFE** Lss Rss Lrs Rrs |
+| 8 | 7.1 | L R C **LFE** Lrs Rrs Lss Rss |
 
 Layouts outside this list are measured per channel but carry no speaker semantics: no LFE
 is assumed and every channel is scored at unity weight.
@@ -694,7 +694,7 @@ separately from the layout:
 ```
 Format:              TRUEHD 24-bit / 48000 Hz
 Profile:             Dolby TrueHD + Dolby Atmos
-Layout:              7.1 · L R C LFE Lss Rss Lrs Rrs  [bed -- Atmos objects not rendered]
+Layout:              7.1 · L R C LFE Lrs Rrs Lss Rss  [bed -- Atmos objects not rendered]
 ```
 
 JSON carries `codec_profile` and a boolean `immersive_bed`. The profile comes from the

@@ -13,8 +13,8 @@
 #
 #   7.1  (8ch)  [LR]       c0,c1  ->            = L,          = R
 #               [C-LFE]    c2,c3  ->            = C,          = LFE  (col ignored)
-#               [Lss-Rss]  c4,c5  ->            = Lss,        = Rss
-#               [Lrs-Rrs]  c6,c7  ->            = Lrs,        = Rrs
+#               [Lrs-Rrs]  c4,c5  ->            = Lrs,        = Rrs  (backs)
+#               [Lss-Rss]  c6,c7  ->            = Lss,        = Rss  (sides)
 #
 #   QUAD (4ch)  [LR]       c0,c1  ->            = L,          = R
 #               [Ls-Rs]    c2,c3  ->            = Ls,         = Rs
@@ -100,8 +100,8 @@ process_album() {
                     "Ls-Rs|pan=stereo|c0=c4|c1=c5#4,5" ) ;;
         8) groups=( "LR|pan=stereo|c0=c0|c1=c1#0,1"
                     "C-LFE|pan=stereo|c0=c2|c1=c3#2,3"
-                    "Lss-Rss|pan=stereo|c0=c4|c1=c5#4,5"
-                    "Lrs-Rrs|pan=stereo|c0=c6|c1=c7#6,7" ) ;;
+                    "Lrs-Rrs|pan=stereo|c0=c4|c1=c5#4,5"
+                    "Lss-Rss|pan=stereo|c0=c6|c1=c7#6,7" ) ;;
         4) groups=( "LR|pan=stereo|c0=c0|c1=c1#0,1"
                     "Ls-Rs|pan=stereo|c0=c2|c1=c3#2,3" ) ;;
         2) groups=( "M|pan=mono|c0=c0#0" ) ;;
