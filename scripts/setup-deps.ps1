@@ -92,14 +92,17 @@ function Have([string]$cmd) { return [bool](Get-Command $cmd -ErrorAction Silent
 # Checked by path rather than by asking a package manager, because MSYS2 is
 # just as often installed by hand or carried over from another machine.
 function Find-Msys2 {
-    $candidates = @(
+    # @(...) around the WHOLE pipeline: a pipeline yielding one item unrolls to
+    # a bare string, and indexing a string gives a CHARACTER -- 'C:\msys64'[0]
+    # is 'C', which is exactly what the first real run reported.
+    $candidates = @(@(
         $env:MSYS2_ROOT,
         'C:\msys64',
         'C:\tools\msys64',
         (Join-Path $env:LOCALAPPDATA 'msys64'),
         (Join-Path ${env:ProgramFiles} 'msys64')
-    ) | Where-Object { $_ -and (Test-Path (Join-Path $_ 'usr\bin\pacman.exe')) }
-    if ($candidates) { return $candidates[0] }
+    ) | Where-Object { $_ -and (Test-Path (Join-Path $_ 'usr\bin\pacman.exe')) })
+    if ($candidates.Count) { return $candidates[0] }
     return $null
 }
 
@@ -107,21 +110,30 @@ $Msys2 = Find-Msys2
 
 # Run a command inside the MSYS2 MinGW64 login shell. -lc so the profile sets
 # up PATH; MSYSTEM=MINGW64 so /mingw64 is the active prefix.
+# Two Windows PowerShell 5.1 traps, both handled here:
+#  - bash's stdout must go to the HOST, not the pipeline. Left in the pipeline
+#    it becomes part of the function's return value, so `$rc = Invoke-Msys`
+#    got every pacman line plus the exit code, and `$rc -ne 0` was always true.
+#  - With $ErrorActionPreference = 'Stop', redirecting a native command's
+#    stderr turns every stderr line into a TERMINATING NativeCommandError.
+#    Scoped to 'Continue' here so a warning on stderr cannot abort the script.
 function Invoke-Msys([string]$cmdline, [switch]$Quiet) {
     if (-not $Msys2) { throw "MSYS2 not found" }
+    $ErrorActionPreference = 'Continue'
     $bash = Join-Path $Msys2 'usr\bin\bash.exe'
     $env:MSYSTEM = 'MINGW64'
     $env:CHERE_INVOKING = '1'
     if ($Quiet) {
-        & $bash -lc $cmdline 2>$null
+        & $bash -lc $cmdline 2>$null | Out-Null
     } else {
-        & $bash -lc $cmdline
+        & $bash -lc $cmdline | Out-Host
     }
     return $LASTEXITCODE
 }
 
 function Msys-Query([string]$cmdline) {
     if (-not $Msys2) { return $null }
+    $ErrorActionPreference = 'Continue'   # see Invoke-Msys
     $bash = Join-Path $Msys2 'usr\bin\bash.exe'
     $env:MSYSTEM = 'MINGW64'
     $out = & $bash -lc $cmdline 2>$null
@@ -261,7 +273,7 @@ if ($Check) { Say ""; Say "-Check given; nothing installed."; if ($need.Count) {
 if ($need.Count -gt 0) {
     $pkgs = @()
     foreach ($t in $need) { $pkgs += Pkgs-For $t }
-    $pkgs = $pkgs | Select-Object -Unique
+    $pkgs = @($pkgs | Select-Object -Unique)   # @(): one package must stay a list
 
     if ($pkgs.Count -eq 0) {
         Say ""
