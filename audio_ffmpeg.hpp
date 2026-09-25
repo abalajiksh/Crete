@@ -38,7 +38,9 @@ extern "C" {
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <new>
 #include <stdexcept>
+#include <system_error>
 #include <string>
 #include <vector>
 
@@ -233,6 +235,39 @@ inline std::unique_ptr<ConcatIO> open_parts(AVFormatContext** fmt,
     return cio;
 }
 
+// ── Is a container's declared duration believable? ─────────────────────────
+//
+// fmt->duration is an ESTIMATE, and on MPEG-PS it can be wrong by hours. A
+// DVD-Audio title set read as one stream (dvd.hpp) whose timestamps wrap at
+// 2^33 mid-set is declared 95 268 s long for 12 MB of MLP -- and trusting that
+// reserved ~40 GB per channel, which Linux refuses outright (std::bad_alloc,
+// Weekly #92) while macOS only maps it lazily, so it passed on the dev Mac.
+//
+// The test is what the bytes could possibly hold. 0.01 coded bits per sample
+// per channel sits 10x below pure digital silence in FLAC (~0.018: a constant
+// subframe per 4096-sample block) and orders of magnitude below any real
+// codec; the wrapped title set above is 0.0018. total_bytes counts every
+// stream in the container, so this can only err toward TRUSTING a duration --
+// never toward rejecting a real one.
+inline constexpr double MIN_CODED_BITS_PER_SAMPLE = 0.01;
+
+inline uint64_t total_bytes(const std::vector<std::string>& parts) {
+    uint64_t n = 0;
+    std::error_code ec;
+    for (const auto& p : parts) {
+        const auto s = std::filesystem::file_size(p, ec);
+        if (!ec) n += s;
+    }
+    return n;
+}
+
+inline bool duration_is_plausible(double secs, uint64_t bytes, int nch, int rate) {
+    if (!(secs > 0)) return false;
+    if (bytes == 0 || nch <= 0 || rate <= 0) return true;   // nothing to test against
+    return double(bytes) * 8.0 / (secs * double(rate) * double(nch))
+           >= MIN_CODED_BITS_PER_SAMPLE;
+}
+
 // ── Enumerate a container's audio streams, without decoding one ────────────
 //
 // A music Blu-ray rip routinely carries several mixes of the same album and
@@ -268,10 +303,12 @@ inline std::vector<StreamInfo> probe_streams(const std::vector<std::string>& par
 
     // Which index FFmpeg would pick unaided -- the picker marks it so "auto"
     // is not a mystery. Ranks by bitrate and channel count, which need NOT
-    // agree with the container's default disposition: on a 6-audio-stream
-    // DSOTM remux it returns the 13.8 Mbps LPCM track, not the default-flagged
-    // TrueHD.
+    // agree with the container's default disposition, and whose answer moves
+    // with the probe: on the 6-audio-stream DSOTM remux it returned the
+    // 13.8 Mbps LPCM track at FFmpeg's default 5 MB probe, and returns the
+    // TrueHD track at the raised probe used here (GUI, 2026-09-25).
     int best = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+    const uint64_t bytes = total_bytes(parts);
 
     for (unsigned i = 0; i < fmt->nb_streams; ++i) {
         AVCodecParameters* par = fmt->streams[i]->codecpar;
@@ -300,6 +337,11 @@ inline std::vector<StreamInfo> probe_streams(const std::vector<std::string>& par
         } else if (fmt->duration > 0) {
             si.duration_secs = double(fmt->duration) / AV_TIME_BASE;
         }
+        // An implausible duration is reported as unknown (0), so the memory
+        // planner falls back to its size-based model instead of warning that
+        // a 12 MB title set needs 341 GB.
+        if (!duration_is_plausible(si.duration_secs, bytes, si.channels, si.sample_rate))
+            si.duration_secs = 0.0;
         out.push_back(std::move(si));
     }
     return out;
@@ -339,8 +381,8 @@ inline AudioData decode_with_ffmpeg(const std::vector<std::string>& parts,
     // LPCM 5.1, DTS-HD MA 5.1, TrueHD 7.1, an AC-3 core, stereo variants --
     // and they are NOT the same measurement. av_find_best_stream() ranks by
     // bitrate and channel count, which need not agree with the container's
-    // default disposition: on a 6-audio-stream DSOTM remux it returns the
-    // 13.8 Mbps LPCM track, not the default-flagged TrueHD. That choice is
+    // default disposition, and its answer on the 6-audio-stream DSOTM remux
+    // changed (LPCM -> TrueHD) when the probe was raised. That choice is
     // defensible but it must not be invisible, so the count and the chosen
     // index are recorded on AudioData and --stream overrides them.
     int n_audio = 0;
@@ -482,13 +524,21 @@ inline AudioData decode_with_ffmpeg(const std::vector<std::string>& parts,
     // a vector that already has room, so nothing measured moves.
     //
     // A short or absent duration is harmless -- insert() still grows -- so
-    // this is a hint, never a bound.
-    if (fmt->duration > 0 && in_rate > 0) {
-        const double secs = double(fmt->duration) / AV_TIME_BASE;
-        const double frames = secs * double(in_rate);
+    // this is a hint, never a bound. An implausible one (a wrapped MPEG-PS
+    // timestamp; see duration_is_plausible) is skipped, and a refused
+    // allocation drops the hint rather than the decode: a reserve that fails
+    // must never be the reason a file cannot be measured.
+    const double declared = fmt->duration > 0 ? double(fmt->duration) / AV_TIME_BASE : 0.0;
+    if (in_rate > 0 &&
+        duration_is_plausible(declared, total_bytes(parts), int(nch), in_rate)) {
+        const double frames = declared * double(in_rate);
         if (frames > 0 && frames < 4e10) {
-            for (auto& ch : ad.channels)
-                ch.reserve(static_cast<size_t>(frames) + 4096);
+            try {
+                for (auto& ch : ad.channels)
+                    ch.reserve(static_cast<size_t>(frames) + 4096);
+            } catch (const std::bad_alloc&) {
+                for (auto& ch : ad.channels) std::vector<double>().swap(ch);
+            }
         }
     }
 
