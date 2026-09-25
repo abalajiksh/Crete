@@ -179,6 +179,13 @@ inline std::vector<Group> collect(const std::string& path,
                 g.audio_path = path;
                 g.is_sacd    = true;
                 groups.push_back(std::move(g));
+            } else if (const std::string kind = dvd::image_kind(path); !kind.empty()) {
+                const char* dir = kind == "DVD-Audio" ? "AUDIO_TS" : "VIDEO_TS";
+                warnings.push_back("Warning: " + fs::path(path).filename().string()
+                                   + " is a " + kind + " disc image. crete reads DVD title "
+                                   "sets from the disc's folders, not from an image: mount it "
+                                   "(open it in Finder, or `mount -o loop` on Linux) "
+                                   "and measure its " + dir + " folder.");
             } else {
                 warnings.push_back("Warning: " + fs::path(path).filename().string()
                                    + " is not an SACD image (no SACDMTOC at LSN 510)");

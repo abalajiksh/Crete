@@ -33,12 +33,16 @@
 //      README; crete measures the first group and says so.
 //
 // This header is filenames only: no I/O beyond a directory listing, no FFmpeg,
-// so it builds in the zero-dependency tier and is testable on its own.
+// so it builds in the zero-dependency tier and is testable on its own. The one
+// exception is image_kind() at the end, which reads a disc image's ISO 9660
+// root directory so an .iso of a DVD is named as one, not "not an SACD".
 
 #pragma once
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
+#include <fstream>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -125,6 +129,59 @@ inline std::string display_name(const std::string& path) {
     std::string key; int part;
     if (parse_fragment(fs::path(path).filename().string(), key, part)) return key;
     return fs::path(path).stem().string();
+}
+
+// What kind of DVD a disc image holds, from its ISO 9660 root directory:
+// "DVD-Audio" (an AUDIO_TS directory with content), "DVD-Video" (VIDEO_TS),
+// or "" when it is not an ISO 9660 image or holds neither. The DVD spec
+// requires the UDF/ISO 9660 bridge, so the ISO 9660 view is always there.
+//
+// Only identifies -- crete does not read title sets out of an image. It is
+// here so the refusal can say what the image IS and what to do instead.
+inline std::string image_kind(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return "";
+    auto le32 = [](const unsigned char* p) {
+        return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24;
+    };
+    unsigned char pvd[2048];
+    f.seekg(16 * 2048);
+    if (!f.read(reinterpret_cast<char*>(pvd), sizeof pvd)) return "";
+    if (pvd[0] != 1 || std::string(reinterpret_cast<char*>(pvd + 1), 5) != "CD001") return "";
+
+    struct Entry { std::string name; uint32_t lba, size; bool dir; };
+    auto list = [&](uint32_t lba, uint32_t size) {
+        std::vector<Entry> out;
+        size = std::min<uint32_t>(size, 64 * 2048);
+        std::vector<unsigned char> d(size);
+        f.clear();
+        f.seekg(std::streamoff(lba) * 2048);
+        if (size == 0 || !f.read(reinterpret_cast<char*>(d.data()), size)) return out;
+        for (size_t i = 0; i < d.size();) {
+            const unsigned len = d[i];
+            if (len == 0) { i = (i / 2048 + 1) * 2048; continue; }   // pad to sector end
+            if (i + 33 > d.size() || i + len > d.size()) break;
+            const unsigned nlen = d[i + 32];
+            if (i + 33 + nlen > d.size()) break;
+            out.push_back({upper(std::string(reinterpret_cast<char*>(&d[i + 33]), nlen)),
+                           le32(&d[i + 2]), le32(&d[i + 10]), (d[i + 25] & 0x02) != 0});
+            i += len;
+        }
+        return out;
+    };
+
+    bool audio = false, video = false;
+    for (const auto& e : list(le32(pvd + 156 + 2), le32(pvd + 156 + 10))) {
+        if (!e.dir) continue;
+        if (e.name == "VIDEO_TS") video = true;
+        // A DVD-Video disc usually carries an EMPTY AUDIO_TS: only one that
+        // holds an audio object (ATS_xx_n.AOB) makes the disc DVD-Audio.
+        if (e.name == "AUDIO_TS")
+            for (const auto& a : list(e.lba, e.size))
+                if (!a.dir && a.name.rfind("ATS_", 0) == 0
+                           && a.name.find(".AOB") != std::string::npos) audio = true;
+    }
+    return audio ? "DVD-Audio" : video ? "DVD-Video" : "";
 }
 
 }  // namespace dvd
