@@ -928,9 +928,14 @@ static void detail_panel(AppState& app) {
     ImVec4 acc = theme::P().accent;
     theme::Kicker("SELECTED TRACK", &acc);
     ImGui::PushFont(theme::g_head); ImGui::TextWrapped("%s", name.c_str()); ImGui::PopFont();
-    ImGui::TextDisabled("%02d · %s · %s %u-bit / %u Hz · %s",
+    // Wrapped, not TextDisabled: this panel is a narrow column and TextDisabled
+    // never wraps, so a long line ran off the edge (the Atmos caption below
+    // did exactly that on a 7.1 TrueHD rip).
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("%02d · %s · %s %u-bit / %u Hz · %s",
         app.selected_track+1, chan::layout_short(t.channels).c_str(), t.codec.c_str(),
         t.bit_depth, t.sample_rate, format_duration(t.duration_secs).c_str());
+    ImGui::PopStyleColor();
 
     // Profile, where the stream declares one. For an immersive carrier this is
     // the only thing on screen saying the numbers describe the channel BED:
@@ -938,14 +943,18 @@ static void detail_panel(AppState& app) {
     // metadata, so the layout above is real but incomplete without this line.
     if (!t.codec_profile.empty()) {
         const std::string q = audio::layout_qualifier(t.codec_profile);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         if (q.empty()) {
-            ImGui::TextDisabled("%s", t.codec_profile.c_str());
+            ImGui::TextWrapped("%s", t.codec_profile.c_str());
         } else {
+            ImGui::PopStyleColor();
             theme::Tag(t.codec_profile.c_str(), theme::P().accentSoft,
                        theme::P().accent);
-            ImGui::TextDisabled("Measured as the %s bed — %s.",
-                                chan::layout_short(t.channels).c_str(), q.c_str());
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("Measured as the %s bed — %s.",
+                               chan::layout_short(t.channels).c_str(), q.c_str());
         }
+        ImGui::PopStyleColor();
     }
 
     // MQA warning — a listener measuring DR is entitled to know the source is
