@@ -207,6 +207,7 @@ crete --dsd-out-rate 352800 /path/to/dsd/           # 44100 (default) |88200|176
 crete --dr-mean arithmetic  /path/to/album/         # legacy <=0.12.1 DR averaging (A/B only)
 crete --dr-blocks legacy    /path/to/album/         # pre-0.14.0 3 s block set (A/B only)
 crete --dr-blocks foobar    /path/to/album/         # grid starting 244 ms in, as foobar2000 measures (experimental)
+crete --dr-short include    /path/to/album/         # score tracks under 10 s as <=0.19.5 did (A/B only)
 
 crete-ffmpeg /path/to/album/           # cli-json-ffmpeg build: adds ALAC/MP3/AAC/Opus
 ```
@@ -253,6 +254,8 @@ and results stay in album order regardless.
 `--dr-mean` selects how the loudest 20 % of blocks are averaged when computing DR: `quadratic` (default, the PMF procedure) or `arithmetic` (what crête shipped up to 0.12.1). It applies to every format, not just DSD. See *TT Dynamic Range* below.
 
 `--dr-blocks` selects **which** 3 s blocks are ranked in the first place: `reference` (default since 0.14.0 — the PMF reference implementation: the trailing partial block is kept, normalised by its own length, and there is no gate) `legacy` (what crête shipped up to 0.13.1: the trailing partial block is discarded and blocks are gated at `joint_rms > 1e-3`), or `foobar` (experimental: `reference` rules on a grid that starts 244 ms into the track, as measured on foobar2000 DR Meter). This is a separate axis from `--dr-mean`. See *TT Dynamic Range* below.
+
+`--dr-short` decides what happens to a track **under 10 seconds**: `exclude` (default) gives it no DR — `DR--` in the text formats, `null` in JSON (`dr_defined: false`) — and leaves it out of the album DR, which is what MAAT DROffline does; `include` scores it as crête did up to 0.19.5. Every other measurement on such a track (peaks, loudness, RMS, PLR, LRA) is reported either way. See *TT Dynamic Range* below.
 
 In `-f json`, every result carries `"dr_rms_mean"` and `"dr_blocks"`, and DSD tracks additionally carry `"dsd_mode"`, `"dsd_filter"`, and `"dsd_out_rate"` — recording exactly how the numbers were produced. An unlabelled DSD result is not interpretable.
 
@@ -633,6 +636,12 @@ The 2nd-highest peak (rather than the highest) follows the foobar2000 DR Meter v
 > **The full corpus decided it.** Two weeklies, same binary, same corpus, run back to back — #68 under `legacy`, #69 under `reference`. Weighted mean \|Δ\| over **2241 DR comparisons: 0.0392 → 0.0262 (−33 %)**, DR flags 29 → 19, integer `DR (PMF)` flags 10 → 5, and **not one DR row regressed**. The crête-vs-crête control suites (`cue`, `dsd_parity`, `dsd_roundtrip`, `ffmpeg_parity`, `format`) stayed at 0.000 and **no non-DR value moved anywhere**, which is what confirms the change is confined to the block accounting. `reference` is the default from v0.14.0; `--dr-blocks legacy` reproduces ≤ 0.13.1 bit-for-bit, for A/B work and for re-reading reference rows recorded under it.
 >
 > **`--dr-blocks foobar` (experimental, not the default).** Where a 3 s grid *starts* matters too: a single loud block that straddles a boundary can move a channel's DR by a dB or more. crête's grid starts at the first sample. foobar2000's DR Meter 1.0.8 — measured, not documented — starts its first full block **≈ 244 ms in**, the same time at every sample rate, and scores the trailing partial block by its own length. That was pinned with 43 purpose-cut clips (60 blocks plus a leftover of 0–3 s, at 48/96/192 kHz): `foobar` mode lands within foobar's 0.01 dB display step on 83 of 86 per-channel values, against 10 of 86 for `reference`. Against MAAT (406 per-channel values: 5.1, quad and DTS:X stems, a 96 kHz stereo album and a DSD64 album at 44.1 kHz) it lowers the median per-channel |Δ| from 0.017 to 0.011 dB and the worst from 1.64 to 0.87, and it explains the two MAAT rows the harness had exempted as unexplained. But MAAT does **not** use a fixed 244 ms — each track's best offset differs — and the one 44.1 kHz album measured got slightly worse. It stays opt-in until a full weekly A/B decides it, as #68/#69 decided `reference`. `reference` and `legacy` are byte-identical with or without this mode.
+
+> **Tracks under 10 seconds have no DR (after 0.19.5).** The PMF procedure needs several 3 s blocks: a 2nd-highest block peak and a loudest-20 % set. A clip a few seconds long has one or two blocks, and the number crête used to print for it was not a dynamic range — under 3 s it was the peak-to-RMS crest factor, and at two blocks the "2nd-highest peak" could be a silent tail at the −120 dB floor. *Kill Bill Vol. 1* ends with three sound-effect clips; crête gave "Flip Sting" a DR of **−100.47**, and averaging the three in took the album from DR10 to **DR4** — unnoticed from at least 0.17.0 until the weekly started printing every album mismatch.
+>
+> The limit is MAAT DROffline's own, and it was measured rather than guessed: 28 synthetic tracks from 3 to 45 s. MAAT refused exactly the five under 10 s ("Length is less than 10 seconds") and measured a file of exactly 10.000 s. On all 23 it accepted, crête already agreed within ±0.03 dB, so the cutoff is the whole of the difference. crête now prints `DR--` for such a track, writes `null` in JSON and leaves it out of the album mean, so an album with trailing clips gets the DR of its music: on *Kill Bill* the 19 tracks MAAT measures average 9.82 in crête, DR10, which is MAAT's figure.
+>
+> Every track of 10 s or longer is unchanged — byte-identical JSON on 55 real tracks across stereo, 5.1, quad 192 kHz and Blu-ray carriers. `scripts/check_short_tracks.sh` gates the rule with a synthetic album (a 4 s clip ending in silence, a 9.99 s and an exactly-10 s track): the album must get the same DR with and without its too-short clips. `--dr-short include` reproduces ≤ 0.19.5.
 
 ### EBU R128 integrated loudness
 

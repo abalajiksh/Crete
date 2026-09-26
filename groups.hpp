@@ -76,6 +76,7 @@ struct Options {
     dr::RmsMean    rms_mean = dr::RmsMean::Quadratic;
     dr::LfeScoring lfe      = dr::LfeScoring::Exclude;
     dr::BlockSet   blocks   = dr::BlockSet::Reference;
+    dr::ShortTracks short_tracks = dr::ShortTracks::Exclude;   // < 10 s: no DR
     int            stream   = -1;   // container audio-stream index, -1 = auto
 };
 
@@ -359,7 +360,7 @@ inline GroupResult analyse(const Group& g, const Options& opt,
                 auto ad = audio::decode_sacd_track(img, area, t, opt.dsd);
                 out.tracks.push_back(dr::analyze_track(
                     ad.channels, ad.sample_rate, ad.bit_depth,
-                    ad.codec, tname, opt.rms_mean, opt.lfe, opt.blocks));
+                    ad.codec, tname, opt.rms_mean, opt.lfe, opt.blocks, opt.short_tracks));
                 out.tracks.back().mqa = mqa::analyze_pcm(
                     ad.channels, ad.sample_rate, ad.bit_depth);
             }
@@ -403,7 +404,7 @@ inline GroupResult analyse(const Group& g, const Options& opt,
             if (progress) progress(basename);
             out.tracks.push_back(dr::analyze_track(
                 ad.channels, ad.sample_rate, ad.bit_depth,
-                ad.codec, basename, opt.rms_mean, opt.lfe, opt.blocks));
+                ad.codec, basename, opt.rms_mean, opt.lfe, opt.blocks, opt.short_tracks));
             out.tracks.back().mqa                = minfo;
             out.tracks.back().stream_index       = ad.stream_index;
             out.tracks.back().audio_stream_count = ad.audio_stream_count;
@@ -457,7 +458,7 @@ inline GroupResult analyse(const Group& g, const Options& opt,
 
                 out.tracks.push_back(dr::analyze_track(
                     slice, ad.sample_rate, ad.bit_depth,
-                    ad.codec, track_name, opt.rms_mean, opt.lfe, opt.blocks));
+                    ad.codec, track_name, opt.rms_mean, opt.lfe, opt.blocks, opt.short_tracks));
                 out.tracks.back().mqa                = minfo;
                 out.tracks.back().stream_index       = ad.stream_index;
                 out.tracks.back().audio_stream_count = ad.audio_stream_count;

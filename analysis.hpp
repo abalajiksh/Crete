@@ -7,7 +7,9 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -189,9 +191,48 @@ inline LfeScoring lfe_scoring_from_string(const std::string& s) {
                              "' (expected exclude|include)");
 }
 
+// ── Tracks too short for TT DR ─────────────────────────────────────────────
+// Below MIN_DR_SECONDS the DR is UNDEFINED: not reported, and left out of the
+// album average. Every other measurement on the track is still made.
+//
+// Why 10 s, and why this is a measured rule rather than a chosen one: MAAT
+// DROffline refuses such tracks outright -- "Length is less than 10 seconds"
+// -- and omits them from its Folder Log. Pinned 2026-09-26 with 28 synthetic
+// tracks of 3..45 s: MAAT rejected exactly the five under 10 s and accepted
+// t010s (441000 samples at 44.1 kHz, exactly 10.000 s). On all 23 it accepted,
+// crete already agreed within +/-0.03 dB -- including the dips at 16-17 s,
+// where a short trailing block reaches the top-20% set in both -- so the
+// cutoff is the whole of the difference.
+//
+// It mattered: Kill Bill Vol. 1 ends with three sound-effect clips. crete gave
+// "Flip Sting" a raw DR of -100.47 (two blocks, the 2nd-highest peak a silent
+// tail at the -120 dB floor) and "Sword Swings" -7.63, and averaging them in
+// dragged the album from MAAT's DR10 to DR4 -- since at least 0.17.0.
+// Under 3 s there is no block at all and the old fallback reported peak minus
+// RMS, a crest factor wearing a DR label.
+//
+// Include reproduces <= 0.19.5 exactly (--dr-short include): every value as it
+// was computed, every track in the album mean.
+static constexpr double MIN_DR_SECONDS = 10.0;
+
+enum class ShortTracks { Exclude, Include };
+
+inline const char* short_tracks_name(ShortTracks s) {
+    return s == ShortTracks::Include ? "include" : "exclude";
+}
+
+// Throws std::runtime_error on an unknown name (caller reports and exits).
+inline ShortTracks short_tracks_from_string(const std::string& s) {
+    if (s == "exclude" || s == "maat")   return ShortTracks::Exclude;
+    if (s == "include" || s == "legacy") return ShortTracks::Include;
+    throw std::runtime_error("unknown --dr-short '" + s +
+                             "' (expected exclude|include)");
+}
+
 // ── Verdict classification ─────────────────────────────────────────────────
 enum class Verdict {
     Exceptional, Excellent, Normal, Compressed, Brickwalled,
+    Undefined,   // DR not defined: the track is under MIN_DR_SECONDS
 };
 
 inline const char* verdict_string(Verdict v) {
@@ -201,11 +242,13 @@ inline const char* verdict_string(Verdict v) {
         case Verdict::Normal:      return "Normal (DR 8-13)";
         case Verdict::Compressed:  return "Compressed (DR 5-7)";
         case Verdict::Brickwalled: return "Brickwalled (DR < 5)";
+        case Verdict::Undefined:   return "No DR (track under 10 s)";
     }
     return "Unknown";
 }
 
 inline Verdict classify_dr(double dr) {
+    if (std::isnan(dr)) return Verdict::Undefined;
     if (dr > 20.0) return Verdict::Exceptional;
     if (dr >= 14.0) return Verdict::Excellent;
     if (dr >= 8.0) return Verdict::Normal;
@@ -245,6 +288,10 @@ struct TrackResult {
     std::string codec_profile;
     double      duration_secs  = 0.0;
 
+    // False when the track is shorter than MIN_DR_SECONDS (and --dr-short is
+    // exclude): every DR field below is then NaN (dr_score 0), and the track
+    // is left out of album_dr. Formatters print "--" / JSON null for it.
+    bool        dr_defined     = true;
     int         dr_score       = 0;
     double      dr_score_raw   = 0.0;
     std::vector<double> dr_per_channel;
@@ -904,7 +951,8 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
                                   const std::string& codec, const std::string& filename,
                                   RmsMean rms_mean = RmsMean::Quadratic,
                                   LfeScoring lfe = LfeScoring::Exclude,
-                                  BlockSet block_set = BlockSet::Reference) {
+                                  BlockSet block_set = BlockSet::Reference,
+                                  ShortTracks short_tracks = ShortTracks::Exclude) {
     TrackResult r;
     r.filename     = filename;
     r.sample_rate  = sample_rate;
@@ -1007,20 +1055,60 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     r.crest_factor_db = sum_crest / static_cast<double>(nch);
     r.lra_lu = compute_lra(st_powers);
     r.psr_db = compute_min_psr(channels, st_powers, short_term_window, short_term_hop);
+    // Too short for TT DR (see MIN_DR_SECONDS). Done LAST, after every other
+    // measurement, so nothing else on the track can depend on it. NaN rather
+    // than 0: a formatter that forgot to check dr_defined prints "nan", not a
+    // plausible DR0.
+    if (short_tracks == ShortTracks::Exclude &&
+        static_cast<double>(n) < MIN_DR_SECONDS * sr) {
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        r.dr_defined    = false;
+        r.dr_score      = 0;
+        r.dr_score_raw  = nan;
+        r.dr_front_raw  = nan;
+        r.worst_channel = -1;
+        for (auto& d : r.dr_per_channel) d = nan;
+        for (auto& cm : r.ch_metrics) { cm.dr_raw = nan; cm.dr_score = 0; }
+    }
     r.verdict = classify_dr(r.dr_score_raw);
     return r;
 }
 
-inline int album_dr(const std::vector<TrackResult>& tracks) {
-    if (tracks.empty()) return 0;
+// Mean of the raw DR of the tracks that HAVE one, rounded once. nullopt when
+// none does (an album made only of sub-10 s clips has no DR, not DR0).
+inline std::optional<int> album_dr(const std::vector<TrackResult>& tracks) {
     // FIX 12 (v0.11.3): average the RAW per-track DR and round ONCE.  This was
     // round(mean(round(dr))) -- double rounding, which desynchronised the album
     // score from MAAT even when every individual track's integer DR matched:
     // Weekly #53 had GramParsons_MQA16 at 10 v 9 (0/9 track mismatches) and
     // BoneyM_Venus_DSD128@352800 at 14 v 13 (0/10 track mismatches).
     double sum = 0.0;
-    for (const auto& t : tracks) sum += t.dr_score_raw;
-    return static_cast<int>(std::round(sum / tracks.size()));
+    size_t n = 0;
+    for (const auto& t : tracks) {
+        if (!t.dr_defined) continue;   // under MIN_DR_SECONDS: MAAT omits it too
+        sum += t.dr_score_raw;
+        ++n;
+    }
+    if (n == 0) return std::nullopt;
+    return static_cast<int>(std::round(sum / static_cast<double>(n)));
+}
+
+// A track's DR as text: "DR12", or "DR--" for a track under MIN_DR_SECONDS.
+// One definition for the CLI and the GUI, so the two cannot word it apart.
+inline std::string track_dr_text(const TrackResult& t) {
+    return t.dr_defined ? "DR" + std::to_string(t.dr_score) : std::string("DR--");
+}
+
+// The album verdict, Undefined when no track has a DR.
+inline Verdict album_verdict(const std::vector<TrackResult>& tracks) {
+    auto a = album_dr(tracks);
+    return a ? classify_dr(static_cast<double>(*a)) : Verdict::Undefined;
+}
+
+// "DR12", or "DR--" when the album has no track long enough for a DR.
+inline std::string album_dr_text(const std::vector<TrackResult>& tracks) {
+    auto a = album_dr(tracks);
+    return a ? "DR" + std::to_string(*a) : std::string("DR--");
 }
 
 } // namespace dr

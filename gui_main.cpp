@@ -320,13 +320,13 @@ static std::string generate_log(const std::vector<dr::TrackResult>& tracks,
             std::string peak;
             if (t.is_clipping) peak = "over      ";
             else { std::snprintf(line,sizeof(line),"%.2f dB  ",t.peak_dbfs); peak=line; }
-            std::snprintf(line,sizeof(line),"DR%-3d      %-10s %.2f dB   %s\n",
-                          t.dr_score,peak.c_str(),t.rms_dbfs,t.filename.c_str());
+            std::snprintf(line,sizeof(line),"%-5s      %-10s %.2f dB   %s\n",
+                          dr::track_dr_text(t).c_str(),peak.c_str(),t.rms_dbfs,t.filename.c_str());
             out += line;
         }
         out += sep+"\n\n";
         std::snprintf(line,sizeof(line)," Number of Files: %zu\n",tracks.size()); out += line;
-        std::snprintf(line,sizeof(line)," Official DR Value: DR%d\n",dr::album_dr(tracks)); out += line;
+        std::snprintf(line,sizeof(line)," Official DR Value: %s\n",dr::album_dr_text(tracks).c_str()); out += line;
         out += "\n"+sep2+"\n";
     } else if (format_idx == 1) {
         std::string sep(80,'-'), sep2(80,'=');
@@ -338,13 +338,13 @@ static std::string generate_log(const std::vector<dr::TrackResult>& tracks,
         for (const auto& t : tracks) {
             auto name=t.filename; auto dot=name.rfind('.'); if(dot!=std::string::npos) name=name.substr(0,dot);
             char ps[16]; if(t.is_clipping) std::snprintf(ps,sizeof(ps),"  0.00 dB"); else std::snprintf(ps,sizeof(ps),"%6.2f dB",t.peak_dbfs);
-            std::snprintf(line,sizeof(line),"DR%-3d      %s  %7.2f dB %8s %s\n",
-                          t.dr_score,ps,t.rms_dbfs,format_duration(t.duration_secs).c_str(),name.c_str());
+            std::snprintf(line,sizeof(line),"%-5s      %s  %7.2f dB %8s %s\n",
+                          dr::track_dr_text(t).c_str(),ps,t.rms_dbfs,format_duration(t.duration_secs).c_str(),name.c_str());
             out += line;
         }
         out += sep+"\n\n";
         std::snprintf(line,sizeof(line),"Number of tracks:  %zu\n",tracks.size()); out += line;
-        std::snprintf(line,sizeof(line),"Official DR value: DR%d\n",dr::album_dr(tracks)); out += line;
+        std::snprintf(line,sizeof(line),"Official DR value: %s\n",dr::album_dr_text(tracks).c_str()); out += line;
         if (!tracks.empty()) { const auto& f=tracks[0];
             std::snprintf(line,sizeof(line),"\nSamplerate:        %u Hz\nChannels:          %u\nBits per sample:   %u\nCodec:             %s\n",
                           f.sample_rate,f.channels,f.bit_depth,f.codec.c_str()); out += line; }
@@ -361,20 +361,20 @@ static std::string generate_log(const std::vector<dr::TrackResult>& tracks,
         for (const auto& t : tracks) {
             auto name=t.filename; auto dot=name.rfind('.'); if(dot!=std::string::npos) name=name.substr(0,dot);
             char ps[16]; if(t.is_clipping) std::snprintf(ps,sizeof(ps),"over"); else std::snprintf(ps,sizeof(ps),"%.2f dB",t.peak_dbfs);
-            std::snprintf(line,sizeof(line),"DR%-3d  %-10s %-10.2f %-10.1f %-10.1f %-8.1f %-8s  %s\n",
-                          t.dr_score,ps,t.rms_dbfs,t.integrated_lufs,t.plr_db,t.crest_factor_db,
+            std::snprintf(line,sizeof(line),"%-5s  %-10s %-10.2f %-10.1f %-10.1f %-8.1f %-8s  %s\n",
+                          dr::track_dr_text(t).c_str(),ps,t.rms_dbfs,t.integrated_lufs,t.plr_db,t.crest_factor_db,
                           format_duration(t.duration_secs).c_str(),name.c_str());
             out += line; sum_lufs += t.integrated_lufs;
         }
         out += sep+"\n\n";
         std::snprintf(line,sizeof(line),"Number of tracks:  %zu\n",tracks.size()); out += line;
-        std::snprintf(line,sizeof(line),"Official DR value: DR%d\n",dr::album_dr(tracks)); out += line;
+        std::snprintf(line,sizeof(line),"Official DR value: %s\n",dr::album_dr_text(tracks).c_str()); out += line;
         if (!tracks.empty()) {
             std::snprintf(line,sizeof(line),"Avg. loudness:     %.1f LUFS\n",sum_lufs/tracks.size()); out += line;
             const auto& f=tracks[0];
             std::snprintf(line,sizeof(line),"\nSamplerate:        %u Hz\nChannels:          %u\nBits per sample:   %u\nCodec:             %s\nVerdict:           %s\n",
                           f.sample_rate,f.channels,f.bit_depth,f.codec.c_str(),
-                          dr::verdict_string(dr::classify_dr(dr::album_dr(tracks)))); out += line;
+                          dr::verdict_string(dr::album_verdict(tracks))); out += line;
         }
         out += sep2+"\n";
     }
@@ -431,6 +431,7 @@ static void analysis_worker(AppState* app) {
     gopt.rms_mean = dr::RmsMean::Quadratic;
     gopt.lfe      = app->active_lfe;
     gopt.blocks   = dr::BlockSet::Reference;
+    gopt.short_tracks = dr::ShortTracks::Exclude;   // < 10 s: no DR, as MAAT
     gopt.stream   = app->active_stream;
 
     // Called on a worker thread, once per track, before that track's work
@@ -728,12 +729,10 @@ static void stat(const char* value, const char* label, const ImVec4* vc = nullpt
 }
 
 static void band_verdict(AppState& app) {
-    int adr = dr::album_dr(app.results);
-    const char* verdict = dr::verdict_string(dr::classify_dr((double)adr));
+    const char* verdict = dr::verdict_string(dr::album_verdict(app.results));
     ImGui::BeginGroup();
     ImGui::PushFont(theme::g_big);
-    char drs[16]; std::snprintf(drs,sizeof(drs),"DR%d",adr);
-    ImGui::TextUnformatted(drs);
+    ImGui::TextUnformatted(dr::album_dr_text(app.results).c_str());
     ImGui::PopFont();
     theme::Tag(verdict);
     ImGui::EndGroup();
@@ -895,7 +894,8 @@ static void channel_matrix(const dr::TrackResult& t) {
             ImGui::TableSetColumnIndex(2);
             ImGui::AlignTextToFramePadding();
             ImGui::PushStyleColor(ImGuiCol_Text, lab);
-            std::snprintf(b, sizeof(b), "%.1f", t.ch_metrics[i].dr_raw);
+            if (t.dr_defined) std::snprintf(b, sizeof(b), "%.1f", t.ch_metrics[i].dr_raw);
+            else              std::snprintf(b, sizeof(b), "—");
             ImGui::TextUnformatted(b);
             ImGui::PopStyleColor();
 
@@ -976,13 +976,17 @@ static void detail_panel(AppState& app) {
     theme::Rule(2.0f, 8.0f);
     ImGui::BeginGroup();
     ImGui::PushFont(theme::g_big);
-    std::snprintf(b,sizeof(b),"DR%d",t.dr_score); ImGui::TextUnformatted(b);
+    ImGui::TextUnformatted(dr::track_dr_text(t).c_str());
     ImGui::PopFont();
     ImGui::EndGroup();
     ImGui::SameLine(0,14);
     ImGui::BeginGroup();
     theme::Kicker("DYNAMIC RANGE · PMF");
-    if (nch == 1) {
+    if (!t.dr_defined) {
+        // Same rule and wording as the CLI: dr::MIN_DR_SECONDS.
+        ImGui::TextDisabled("No DR: the track is under %.0f s.", dr::MIN_DR_SECONDS);
+        ImGui::TextDisabled("MAAT omits such tracks; it is not in the album DR.");
+    } else if (nch == 1) {
         ImGui::Text("Mono  %.1f", t.ch_metrics[0].dr_raw);
     } else if (nch == 2) {
         ImGui::Text("L  %.1f   /   R  %.1f", t.ch_metrics[0].dr_raw, t.ch_metrics[1].dr_raw);
@@ -1120,7 +1124,10 @@ static void band_results(AppState& app) {
                     [&](int ia, int ib){
                         const dr::TrackResult& a = R[ia]; const dr::TrackResult& b = R[ib];
                         switch(sp.ColumnIndex){
-                            case 0: return asc? a.dr_score<b.dr_score : a.dr_score>b.dr_score;
+                            case 0: {   // a track with no DR sorts below every DR
+                                const int ka = a.dr_defined ? a.dr_score : -1000;
+                                const int kb = b.dr_defined ? b.dr_score : -1000;
+                                return asc ? ka < kb : ka > kb; }
                             case 2: return asc? a.peak_dbfs<b.peak_dbfs : a.peak_dbfs>b.peak_dbfs;
                             case 3: return asc? a.rms_dbfs<b.rms_dbfs : a.rms_dbfs>b.rms_dbfs;
                             case 4: return asc? a.integrated_lufs<b.integrated_lufs : a.integrated_lufs>b.integrated_lufs;
@@ -1149,7 +1156,7 @@ static void band_results(AppState& app) {
                     ImVec2(0, ImGui::GetFrameHeight())))
                 app.selected_track = i;
             ImGui::SameLine(0,0);
-            theme::DrMeterBar(t.dr_score);
+            theme::DrMeterBar(t.dr_score, 54.0f, t.dr_defined);
 
             ImGui::TableSetColumnIndex(1);
             auto name=t.filename; auto dot=name.rfind('.'); if(dot!=std::string::npos) name=name.substr(0,dot);
@@ -1339,11 +1346,12 @@ static void side_panel(AppState& app) {
         // offers no control for them, so state them: a number is only
         // reproducible if you know which algorithm produced it. LFE scoring IS
         // a control here, so this line follows the checkbox above.
-        ImGui::TextDisabled("DR settings: blocks=%s  mean=%s  lfe=%s",
+        ImGui::TextDisabled("DR settings: blocks=%s  mean=%s  lfe=%s  short=%s",
             dr::block_set_name(dr::BlockSet::Reference),
             dr::rms_mean_name(dr::RmsMean::Quadratic),
             dr::lfe_scoring_name(app.score_lfe ? dr::LfeScoring::Include
-                                               : dr::LfeScoring::Exclude));
+                                               : dr::LfeScoring::Exclude),
+            dr::short_tracks_name(dr::ShortTracks::Exclude));
         ImGui::Dummy(ImVec2(0,4));
         ImGui::TextDisabled("MIT License — Ashwin Balaji 2026");
         ImGui::TextDisabled("Archivo: SIL Open Font License 1.1");

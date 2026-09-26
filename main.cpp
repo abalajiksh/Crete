@@ -79,6 +79,10 @@ static dr::LfeScoring g_lfe = dr::LfeScoring::Exclude;
 // is the pre-0.14.0 accounting, kept so any reference row recorded under it
 // stays reproducible. See dr::BlockSet.
 static dr::BlockSet g_dr_blocks = dr::BlockSet::Reference;
+// Tracks under 10 s: Exclude (default) reports no DR for them and leaves them
+// out of the album DR, as MAAT does; Include reproduces <= 0.19.5. See
+// dr::ShortTracks.
+static dr::ShortTracks g_short = dr::ShortTracks::Exclude;
 // Which SACD audio area to measure. Auto prefers the 2-channel area:
 // it is the layer crete's DR references are built on, the one comparable
 // with every other release of the album, and on most discs the
@@ -243,7 +247,7 @@ void print_standard(const std::vector<dr::TrackResult>& tracks,
 
     for (const auto& t : tracks) {
         char dr_str[8];
-        std::snprintf(dr_str, sizeof(dr_str), "DR%-3d", t.dr_score);
+        std::snprintf(dr_str, sizeof(dr_str), "%-5s", dr::track_dr_text(t).c_str());
 
         std::string peak_str;
         if (t.is_clipping) {
@@ -263,7 +267,7 @@ void print_standard(const std::vector<dr::TrackResult>& tracks,
 
     std::cout << sep << "\n\n";
     std::cout << " Number of Files: " << tracks.size() << "\n";
-    std::cout << " Official DR Value: DR" << dr::album_dr(tracks) << "\n";
+    std::cout << " Official DR Value: " << dr::album_dr_text(tracks) << "\n";
     std::cout << "\n" << sep2 << "\n";
 }
 
@@ -289,7 +293,7 @@ void print_foobar(const std::vector<dr::TrackResult>& tracks,
 
     for (const auto& t : tracks) {
         char dr_str[8];
-        std::snprintf(dr_str, sizeof(dr_str), "DR%-3d", t.dr_score);
+        std::snprintf(dr_str, sizeof(dr_str), "%-5s", dr::track_dr_text(t).c_str());
 
         char peak_str[16];
         if (t.is_clipping)
@@ -309,7 +313,7 @@ void print_foobar(const std::vector<dr::TrackResult>& tracks,
 
     std::cout << sep << "\n\n";
     std::cout << "Number of tracks:  " << tracks.size() << "\n";
-    std::cout << "Official DR value: DR" << dr::album_dr(tracks) << "\n\n";
+    std::cout << "Official DR value: " << dr::album_dr_text(tracks) << "\n\n";
 
     if (!tracks.empty()) {
         const auto& first = tracks[0];
@@ -374,16 +378,18 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
                                       : ((nch > 0) ? t.ch_metrics[0].max_short_term_lufs : t.max_short_term_lufs));
 
         r.lufs_i    = format_db(t.integrated_lufs);
-        r.dr_pmf    = std::to_string(t.dr_score);
+        r.dr_pmf    = t.dr_defined ? std::to_string(t.dr_score) : std::string("--");
         r.bits_used = std::to_string(t.bit_depth);
         r.plr       = format_db(t.plr_db);
         r.lra       = format_db(t.lra_lu);
         r.mom_j     = format_db(t.max_momentary_lufs);
         r.st_j      = format_db(t.max_short_term_lufs);
 
-        r.dr_l = format_db((nch > 0) ? t.ch_metrics[0].dr_raw : t.dr_score_raw);
-        r.dr_r = format_db((nch > 1) ? t.ch_metrics[1].dr_raw
-                                      : ((nch > 0) ? t.ch_metrics[0].dr_raw : t.dr_score_raw));
+        r.dr_l = !t.dr_defined ? std::string("--")
+               : format_db((nch > 0) ? t.ch_metrics[0].dr_raw : t.dr_score_raw);
+        r.dr_r = !t.dr_defined ? std::string("--")
+               : format_db((nch > 1) ? t.ch_metrics[1].dr_raw
+                                     : ((nch > 0) ? t.ch_metrics[0].dr_raw : t.dr_score_raw));
 
         r.tpl_l = format_signed((nch > 0) ? t.ch_metrics[0].true_peak_dbtp : t.max_true_peak_dbtp);
         r.tpl_r = format_signed((nch > 1) ? t.ch_metrics[1].true_peak_dbtp
@@ -481,7 +487,10 @@ void print_extended(const std::vector<dr::TrackResult>& tracks,
     }
 
     std::printf("\nNumber of EP/Album Files: %zu\n", tracks.size());
-    std::printf("Official EP/Album DR: %d\n", dr::album_dr(tracks));
+    {
+        auto a = dr::album_dr(tracks);
+        std::printf("Official EP/Album DR: %s\n", a ? std::to_string(*a).c_str() : "--");
+    }
 }
 
 // ── Detail output (per-track per-channel block view) ───────────────────────
@@ -573,6 +582,11 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
         std::printf("%.2f LUFS (ITU)\n", t.integrated_lufs);
 
         std::printf("  %-22s", "DR (PMF)");
+        if (!t.dr_defined) {
+            for (size_t c = 0; c < nch; ++c) std::printf("%-12s", "—");
+            std::printf("no DR: under %.0f s (%s)\n", dr::MIN_DR_SECONDS,
+                        "MAAT omits such tracks; not in the album DR");
+        } else
         for (size_t c = 0; c < nch; ++c) {
             // Brackets mark a channel that is measured but not scored (LFE).
             if (t.ch_metrics[c].scored) {
@@ -583,7 +597,7 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
                 std::printf("%-12s", br);
             }
         }
-        std::printf("DR%d (PMF)\n", t.dr_score);
+        if (t.dr_defined) std::printf("DR%d (PMF)\n", t.dr_score);
 
         std::printf("  %-22s", "Min PSR");
         for (size_t c = 0; c < nch; ++c) std::printf("%-12s", "—");
@@ -600,7 +614,7 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
         // Multichannel needs its aggregation rule stated next to the number:
         // TT DR defines no procedure beyond stereo, so the reader is entitled
         // to know which channels produced the headline and which did not.
-        if (nch > 2) {
+        if (nch > 2 && t.dr_defined) {
             const bool lfe_in = (g_lfe == dr::LfeScoring::Include);
             std::printf("\n  DR (PMF) = mean of the %u scored channel%s%s.\n",
                         chan::scored_count(unch, lfe_in),
@@ -619,7 +633,14 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
 
     std::cout << "\n" << sep << "\nSummary\n" << sep << "\n\n";
     std::cout << "Number of tracks:  " << tracks.size() << "\n";
-    std::cout << "Official DR value: DR" << dr::album_dr(tracks) << "\n";
+    std::cout << "Official DR value: " << dr::album_dr_text(tracks) << "\n";
+    {
+        size_t undefined = 0;
+        for (const auto& t : tracks) undefined += t.dr_defined ? 0 : 1;
+        if (undefined)
+            std::printf("                   (%zu track%s under %.0f s: no DR, not in the album mean)\n",
+                        undefined, undefined == 1 ? "" : "s", dr::MIN_DR_SECONDS);
+    }
 
     if (!tracks.empty()) {
         double sum_lufs = 0.0;
@@ -645,7 +666,7 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
             std::cout << "Loudness summing:  "
                       << chan::loudness_mode(first.channels) << "\n";
 
-        auto v = dr::classify_dr(static_cast<double>(dr::album_dr(tracks)));
+        auto v = dr::album_verdict(tracks);
         std::cout << "Verdict:           " << dr::verdict_string(v) << "\n";
     }
     std::cout << sep << "\n";
@@ -692,7 +713,9 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
     json j;
     j["version"] = std::string(PROGRAM_NAME) + " " + PROGRAM_VERSION;
     j["folder_path"] = folder_path;
-    j["album_dr"] = dr::album_dr(tracks);
+    // null when no track is long enough for a DR (see dr::MIN_DR_SECONDS).
+    if (auto a = dr::album_dr(tracks)) j["album_dr"] = *a;
+    else j["album_dr"] = nullptr;
     j["num_tracks"] = tracks.size();
 
     // Integrity and selection notes for this run: failed decodes, CRC
@@ -747,6 +770,7 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         j["dr_rms_mean"] = dr::rms_mean_name(g_rms_mean);
         j["dr_blocks"]   = dr::block_set_name(g_dr_blocks);
         j["dr_lfe"]      = dr::lfe_scoring_name(g_lfe);
+        j["dr_short"]    = dr::short_tracks_name(g_short);
         if (first.audio_stream_count > 1) {
             j["audio_stream_count"] = first.audio_stream_count;
             j["stream_index"]       = first.stream_index;
@@ -777,8 +801,16 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
             jt["stream_index"]       = t.stream_index;
         }
 
-        jt["dr_score"] = t.dr_score;
-        jt["dr_raw"] = t.dr_score_raw;
+        // A track under dr::MIN_DR_SECONDS has no DR: null, not 0, and
+        // dr_defined says so explicitly for consumers that test a flag.
+        jt["dr_defined"] = t.dr_defined;
+        if (t.dr_defined) {
+            jt["dr_score"] = t.dr_score;
+            jt["dr_raw"]   = t.dr_score_raw;
+        } else {
+            jt["dr_score"] = nullptr;
+            jt["dr_raw"]   = nullptr;
+        }
 
         jt["peak_dbfs"] = t.peak_dbfs;
         jt["rms_dbfs"] = t.rms_dbfs;
@@ -821,7 +853,8 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         // Multichannel companions to dr_score_raw. On mono/stereo dr_front_raw
         // equals dr_score_raw and worst_channel is just the lower-DR channel,
         // so consumers can read them unconditionally.
-        jt["dr_front_raw"]    = t.dr_front_raw;
+        if (t.dr_defined) jt["dr_front_raw"] = t.dr_front_raw;
+        else              jt["dr_front_raw"] = nullptr;
         jt["worst_channel"]   = t.worst_channel;
 
         json jch = json::array();
@@ -840,8 +873,13 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
             jc["sample_peak_dbfs"] = cm.sample_peak_dbfs;
             jc["true_peak_dbtp"] = cm.true_peak_dbtp;
             jc["rms_dbfs"] = cm.rms_dbfs;
-            jc["dr_score"] = cm.dr_score;
-            jc["dr_raw"] = cm.dr_raw;
+            if (t.dr_defined) {
+                jc["dr_score"] = cm.dr_score;
+                jc["dr_raw"]   = cm.dr_raw;
+            } else {
+                jc["dr_score"] = nullptr;
+                jc["dr_raw"]   = nullptr;
+            }
             jc["max_momentary_lufs"] = cm.max_momentary_lufs;
             jc["max_short_term_lufs"] = cm.max_short_term_lufs;
             jch.push_back(std::move(jc));
@@ -880,6 +918,9 @@ void print_usage(const char* argv0) {
               << "  --dr-lfe <exclude|include>     Count the LFE toward DR (default: exclude).\n"
               << "                                 Affects TT DR only; BS.1770 loudness and\n"
               << "                                 Min. PSR are unchanged. No-op without an LFE.\n"
+              << "  --dr-short <exclude|include>   Tracks under 10 s (default: exclude = no DR,\n"
+              << "                                 not in the album DR, as MAAT does). include\n"
+              << "                                 reproduces <= 0.19.5. Other metrics unchanged.\n"
               << "  --sacd-area <auto|stereo|multichannel>  Which area of an SACD .iso to\n"
               << "                                 measure (default: auto = prefer stereo).\n"
               << "      quadratic  — sqrt(mean(rms^2)), averages POWER. The PMF procedure,\n"
@@ -976,7 +1017,8 @@ void print_version() {
               // how a whole weekly came to be labelled with the wrong block set.
               << "DR settings: blocks=" << dr::block_set_name(g_dr_blocks)
               << " mean=" << dr::rms_mean_name(g_rms_mean)
-              << " lfe=" << dr::lfe_scoring_name(g_lfe) << "\n";
+              << " lfe=" << dr::lfe_scoring_name(g_lfe)
+              << " short=" << dr::short_tracks_name(g_short) << "\n";
     {   // What the default worker count will be sized against on THIS host.
         // Printed for the same reason the DR axes are: a run is only
         // reproducible if you can see what the machine told crete.
@@ -1094,6 +1136,13 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--sacd-area" && i+1 < argc) {
             try {
                 g_sacd_area = sacd::area_sel_from_string(argv[++i]);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << "\n";
+                return 1;
+            }
+        } else if (arg == "--dr-short" && i+1 < argc) {
+            try {
+                g_short = dr::short_tracks_from_string(argv[++i]);
             } catch (const std::exception& e) {
                 std::cerr << "Error: " << e.what() << "\n";
                 return 1;
@@ -1221,6 +1270,7 @@ int main(int argc, char* argv[]) {
         gopt.rms_mean = g_rms_mean;
         gopt.lfe      = g_lfe;
         gopt.blocks   = g_dr_blocks;
+        gopt.short_tracks = g_short;
         gopt.stream   = g_stream;
 
         std::atomic<size_t> done{0};

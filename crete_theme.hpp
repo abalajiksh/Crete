@@ -254,13 +254,16 @@ inline void KeyValue(const char* label, const char* value,
 }
 
 // The DR meter-bar table cell: big "DRnn" + a fill bar (accent when < DR8).
-inline void DrMeterBar(int dr, float bar_w = 54.0f) {
+// `defined` false: a track under 10 s has no DR (dr::MIN_DR_SECONDS). Shown as
+// a muted "DR--" over an empty bar, never as DR0, which would read as a value.
+inline void DrMeterBar(int dr, float bar_w = 54.0f, bool defined = true) {
     ImGui::AlignTextToFramePadding();
     ImGui::PushFont(g_head);
-    ImGui::Text("DR%d", dr);
+    if (defined) ImGui::Text("DR%d", dr);
+    else         ImGui::TextColored(P().muted, "DR--");
     ImGui::PopFont();
     ImGui::SameLine();
-    float frac = std::min(dr / 18.0f, 1.0f);
+    float frac = defined ? std::min(dr / 18.0f, 1.0f) : 0.0f;
     float h = 5.0f;
     ImVec2 pos = ImGui::GetCursorScreenPos();
     pos.y += (ImGui::GetTextLineHeight() - h) * 0.5f + 1.0f;
