@@ -1,0 +1,134 @@
+// ============================================================================
+// Jenkinsfile.site -- publish a release's changelog entry to the crete-dr site
+//
+// For a release tag, adds its entry to github.com/abalajiksh/crete-dr's
+// src/lib/releases.js (scripts/site_release_entry.py), proves the site still
+// builds, and pushes to main -- the push is what makes Cloudflare rebuild.
+// The newest entry is also the site's version everywhere, so this is the
+// site's version bump too.
+//
+// Everything comes from the ANNOTATED TAG, which Crete-Tag wrote as the release
+// record: title, notes, date, the Impact / Reproduce trailers (the site's
+// impact chips) and a paragraph saying what the weekly verified.
+//
+// Triggers: Crete-Tag starts it (TAG = the tag it just pushed). A daily cron is
+// the backstop, like Tapedeck's spec-sync: with TAG empty it takes the newest
+// tag, and does nothing if the entry is already there -- or if that tag was
+// not cut by Crete-Tag (no Impact trailer: a human writes that entry). An
+// EXPLICIT TAG that is not a release record fails instead of skipping.
+//
+// ── ONE-TIME JENKINS SETUP ──────────────────────────────────────────────────
+// Job "Crete-Site" in folder Crete: "Pipeline script from SCM", Git
+//   https://codeberg.org/abksh/Crete.git, branch */main, Script Path
+//   packaging/Jenkinsfile.site, lightweight checkout ON.
+// Credential github-crete-dr: Username with password -- GitHub user + a
+//   fine-grained token with Contents read+write on abalajiksh/crete-dr ONLY.
+// Agent 'bee' needs bun (installed for the jenkins user in ~/.bun/bin).
+// ============================================================================
+
+pipeline {
+    agent { label 'bee' }
+
+    options {
+        disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timestamps()
+    }
+
+    triggers {
+        // Backstop only; Crete-Tag is the trigger. A no-op when up to date.
+        cron('H 6 * * *')
+    }
+
+    parameters {
+        string(name: 'TAG', defaultValue: '',
+               description: 'Release tag, e.g. v0.19.6. Empty = the newest vX.Y.Z tag (what the daily run does).')
+        booleanParam(name: 'DRY_RUN', defaultValue: false,
+               description: 'Add the entry and build the site, but do not push.')
+    }
+
+    environment {
+        SITE_REPO = 'github.com/abalajiksh/crete-dr'
+        SITE_DIR  = '.site/crete-dr'
+    }
+
+    stages {
+        stage('Resolve tag') {
+            steps {
+                sh '''
+set -eu
+git fetch --quiet --force --tags origin
+T="${TAG:-}"
+[ -n "$T" ] || T=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n 1)
+printf '%s\\n' "$T" > .site-tag
+echo "tag: $T"
+'''
+                script {
+                    env.RELEASE_TAG = readFile('.site-tag').trim()
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.RELEASE_TAG}" +
+                                               (params.DRY_RUN ? ' (dry run)' : '')
+                }
+            }
+        }
+
+        stage('Add entry and build') {
+            steps {
+                sh '''
+set -eu
+rm -rf .site && mkdir -p .site
+git clone --quiet --depth 1 "https://$SITE_REPO.git" "$SITE_DIR"
+# No pipe into tee here: $? would be tee's status, not the script's.
+set +e
+python3 scripts/site_release_entry.py --tag "$RELEASE_TAG" --releases "$SITE_DIR/src/lib/releases.js" \\
+    > .site/result 2>&1
+RC=$?
+set -e
+cat .site/result
+if [ "$RC" -eq 3 ] && [ -z "${TAG:-}" ]; then
+    echo "The newest tag was not cut by Crete-Tag -- nothing for the backstop to do."
+    : > .site/skip; exit 0
+fi
+[ "$RC" -eq 0 ] || exit "$RC"
+if grep -q '^unchanged:' .site/result; then : > .site/skip; exit 0; fi
+
+# The site prerenders every route with strict: true, so a malformed entry
+# fails HERE instead of breaking the deploy.
+export PATH="$HOME/.bun/bin:$PATH"
+cd "$SITE_DIR"
+bun install --frozen-lockfile
+bun run build
+git --no-pager diff --stat
+'''
+            }
+        }
+
+        stage('Push') {
+            when {
+                allOf {
+                    expression { !params.DRY_RUN }
+                    expression { !fileExists('.site/skip') }
+                }
+            }
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'github-crete-dr',
+                                                  usernameVariable: 'GH_USER',
+                                                  passwordVariable: 'GH_TOKEN')]) {
+                    sh '''
+set -eu
+cd "$SITE_DIR"
+V="${RELEASE_TAG#v}"
+git add src/lib/releases.js
+git -c user.name='crete-site-sync' -c user.email='s.ashwinbalaji.de@gmail.com' \\
+    commit -q -m "changelog: crête $V" -m "Generated from the annotated tag $RELEASE_TAG by Crete-Site (crete repo, packaging/Jenkinsfile.site)."
+# The token comes from the environment through a credential helper; it is never
+# written to disk, a URL or the log.
+git -c credential.helper='!f() { echo "username=${GH_USER}"; echo "password=${GH_TOKEN}"; }; f' \\
+    push "https://$SITE_REPO.git" HEAD:main
+echo "pushed crête $V to $SITE_REPO -- Cloudflare rebuilds from main"
+'''
+                }
+            }
+        }
+    }
+}

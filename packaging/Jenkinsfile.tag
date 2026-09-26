@@ -17,6 +17,7 @@
 //   6. attach the qualification, the measurements and the weekly's detailed
 //      reports to the tag's Codeberg release -- the measurements are what the
 //      NEXT release's bit-identity check compares against
+//   7. start Crete-Site, which adds the release to the crete-dr changelog
 //
 // DRY_RUN defaults to ON: it does all of that except 5 and 6, and archives the
 // exact message it would tag. The weekly takes ~2 h, so the usual flow is a dry
@@ -41,6 +42,7 @@
 import groovy.transform.Field
 
 @Field def WEEKLY_JOB = 'Crete-Weekly'
+@Field def SITE_JOB   = 'Crete-Site'
 
 def isManual() {
     return !currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause').isEmpty()
@@ -241,6 +243,16 @@ python3 scripts/codeberg_release.py --repo "$CODEBERG_REPO" --tag "v$V" --notes-
     ".tag/crete-$V-measurements.json" ".tag/crete-$V-qualification.json" ".tag/crete-$V-weekly-report.zip"
 '''
                 }
+            }
+        }
+
+        stage('Update site') {
+            when { environment name: 'DRY', value: 'false' }
+            steps {
+                // Not waited on: the release is already out; the site entry
+                // follows, and Crete-Site's daily run retries if this one fails.
+                build(job: SITE_JOB, wait: false,
+                      parameters: [string(name: 'TAG', value: "v${params.VERSION}")])
             }
         }
     }
