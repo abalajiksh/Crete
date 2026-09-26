@@ -84,11 +84,13 @@ python3 scripts/site_release_entry.py --tag "$RELEASE_TAG" --releases "$SITE_DIR
     > .site/result 2>&1
 RC=$?
 set -e
-cat .site/result
 if [ "$RC" -eq 3 ] && [ -z "${TAG:-}" ]; then
-    echo "The newest tag was not cut by Crete-Tag -- nothing for the backstop to do."
+    # Expected on the daily run until the first Crete-Tag release, so no
+    # "ERROR:" line in a green log.
+    echo "$RELEASE_TAG was not cut by Crete-Tag (no Impact trailer) -- nothing for the backstop to do."
     : > .site/skip; exit 0
 fi
+cat .site/result
 [ "$RC" -eq 0 ] || exit "$RC"
 if grep -q '^unchanged:' .site/result; then : > .site/skip; exit 0; fi
 
