@@ -15,7 +15,9 @@
 // (packaging/Jenkinsfile.windows) for the same tag, copy that build's zip and
 // .sha256, and attach them to the tag's Codeberg release
 // (scripts/codeberg_release.py -- creates the release from the tag annotation
-// if there is none; re-runs replace only assets whose bytes differ). A Windows
+// if there is none; re-runs replace only assets whose bytes differ), then
+// point the Scoop bucket at that zip (scripts/bump_scoop_bucket.py; checks the
+// published asset hashes like the local copy before pushing). A Windows
 // failure marks this release UNSTABLE and does not stop OBS/Homebrew.
 //
 // The Homebrew step waits on OBS because there is no macOS agent: the 15
@@ -37,6 +39,9 @@
 //                          repository read+write scope, for creating releases
 //                          and uploading assets on abksh/Crete. Forgejo tokens
 //                          cannot be limited to one repository.
+//   codeberg-scoop-bucket  SSH username with private key -- a Codeberg DEPLOY
+//                          KEY with write access on abksh/scoop-crete ONLY.
+//                          Stored in the Crete folder's credential store.
 // Job: Pipeline, "Pipeline script from SCM", Git:
 //   Repository URL      https://codeberg.org/abksh/Crete.git
 //   Refspec (Advanced)  +refs/tags/*:refs/remotes/origin/tags/*
@@ -113,6 +118,7 @@ pipeline {
         OBS_PROJECT      = 'home:abksh:crete'
         OBS_PACKAGE      = 'crete'
         TAP_REMOTE       = 'ssh://git@codeberg.org/abksh/homebrew-crete.git'
+        BUCKET_REMOTE    = 'ssh://git@codeberg.org/abksh/scoop-crete.git'
         CODEBERG_REPO    = 'abksh/Crete'
         TAP_AUTHOR_NAME  = 'Ashwin Balaji'
         TAP_AUTHOR_EMAIL = 's.ashwinbalaji.de@gmail.com'
@@ -190,6 +196,36 @@ git tag -l --format='%(contents)' "$RELEASE_TAG" > .release/notes.txt
 DRY=""; [ "$DRY_RUN" = true ] && DRY="--dry-run"
 scripts/codeberg_release.py $DRY --repo "$CODEBERG_REPO" --tag "$RELEASE_TAG" \\
     --notes-file .release/notes.txt .release/windows/*.zip .release/windows/*.zip.sha256
+'''
+                                }
+                                // Scoop: only after the upload above, and only a zip
+                                // that is on Codeberg with these exact bytes.
+                                writeFile file: '.release/known_hosts', text: CODEBERG_KNOWN_HOSTS
+                                withCredentials([sshUserPrivateKey(credentialsId: 'codeberg-scoop-bucket',
+                                                                   keyFileVariable: 'BUCKET_KEY')]) {
+                                    sh '''
+set -eu
+export GIT_SSH_COMMAND="ssh -i $BUCKET_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$PWD/.release/known_hosts"
+rm -rf .release/bucket
+git clone --quiet "$BUCKET_REMOTE" .release/bucket
+VERIFY="--verify-url"; [ "$DRY_RUN" = true ] && VERIFY=""
+# Not piped into tee: under sh the pipeline's status would be tee's.
+scripts/bump_scoop_bucket.py .release/bucket "$RELEASE_TAG" \\
+    ".release/windows/crete-$RELEASE_VERSION-windows-x86_64.zip" $VERIFY > .release/scoop.txt 2>&1 \\
+    || { cat .release/scoop.txt; exit 1; }
+cat .release/scoop.txt
+grep -q '^unchanged' .release/scoop.txt && exit 0
+cd .release/bucket
+git add bucket/crete.json
+git --no-pager diff --cached --stat
+if [ "$DRY_RUN" = true ]; then
+    echo ">> DRY RUN: would push this to $BUCKET_REMOTE"
+    git --no-pager diff --cached
+    exit 0
+fi
+git -c user.name="$TAP_AUTHOR_NAME" -c user.email="$TAP_AUTHOR_EMAIL" \\
+    commit -qm "crete $RELEASE_VERSION"
+git push origin HEAD:main
 '''
                                 }
                             }
