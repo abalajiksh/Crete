@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -63,6 +64,14 @@ struct AudioData {
     // what this field exists to prevent. Same precedent as mqa_detect.hpp:
     // measure the delivered stream, name the premium layer separately.
     std::string codec_profile;
+
+    // The speaker mask the file declares, in WAVEFORMATEXTENSIBLE bits:
+    // dwChannelMask from a WAVE_FORMAT_EXTENSIBLE fmt chunk (WAV, RF64, W64),
+    // FLAC's WAVEFORMATEXTENSIBLE_CHANNEL_MASK tag, or FFmpeg's native
+    // ch_layout. 0 when nothing was declared -- AIFF, DSD, a plain PCM fmt
+    // chunk, an FFmpeg layout with no WAVE equivalent. channels.hpp decides
+    // whether it overrides the count-based layout; see chan::use_mask().
+    uint32_t channel_mask = 0;
 
     // True when the source format bounds every sample to [-1, 1) by
     // construction -- integer PCM in WAV/RF64/Wave64/AIFF, and FLAC. It is
@@ -213,6 +222,7 @@ inline AudioData decode_wave_payload(const uint8_t* fmt, size_t fmt_size,
         // WAVE_FORMAT_EXTENSIBLE
         if (audio_fmt == 0xFFFE && fmt_size >= 40) {
             bits_per_sample = rd16le(fmt + 18);  // valid bits
+            ad.channel_mask = rd32le(fmt + 20);  // dwChannelMask
             audio_fmt = rd16le(fmt + 24);        // sub-format GUID first word
         }
     }
@@ -778,6 +788,39 @@ inline StreamInfo parse_streaminfo(const uint8_t* data) {
     return si;
 }
 
+// WAVEFORMATEXTENSIBLE_CHANNEL_MASK from a VORBIS_COMMENT block: how a FLAC
+// whose layout is not the format's default for its channel count says so
+// (flac(1) writes it, and FFmpeg reads it). The value is hex ("0x2D603"), or
+// decimal from some taggers. 0 when absent or unparseable.
+inline uint32_t channel_mask_tag(const uint8_t* p, size_t n) {
+    static const char KEY[] = "WAVEFORMATEXTENSIBLE_CHANNEL_MASK=";
+    const size_t klen = sizeof(KEY) - 1;
+    if (n < 8) return 0;
+    size_t at = 4 + size_t(rd32le(p));             // skip the vendor string
+    if (at + 4 > n) return 0;
+    uint32_t count = rd32le(p + at);
+    at += 4;
+    for (uint32_t k = 0; k < count && at + 4 <= n; ++k) {
+        uint32_t len = rd32le(p + at);
+        at += 4;
+        if (len > n - at) return 0;
+        const char* c = reinterpret_cast<const char*>(p + at);
+        at += len;
+        if (len <= klen) continue;
+        bool match = true;
+        for (size_t i = 0; i < klen && match; ++i)
+            match = std::toupper(static_cast<unsigned char>(c[i])) == KEY[i];
+        if (!match) continue;
+        std::string v(c + klen, len - klen);
+        try {
+            size_t used = 0;
+            unsigned long m = std::stoul(v, &used, 0);   // base 0: 0x.. or decimal
+            return (used == v.size() && m <= 0xFFFFFFFFul) ? uint32_t(m) : 0u;
+        } catch (...) { return 0; }
+    }
+    return 0;
+}
+
 // ── Rice residual decoding ─────────────────────────────────────────────────
 inline void decode_rice_partition(BitReader& br, int32_t* residual,
                                    size_t block_size, int predictor_order,
@@ -957,6 +1000,8 @@ inline AudioData decode_flac(const std::vector<uint8_t>& buf) {
             si = flac::parse_streaminfo(buf.data() + pos);
             have_si = true;
         }
+        if (block_type == 4 && pos + block_size <= buf.size())
+            ad.channel_mask = flac::channel_mask_tag(buf.data() + pos, block_size);
 
         pos += block_size;
         if (is_last) break;

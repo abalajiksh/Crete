@@ -208,6 +208,7 @@ crete --dr-mean arithmetic  /path/to/album/         # legacy <=0.12.1 DR averagi
 crete --dr-blocks legacy    /path/to/album/         # pre-0.14.0 3 s block set (A/B only)
 crete --dr-blocks foobar    /path/to/album/         # grid starting 244 ms in, as foobar2000 measures (experimental)
 crete --dr-short include    /path/to/album/         # score tracks under 10 s as <=0.19.5 did (A/B only)
+crete --channel-mask ignore /path/to/album/         # layout by channel count only, as <=0.20.0 (A/B only)
 
 crete-ffmpeg /path/to/album/           # cli-json-ffmpeg build: adds ALAC/MP3/AAC/Opus
 ```
@@ -670,6 +671,37 @@ describe a layout differently):
 Layouts outside this list are measured per channel but carry no speaker semantics: no LFE
 is assumed and every channel is scored at unity weight.
 
+**Channel mask (since 0.21.0).** The count alone cannot tell an Auro-3D 8.0 file
+(`L R Ls Rs HL HR HLs HRs`) from a 7.1 one, and up to 0.20.0 crête called it 7.1, took its
+`Rs` for an LFE and left it out of DR and loudness. crête now reads the speaker mask a file
+declares — `dwChannelMask` in a `WAVE_FORMAT_EXTENSIBLE` WAV / RF64 / Wave64, the
+`WAVEFORMATEXTENSIBLE_CHANNEL_MASK` tag in FLAC, the native channel layout from FFmpeg — and
+takes labels, the LFE and BS.1770 weights from the speaker bits when the mask names one
+speaker per channel **and** describes something the table above does not:
+
+| mask | layout | order |
+|------|--------|-------|
+| `0x2D603` | 4.0.4 (Auro 8.0) | L R Ls Rs HL HR HLs HRs |
+| `0x2D60F` | 5.1.4 (Auro 9.1) | L R C **LFE** Ls Rs HL HR HLs HRs |
+| `0x2FE3F` | 7.1.6 (Auro 13.1) | L R C **LFE** Lrs Rrs Lss Rss T HL HC HR HLs HRs |
+| `0xFF` | 7.1 (wide) | L R C **LFE** Ls Rs Lc Rc |
+| `0x107` | 4.0 | L R C Cs |
+
+A 5.1 whose mask names the side pair, a 7.1 with `0x63F`, a quad with `0x33` — every mask
+that agrees with the count table — take the count table's path unchanged, as does every
+mono and stereo file, a file with no mask, and a mask whose bit count differs from the
+channel count. Measured on the DSOTM Blu-ray carriers and the Schnittke Auro-3D / DTS:X /
+TrueHD carriers: whole-JSON identical to 0.20.0 apart from the new album-level
+`channel_mask_mode` key. A masked layout adds `channel_mask` (e.g. `"0x2D603"`) at album and
+track level; nothing else in the schema changes. Weights on a masked layout: ear-level
+surrounds (back, side, back centre) +1.5 dB, front, front-of-centre and every height
+channel unity (BS.1770-4 Table 4 puts nothing above 30° elevation at +1.5 dB), LFE
+excluded. `--channel-mask ignore` describes every file by its channel count and
+reproduces 0.20.0. `scripts/check_channel_mask.sh` gates it with one tone in every channel,
+which makes loudness arithmetic: Auro 8.0 and 9.1 must land on `10·log10(ΣG/2)` above the
+stereo reading, and a 7.1 or 5.1(side) mask must print exactly what the same audio without
+a mask prints.
+
 **Loudness** follows ITU-R BS.1770-4 channel weighting: front channels (L, R, C) unity,
 surrounds +1.5 dB, **LFE excluded**. BS.1770-4 tabulates weights only to 5.1; the 7.1 rears
 take the same +1.5 dB as the sides, as EBU and broadcast meters do. Mono and stereo weights
@@ -732,6 +764,10 @@ but reading it is inference, so if it is ever built it belongs in the confidence
 `forensics` namespace, gated off, never in `metrics`. Worth knowing meanwhile: such a carrier
 reads as ~19 effective bits and is useless for noise-floor or bit-depth forensics, while DR
 and loudness are untouched (−116 dB is nowhere near a 3 s block).
+
+A **discrete** Auro-3D file is a different case: one PCM channel per speaker, as the Auro
+Encoder Service takes and as downloads ship. It declares its layout in its channel mask, so
+crête labels and weights it from that — see *Channel layouts* above.
 
 ### PLR / PSR / LRA / crest factor
 

@@ -278,6 +278,10 @@ struct TrackResult {
     std::string filename;
     uint32_t    sample_rate    = 0;
     uint32_t    channels       = 0;
+    // The speaker mask the decoder reported (AudioData::channel_mask), 0 if
+    // none. Every chan:: call about this track passes it alongside channels;
+    // chan::use_mask() decides whether it changes anything.
+    uint32_t    channel_mask   = 0;
     uint32_t    bit_depth      = 0;
     uint64_t    total_samples  = 0;
     std::string codec;
@@ -509,10 +513,10 @@ inline double max_block_loudness_single(const double* kw, size_t n,
 // unity -- produce bit-identical results to the unweighted code this replaced.
 // The entire MAAT-validated stereo corpus is therefore untouched by definition,
 // not by measurement.
-inline std::vector<double> bs1770_weights(size_t nch) {
+inline std::vector<double> bs1770_weights(size_t nch, uint32_t channel_mask = 0) {
     std::vector<double> w(nch);
     for (size_t c = 0; c < nch; ++c)
-        w[c] = chan::bs1770_weight(static_cast<unsigned>(nch), c);
+        w[c] = chan::bs1770_weight(static_cast<unsigned>(nch), c, channel_mask);
     return w;
 }
 
@@ -669,7 +673,7 @@ inline double compute_lra(const std::vector<double>& st_powers) {
 inline double compute_min_psr(
         const std::vector<std::vector<double>>& channels,
         const std::vector<double>& st_powers,
-        size_t window, size_t hop) {
+        size_t window, size_t hop, uint32_t channel_mask = 0) {
     if (channels.empty() || st_powers.empty()) return 0.0;
     size_t n = channels[0].size();
     size_t nch = channels.size();
@@ -679,7 +683,7 @@ inline double compute_min_psr(
     // never hears. No-op for mono/stereo, which have no LFE.
     std::vector<double> peaks = sliding_window_peaks(channels[0].data(), n, window, hop);
     for (size_t c = 1; c < nch; ++c) {
-        if (chan::is_lfe(static_cast<unsigned>(nch), c)) continue;
+        if (chan::is_lfe(static_cast<unsigned>(nch), c, channel_mask)) continue;
         auto p = sliding_window_peaks(channels[c].data(), n, window, hop);
         for (size_t i = 0; i < peaks.size() && i < p.size(); ++i)
             peaks[i] = std::max(peaks[i], p[i]);
@@ -714,16 +718,20 @@ inline TTDRResult compute_tt_dr(
         double sample_rate, double block_seconds = 3.0,
         RmsMean rms_mean = RmsMean::Quadratic,
         LfeScoring lfe = LfeScoring::Exclude,
-        BlockSet block_set = BlockSet::Reference) {
+        BlockSet block_set = BlockSet::Reference,
+        uint32_t channel_mask = 0) {
     size_t nch = channels.size();
     const unsigned unch = static_cast<unsigned>(nch);
     // The single place the LFE policy is read. Under Exclude this is exactly
     // chan::is_lfe, so every loop below keeps its original form and its
     // original accumulation order -- mono and stereo never have an LFE, so
-    // they are bit-identical under either setting by construction.
+    // they are bit-identical under either setting by construction. Resolved
+    // once here: the lambda runs inside the block loops.
     const bool lfe_scored = (lfe == LfeScoring::Include);
-    auto unscored = [unch, lfe_scored](size_t ch) {
-        return !lfe_scored && chan::is_lfe(unch, ch);
+    std::vector<char> is_lfe(nch);
+    for (size_t ch = 0; ch < nch; ++ch) is_lfe[ch] = chan::is_lfe(unch, ch, channel_mask);
+    auto unscored = [&is_lfe, lfe_scored](size_t ch) {
+        return !lfe_scored && is_lfe[ch];
     };
     size_t n = channels[0].size();
     size_t block_size = static_cast<size_t>(block_seconds * sample_rate);
@@ -952,11 +960,13 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
                                   RmsMean rms_mean = RmsMean::Quadratic,
                                   LfeScoring lfe = LfeScoring::Exclude,
                                   BlockSet block_set = BlockSet::Reference,
-                                  ShortTracks short_tracks = ShortTracks::Exclude) {
+                                  ShortTracks short_tracks = ShortTracks::Exclude,
+                                  uint32_t channel_mask = 0) {
     TrackResult r;
     r.filename     = filename;
     r.sample_rate  = sample_rate;
     r.channels     = static_cast<uint32_t>(channels.size());
+    r.channel_mask = channel_mask;
     r.bit_depth    = bit_depth;
     r.codec        = codec;
     r.total_samples = channels.empty() ? 0 : channels[0].size();
@@ -966,7 +976,8 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     size_t nch = channels.size();
     size_t n = channels[0].size();
     double sr = static_cast<double>(sample_rate);
-    auto tt = compute_tt_dr(channels, sample_rate, 3.0, rms_mean, lfe, block_set);
+    auto tt = compute_tt_dr(channels, sample_rate, 3.0, rms_mean, lfe, block_set,
+                            channel_mask);
     r.dr_score_raw   = tt.dr;
     r.dr_score       = static_cast<int>(std::round(tt.dr));
     r.dr_per_channel = tt.dr_per_ch;
@@ -986,12 +997,12 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
     double ch_power_scale = static_cast<double>(nch);
     // BS.1770 summing weights for this layout; all-unity (and therefore a
     // no-op) for mono and stereo. See bs1770_weights() above.
-    const std::vector<double> weights = bs1770_weights(nch);
+    const std::vector<double> weights = bs1770_weights(nch, channel_mask);
     r.ch_metrics.resize(nch);
     double joint_tp = 0.0;
     for (size_t c = 0; c < nch; ++c) {
         auto& cm = r.ch_metrics[c];
-        cm.is_lfe = chan::is_lfe(static_cast<unsigned>(nch), c);
+        cm.is_lfe = chan::is_lfe(static_cast<unsigned>(nch), c, channel_mask);
         cm.scored = !cm.is_lfe || (lfe == LfeScoring::Include);
         const auto& samp = channels[c];
         double sp = peak_of(samp.data(), n);
@@ -1054,7 +1065,8 @@ inline TrackResult analyze_track(const std::vector<std::vector<double>>& channel
         sum_crest += r.ch_metrics[c].sample_peak_dbfs - r.ch_metrics[c].rms_dbfs;
     r.crest_factor_db = sum_crest / static_cast<double>(nch);
     r.lra_lu = compute_lra(st_powers);
-    r.psr_db = compute_min_psr(channels, st_powers, short_term_window, short_term_hop);
+    r.psr_db = compute_min_psr(channels, st_powers, short_term_window, short_term_hop,
+                               channel_mask);
     // Too short for TT DR (see MIN_DR_SECONDS). Done LAST, after every other
     // measurement, so nothing else on the track can depend on it. NaN rather
     // than 0: a formatter that forgot to check dr_defined prints "nan", not a

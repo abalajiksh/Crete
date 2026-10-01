@@ -78,6 +78,10 @@ struct Options {
     dr::BlockSet   blocks   = dr::BlockSet::Reference;
     dr::ShortTracks short_tracks = dr::ShortTracks::Exclude;   // < 10 s: no DR
     int            stream   = -1;   // container audio-stream index, -1 = auto
+    // Describe a layout by the file's speaker mask where it declares one that
+    // the channel count does not imply (chan::use_mask). false = by count
+    // alone, which reproduces <= 0.20.0.
+    bool           channel_mask = true;
 };
 
 // ── Natural (numeric-aware) ordering ───────────────────────────────────────
@@ -360,7 +364,8 @@ inline GroupResult analyse(const Group& g, const Options& opt,
                 auto ad = audio::decode_sacd_track(img, area, t, opt.dsd);
                 out.tracks.push_back(dr::analyze_track(
                     ad.channels, ad.sample_rate, ad.bit_depth,
-                    ad.codec, tname, opt.rms_mean, opt.lfe, opt.blocks, opt.short_tracks));
+                    ad.codec, tname, opt.rms_mean, opt.lfe, opt.blocks, opt.short_tracks,
+                    opt.channel_mask ? ad.channel_mask : 0));
                 out.tracks.back().mqa = mqa::analyze_pcm(
                     ad.channels, ad.sample_rate, ad.bit_depth);
             }
@@ -368,6 +373,7 @@ inline GroupResult analyse(const Group& g, const Options& opt,
         }
 
         auto ad = audio::decode_file(g.audio_path, opt.dsd, opt.stream);
+        const uint32_t mask = opt.channel_mask ? ad.channel_mask : 0;
 
         // Several audio streams and no explicit choice: say which one was
         // measured. A Blu-ray rip's LPCM 5.1, DTS-HD MA 5.1 and TrueHD 7.1
@@ -404,7 +410,8 @@ inline GroupResult analyse(const Group& g, const Options& opt,
             if (progress) progress(basename);
             out.tracks.push_back(dr::analyze_track(
                 ad.channels, ad.sample_rate, ad.bit_depth,
-                ad.codec, basename, opt.rms_mean, opt.lfe, opt.blocks, opt.short_tracks));
+                ad.codec, basename, opt.rms_mean, opt.lfe, opt.blocks, opt.short_tracks,
+                mask));
             out.tracks.back().mqa                = minfo;
             out.tracks.back().stream_index       = ad.stream_index;
             out.tracks.back().audio_stream_count = ad.audio_stream_count;
@@ -458,7 +465,8 @@ inline GroupResult analyse(const Group& g, const Options& opt,
 
                 out.tracks.push_back(dr::analyze_track(
                     slice, ad.sample_rate, ad.bit_depth,
-                    ad.codec, track_name, opt.rms_mean, opt.lfe, opt.blocks, opt.short_tracks));
+                    ad.codec, track_name, opt.rms_mean, opt.lfe, opt.blocks, opt.short_tracks,
+                    mask));
                 out.tracks.back().mqa                = minfo;
                 out.tracks.back().stream_index       = ad.stream_index;
                 out.tracks.back().audio_stream_count = ad.audio_stream_count;

@@ -680,7 +680,8 @@ static void row_dsd(AppState& app) {
     ImGui::SameLine();
     if (!app.results.empty() && app.results.front().channels > 2)
         ImGui::TextDisabled("· DSF / DFF · %s",
-                            chan::layout_short(app.results.front().channels).c_str());
+                            chan::layout_short(app.results.front().channels,
+                                               app.results.front().channel_mask).c_str());
     else
         ImGui::TextDisabled("· DSF / DFF");
 
@@ -750,10 +751,14 @@ static void band_verdict(AppState& app) {
     ImGui::AlignTextToFramePadding();
     // Layout belongs in the headline: DR12 on 5.1 is not DR12 on stereo, and a
     // folder holding both is a fact worth showing rather than averaging over.
-    unsigned nch0 = app.results.empty() ? 0u : app.results.front().channels;
+    const std::string lay0 = app.results.empty() ? chan::layout_short(0u)
+        : chan::layout_short(app.results.front().channels, app.results.front().channel_mask);
     bool mixed_layout = false;
-    for (auto& t : app.results) if (t.channels != nch0) mixed_layout = true;
-    stat(mixed_layout ? "MIXED" : chan::layout_short(nch0).c_str(), "LAYOUT");
+    for (auto& t : app.results)
+        if (chan::layout_detail(t.channels, t.channel_mask) !=
+            chan::layout_detail(app.results.front().channels, app.results.front().channel_mask))
+            mixed_layout = true;
+    stat(mixed_layout ? "MIXED" : lay0.c_str(), "LAYOUT");
     ImGui::SameLine(0,22);
     stat(b1,"FILES");           ImGui::SameLine(0,22);
     stat(b2,"AVG LUFS");        ImGui::SameLine(0,22);
@@ -806,7 +811,7 @@ static void empty_state(AppState&) {
 // single mono row to 8 (7.1) with no change of layout. Speaker names and the
 // LFE rule come from channels.hpp, the same table the CLI and JSON read, so
 // the two front-ends cannot describe a layout differently.
-static const char* channel_note(unsigned nch, bool lfe_in) {
+static const char* channel_note(unsigned nch, uint32_t mask, bool lfe_in) {
     if (nch <= 1)
         return "Mono source: no inter-channel comparison, so no width or "
                "correlation metrics. Peak, PSR and RMS are read once.";
@@ -815,7 +820,7 @@ static const char* channel_note(unsigned nch, bool lfe_in) {
                "Peaks are reported per channel.";
     // "LFE scored" is a setting now (Settings -> SCORING), so the note reports
     // what this track was actually measured with rather than stating a rule.
-    if (nch == 8)
+    if (nch == 8 && !chan::use_mask(nch, mask))
         return lfe_in
             ? "DR (PMF) is the mean of ALL channels including the LFE — the "
               "foobar2000 rule, not crete's default. Loudness is still BS.1770 "
@@ -860,7 +865,7 @@ static void channel_matrix(const dr::TrackResult& t) {
 
     ImGui::Dummy(ImVec2(0, 4));
     theme::Kicker("PER-CHANNEL");
-    std::string lay = chan::layout_detail(t.channels);
+    std::string lay = chan::layout_detail(t.channels, t.channel_mask);
     float lw = ImGui::CalcTextSize(lay.c_str()).x;
     ImGui::SameLine(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - lw);
     ImVec4 acc = theme::P().accent;
@@ -885,7 +890,7 @@ static void channel_matrix(const dr::TrackResult& t) {
             ImGui::AlignTextToFramePadding();
             ImGui::PushFont(theme::g_head);
             ImGui::PushStyleColor(ImGuiCol_Text, lab);
-            ImGui::TextUnformatted(chan::label(t.channels, i).c_str());
+            ImGui::TextUnformatted(chan::label(t.channels, i, t.channel_mask).c_str());
             ImGui::PopStyleColor(); ImGui::PopFont();
 
             ImGui::TableSetColumnIndex(1);
@@ -911,7 +916,7 @@ static void channel_matrix(const dr::TrackResult& t) {
     ImGui::PopStyleVar();
 
     ImGui::PushStyleColor(ImGuiCol_Text, theme::P().muted);
-    ImGui::TextWrapped("%s", channel_note(t.channels, lfe_was_scored(t)));
+    ImGui::TextWrapped("%s", channel_note(t.channels, t.channel_mask, lfe_was_scored(t)));
     ImGui::PopStyleColor();
 }
 
@@ -933,7 +938,7 @@ static void detail_panel(AppState& app) {
     // did exactly that on a 7.1 TrueHD rip).
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
     ImGui::TextWrapped("%02d · %s · %s %u-bit / %u Hz · %s",
-        app.selected_track+1, chan::layout_short(t.channels).c_str(), t.codec.c_str(),
+        app.selected_track+1, chan::layout_short(t.channels, t.channel_mask).c_str(), t.codec.c_str(),
         t.bit_depth, t.sample_rate, format_duration(t.duration_secs).c_str());
     ImGui::PopStyleColor();
 
@@ -952,7 +957,7 @@ static void detail_panel(AppState& app) {
                        theme::P().accent);
             ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
             ImGui::TextWrapped("Measured as the %s bed — %s.",
-                               chan::layout_short(t.channels).c_str(), q.c_str());
+                               chan::layout_short(t.channels, t.channel_mask).c_str(), q.c_str());
         }
         ImGui::PopStyleColor();
     }
@@ -996,13 +1001,13 @@ static void detail_panel(AppState& app) {
         // engine does not use.
         ImGui::TextDisabled("Mean of %u scored channels%s",
                             scored_in(t),
-                            !chan::has_lfe(t.channels) ? ""
+                            !chan::has_lfe(t.channels, t.channel_mask) ? ""
                                 : lfe_was_scored(t) ? " · LFE included"
                                                     : " · LFE excluded");
         ImGui::Text("Front L/R  %.1f", t.dr_front_raw);
         if (t.worst_channel >= 0)
             ImGui::TextDisabled("lowest %s  %.1f",
-                                chan::label(t.channels, t.worst_channel).c_str(),
+                                chan::label(t.channels, t.worst_channel, t.channel_mask).c_str(),
                                 t.ch_metrics[t.worst_channel].dr_raw);
     }
     ImGui::EndGroup();
@@ -1022,7 +1027,7 @@ static void detail_panel(AppState& app) {
 
     theme::SectionLabel("LOUDNESS");
     if (t.channels > 2) {
-        std::string lm = chan::loudness_mode(t.channels);
+        std::string lm = chan::loudness_mode(t.channels, t.channel_mask);
         float lmw = ImGui::CalcTextSize(lm.c_str()).x;
         ImGui::SameLine(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - lmw);
         ImVec4 fnt = theme::P().faint; theme::Kicker(lm.c_str(), &fnt);
@@ -1184,7 +1189,7 @@ static void band_results(AppState& app) {
     ImGui::PopStyleVar();
     if (tbl_multi) {
         theme::Rule(2.0f, 4.0f);
-        if (chan::has_lfe(tbl_nch)) {
+        if (chan::has_lfe(tbl_nch, app.results.empty() ? 0u : app.results.front().channel_mask)) {
             theme::Tag(tbl_lfe_in ? "LFE INCLUDED" : "LFE EXCLUDED");
             ImGui::SameLine(0, 10);
         }
@@ -1346,7 +1351,7 @@ static void side_panel(AppState& app) {
         // offers no control for them, so state them: a number is only
         // reproducible if you know which algorithm produced it. LFE scoring IS
         // a control here, so this line follows the checkbox above.
-        ImGui::TextDisabled("DR settings: blocks=%s  mean=%s  lfe=%s  short=%s",
+        ImGui::TextDisabled("DR settings: blocks=%s  mean=%s  lfe=%s  short=%s  channel_mask=use",
             dr::block_set_name(dr::BlockSet::Reference),
             dr::rms_mean_name(dr::RmsMean::Quadratic),
             dr::lfe_scoring_name(app.score_lfe ? dr::LfeScoring::Include

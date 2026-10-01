@@ -667,6 +667,15 @@ inline AudioData decode_with_ffmpeg(const std::vector<std::string>& parts,
     if (ad.channels.empty() || ad.channels[0].empty())
         throw std::runtime_error("FFmpeg: decoded no audio from " + path);
 
+    // The layout the measured frames carried (out_layout follows the first
+    // frame, above). FFmpeg's native order numbers bits 0..17 exactly as
+    // WAVEFORMATEXTENSIBLE does; a layout using any bit past those (wide,
+    // surround-direct, LFE2, top-side) or a custom/unspecified order has no
+    // WAVE mask and reports none, so it is measured by count as before.
+    if (out_layout.order == AV_CHANNEL_ORDER_NATIVE &&
+        (out_layout.u.mask & ~uint64_t(0x3FFFF)) == 0)
+        ad.channel_mask = static_cast<uint32_t>(out_layout.u.mask);
+
     return ad;
 }
 

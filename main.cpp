@@ -83,6 +83,11 @@ static dr::BlockSet g_dr_blocks = dr::BlockSet::Reference;
 // out of the album DR, as MAAT does; Include reproduces <= 0.19.5. See
 // dr::ShortTracks.
 static dr::ShortTracks g_short = dr::ShortTracks::Exclude;
+// Whether a declared speaker mask may describe the layout (see chan::use_mask).
+// use is the default since 0.21.0; ignore takes labels, weights and the LFE
+// from the channel count alone, which reproduces <= 0.20.0.
+static bool g_channel_mask = true;
+static const char* channel_mask_name(bool use) { return use ? "use" : "ignore"; }
 // Which SACD audio area to measure. Auto prefers the 2-channel area:
 // it is the layer crete's DR references are built on, the one comparable
 // with every other release of the album, and on most discs the
@@ -527,7 +532,7 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
             // An immersive carrier is measured as its channel bed -- FFmpeg has
             // no Atmos or DTS:X renderer -- so the layout says which it is.
             const std::string q = audio::layout_qualifier(t.codec_profile);
-            std::string line = chan::layout_detail(t.channels);
+            std::string line = chan::layout_detail(t.channels, t.channel_mask);
             if (!q.empty()) line += "  [bed -- " + q + "]";
             std::printf("  Layout:              %s\n", line.c_str());
         }
@@ -537,8 +542,9 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
         // Speaker names come from the shared layout table so the CLI, the JSON
         // and the GUI cannot drift apart. See channels.hpp.
         const unsigned unch = static_cast<unsigned>(nch);
+        const uint32_t mask = t.channel_mask;
         auto ch_label = [&](size_t c) -> std::string {
-            return chan::label_long(unch, c);
+            return chan::label_long(unch, c, mask);
         };
 
         std::printf("  %-22s", "");
@@ -617,9 +623,9 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
         if (nch > 2 && t.dr_defined) {
             const bool lfe_in = (g_lfe == dr::LfeScoring::Include);
             std::printf("\n  DR (PMF) = mean of the %u scored channel%s%s.\n",
-                        chan::scored_count(unch, lfe_in),
-                        chan::scored_count(unch, lfe_in) == 1 ? "" : "s",
-                        !chan::has_lfe(unch) ? ""
+                        chan::scored_count(unch, lfe_in, mask),
+                        chan::scored_count(unch, lfe_in, mask) == 1 ? "" : "s",
+                        !chan::has_lfe(unch, mask) ? ""
                             : lfe_in ? " — LFE INCLUDED (--dr-lfe include)"
                                      : " — LFE measured, not scored");
             std::printf("  Front L/R DR:        %.2f   (the figure comparable "
@@ -627,7 +633,7 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
             if (t.worst_channel >= 0)
                 std::printf("  Lowest scored:       %.2f   (%s)\n",
                             t.ch_metrics[t.worst_channel].dr_raw,
-                            chan::label_long(unch, t.worst_channel).c_str());
+                            chan::label_long(unch, t.worst_channel, mask).c_str());
         }
     }
 
@@ -650,7 +656,7 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
         const auto& first = tracks[0];
         std::cout << "\nSamplerate:        " << first.sample_rate << " Hz\n";
         std::cout << "Channels:          " << first.channels
-                  << " (" << chan::layout_detail(first.channels) << ")\n";
+                  << " (" << chan::layout_detail(first.channels, first.channel_mask) << ")\n";
         std::cout << "Bits per sample:   " << first.bit_depth << "\n";
         std::cout << "Codec:             " << first.codec << "\n";
         if (!first.codec_profile.empty())
@@ -664,7 +670,7 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
                       << " in container\n";
         if (first.channels > 2)
             std::cout << "Loudness summing:  "
-                      << chan::loudness_mode(first.channels) << "\n";
+                      << chan::loudness_mode(first.channels, first.channel_mask) << "\n";
 
         auto v = dr::album_verdict(tracks);
         std::cout << "Verdict:           " << dr::verdict_string(v) << "\n";
@@ -758,9 +764,14 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         const auto& first = tracks[0];
         j["sample_rate"] = first.sample_rate;
         j["channels"] = first.channels;
-        j["channel_layout"] = chan::layout_short(first.channels);
-        j["scored_channels"] = chan::scored_count(first.channels, g_lfe == dr::LfeScoring::Include);
-        j["loudness_summing"] = chan::loudness_mode(first.channels);
+        j["channel_layout"] = chan::layout_short(first.channels, first.channel_mask);
+        // Only when the mask is what described the layout, so a file the
+        // channel count already describes keeps its pre-0.21.0 JSON.
+        if (const uint32_t m = chan::effective_mask(first.channels, first.channel_mask))
+            j["channel_mask"] = chan::mask_string(m);
+        j["scored_channels"] = chan::scored_count(first.channels, g_lfe == dr::LfeScoring::Include,
+                                                  first.channel_mask);
+        j["loudness_summing"] = chan::loudness_mode(first.channels, first.channel_mask);
         j["bit_depth"] = first.bit_depth;
         j["codec"] = first.codec;
         if (!first.codec_profile.empty()) {
@@ -771,6 +782,7 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         j["dr_blocks"]   = dr::block_set_name(g_dr_blocks);
         j["dr_lfe"]      = dr::lfe_scoring_name(g_lfe);
         j["dr_short"]    = dr::short_tracks_name(g_short);
+        j["channel_mask_mode"] = channel_mask_name(g_channel_mask);
         if (first.audio_stream_count > 1) {
             j["audio_stream_count"] = first.audio_stream_count;
             j["stream_index"]       = first.stream_index;
@@ -848,8 +860,11 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
             jt["mqa"] = jm;
         }
 
-        jt["channel_layout"]  = chan::layout_short(t.channels);
-        jt["scored_channels"] = chan::scored_count(t.channels, g_lfe == dr::LfeScoring::Include);
+        jt["channel_layout"]  = chan::layout_short(t.channels, t.channel_mask);
+        if (const uint32_t m = chan::effective_mask(t.channels, t.channel_mask))
+            jt["channel_mask"] = chan::mask_string(m);
+        jt["scored_channels"] = chan::scored_count(t.channels, g_lfe == dr::LfeScoring::Include,
+                                                   t.channel_mask);
         // Multichannel companions to dr_score_raw. On mono/stereo dr_front_raw
         // equals dr_score_raw and worst_channel is just the lower-DR channel,
         // so consumers can read them unconditionally.
@@ -865,8 +880,8 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
             // label_long keeps the historical "Mono"/"Left"/"Right" spellings
             // for 1- and 2-channel files, so the existing JSON schema is
             // unchanged for every consumer that predates multichannel.
-            jc["label"]  = chan::label_long(static_cast<unsigned>(nch), c);
-            jc["short_label"] = chan::label(static_cast<unsigned>(nch), c);
+            jc["label"]  = chan::label_long(static_cast<unsigned>(nch), c, t.channel_mask);
+            jc["short_label"] = chan::label(static_cast<unsigned>(nch), c, t.channel_mask);
             jc["is_lfe"] = cm.is_lfe;
             jc["scored"] = cm.scored;
 
@@ -921,6 +936,10 @@ void print_usage(const char* argv0) {
               << "  --dr-short <exclude|include>   Tracks under 10 s (default: exclude = no DR,\n"
               << "                                 not in the album DR, as MAAT does). include\n"
               << "                                 reproduces <= 0.19.5. Other metrics unchanged.\n"
+              << "  --channel-mask <use|ignore>    Speaker layout from the file's channel mask\n"
+              << "                                 where it declares one the channel count does\n"
+              << "                                 not imply, e.g. Auro-3D (default: use).\n"
+              << "                                 ignore reproduces <= 0.20.0.\n"
               << "  --sacd-area <auto|stereo|multichannel>  Which area of an SACD .iso to\n"
               << "                                 measure (default: auto = prefer stereo).\n"
               << "      quadratic  — sqrt(mean(rms^2)), averages POWER. The PMF procedure,\n"
@@ -1018,7 +1037,8 @@ void print_version() {
               << "DR settings: blocks=" << dr::block_set_name(g_dr_blocks)
               << " mean=" << dr::rms_mean_name(g_rms_mean)
               << " lfe=" << dr::lfe_scoring_name(g_lfe)
-              << " short=" << dr::short_tracks_name(g_short) << "\n";
+              << " short=" << dr::short_tracks_name(g_short)
+              << " channel_mask=" << channel_mask_name(g_channel_mask) << "\n";
     {   // What the default worker count will be sized against on THIS host.
         // Printed for the same reason the DR axes are: a run is only
         // reproducible if you can see what the machine told crete.
@@ -1147,6 +1167,15 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Error: " << e.what() << "\n";
                 return 1;
             }
+        } else if (arg == "--channel-mask" && i+1 < argc) {
+            const std::string v = argv[++i];
+            if (v == "use" || v == "on" || v == "yes")          g_channel_mask = true;
+            else if (v == "ignore" || v == "off" || v == "no") g_channel_mask = false;
+            else {
+                std::cerr << "Error: unknown --channel-mask value: " << v
+                          << " (expected use|ignore)\n";
+                return 1;
+            }
         } else if (arg == "--dr-lfe" && i+1 < argc) {
             try {
                 g_lfe = dr::lfe_scoring_from_string(argv[++i]);
@@ -1272,6 +1301,7 @@ int main(int argc, char* argv[]) {
         gopt.blocks   = g_dr_blocks;
         gopt.short_tracks = g_short;
         gopt.stream   = g_stream;
+        gopt.channel_mask = g_channel_mask;
 
         std::atomic<size_t> done{0};
         std::mutex io_mtx;
