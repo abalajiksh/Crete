@@ -4,9 +4,9 @@
 //
 // Replaces the former in-tree byte-LUT engine (dsd_lut.hpp, now retired to
 // dsd_lut.hpp.bak). All DSD -> PCM decimation now goes through the vendored,
-// BSD-2-Clause libdsddpcm kernel (third_party/libdsddpcm, release v0.1.0),
-// which is clean-room and shares no code with the LGPL foo_input_sacd oracle.
-// (Vendored release: v0.2.1 — adds DSD512 support over the initial v0.1.0.)
+// BSD-2-Clause libdsddpcm kernel (third_party/libdsddpcm), which is clean-room
+// and shares no code with the LGPL foo_input_sacd oracle. Vendored release:
+// v0.2.2 (v0.2.1 added DSD512, v0.2.2 the output bandwidth control).
 //
 // crête keeps its own container parsing (DSF/DFF) and its per-channel threading:
 // each channel is decoded through an independent channels=1 context, which is
@@ -21,6 +21,10 @@
 //     measurement-grade path (brickwall at Nyquist for 44100 output).
 //   * Filter selection (default / leastsquares / kaiser) applies ONLY at 44100
 //     output (the ranked 88.2k->44.1k final stage). Higher rates: DEFAULT only.
+//   * Bandwidth (default 50 kHz / full / custom Hz >= 20000) adds a linear-phase
+//     low-pass at the end of the chain. It acts only above 48 kHz output and
+//     only when the corner is below the output Nyquist, so the default changes
+//     176.4 and 352.8 kHz output and nothing else.
 //   * DSD1024 and above: NOT supported (input enum tops out at DSD512).
 //
 // Unsupported combinations throw a std::runtime_error explaining the constraint.
@@ -32,6 +36,7 @@
 // ============================================================================
 
 #include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 #include <stdexcept>
 #include <string>
@@ -76,14 +81,58 @@ inline Filter filter_from_string(const std::string& s) {
         "Unknown DSD filter: " + s + " (expected default|firls|kaiser)");
 }
 
+// ── Output bandwidth (dsddpcm_create2's bandwidth_hz; libdsddpcm >= 0.2.2) ───
+// The output rate sets how densely the signal is sampled; the bandwidth sets how
+// much of it is signal. Without a post-filter, 176.4/352.8 kHz output keeps the
+// modulator's shaped ultrasonic noise (at 352.8k everything up to the ~157 kHz
+// stage-1 corner), which inflates RMS, peak and DR. Measured on the DSD corpus
+// against MAAT (2026-10-05): DSD64 at 352.8k read up to 4.8 dB louder in RMS
+// and up to 2.4 dB higher in raw DR (3 integer DR) than with the 50 kHz default.
+//   default  50 kHz corner, Scarlet Book Annex D.1 (DSDDPCM_BW_DEFAULT)
+//   full     no post-filter, the v0.2.1 behaviour (DSDDPCM_BW_FULL)
+//   <Hz>     custom corner, >= 20000
+inline bool is_full_bandwidth(double bw) { return bw < 0.0; }
+
+// "default" | "full" | the corner in Hz, as the flag accepts it.
+inline std::string bandwidth_name(double bw) {
+    if (bw == DSDDPCM_BW_DEFAULT) return "default";
+    if (is_full_bandwidth(bw))    return "full";
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%g", bw);
+    return buf;
+}
+
+// Parse "default" / "full" / a corner in Hz (>= 20000). Throws on anything else.
+inline double bandwidth_from_string(const std::string& s) {
+    if (s == "default") return DSDDPCM_BW_DEFAULT;
+    if (s == "full")    return DSDDPCM_BW_FULL;
+    char* end = nullptr;
+    const double hz = std::strtod(s.c_str(), &end);
+    if (s.empty() || !end || *end || !(hz >= 20000.0) || hz > 1e7)
+        throw std::runtime_error(
+            "Unknown DSD bandwidth: " + s + " (expected default|full|<Hz> >= 20000)");
+    return hz;
+}
+
 // ── Decode options ───────────────────────────────────────────────────────────
 // Defaults are the measurement-grade path: multistage + default filter to
 // 44.1 kHz, which is valid for every supported DSD rate.
 struct Options {
-    Mode   mode     = Mode::Multistage;
-    Filter filter   = Filter::Default;
-    int    out_rate = 44100;   // 44100 | 88200 | 176400 | 352800
+    Mode   mode      = Mode::Multistage;
+    Filter filter    = Filter::Default;
+    int    out_rate  = 44100;                // 44100 | 88200 | 176400 | 352800
+    double bandwidth = DSDDPCM_BW_DEFAULT;   // see bandwidth_from_string
 };
+
+// True when the bandwidth post-filter actually runs for this output rate
+// (libdsddpcm: out_rate > 48000 and the corner below the output Nyquist).
+// 50000 mirrors BW_DEFAULT_HZ in dsddpcm.c, which the public header does not
+// export; re-check it when re-vendoring.
+inline bool bandwidth_applies(const Options& opt) {
+    if (is_full_bandwidth(opt.bandwidth) || opt.out_rate <= 48000) return false;
+    const double fp = opt.bandwidth == DSDDPCM_BW_DEFAULT ? 50000.0 : opt.bandwidth;
+    return fp < opt.out_rate / 2.0;
+}
 
 // ── Enum mapping helpers (throwing; used on the decode path) ─────────────────
 inline dsddpcm_dsd_rate to_dsd_rate(int dsd_rate_hz) {
@@ -153,17 +202,18 @@ inline void validate(int dsd_rate_hz, const Options& opt);
         std::string("dsd: libdsddpcm rejected this configuration (") +
         dsddpcm_strerror(rc) + "): DSD" + std::to_string(dsd_rate_hz / 44100) +
         " -> " + std::to_string(opt.out_rate) + " Hz, " + mode_name(opt.mode) +
-        " chain, " + filter_name(opt.filter) + " filter.\n"
+        " chain, " + filter_name(opt.filter) + " filter, bandwidth " +
+        bandwidth_name(opt.bandwidth) + ".\n"
         "  Note: the direct chain is DSD64->44100 only, and filter selection "
         "(firls|kaiser) applies only at 44100 Hz output.");
 }
 
 inline void validate(int dsd_rate_hz, const Options& opt) {
-    // make_config throws for DSD512 / bad out-rate; create() rejects the rest
-    // (e.g. direct at >44100, non-default filter above 44100).
+    // make_config throws for DSD1024+ / bad out-rate; create2() rejects the rest
+    // (e.g. direct at >44100, non-default filter above 44100, bandwidth < 20 kHz).
     dsddpcm_config cfg = make_config(dsd_rate_hz, /*lsb_first=*/true, opt, 1u);
     dsddpcm_ctx* ctx = nullptr;
-    dsddpcm_status rc = dsddpcm_create(&ctx, &cfg);
+    dsddpcm_status rc = dsddpcm_create2(&ctx, &cfg, opt.bandwidth);
     if (rc != DSDDPCM_OK)
         throw_config_error(rc, dsd_rate_hz, opt);
     dsddpcm_free(ctx);
@@ -191,7 +241,7 @@ inline std::vector<double> decimate_channel(
     dsddpcm_config cfg = make_config(dsd_rate_hz, lsb_first, opt, 1u);
 
     dsddpcm_ctx* ctx = nullptr;
-    dsddpcm_status rc = dsddpcm_create(&ctx, &cfg);
+    dsddpcm_status rc = dsddpcm_create2(&ctx, &cfg, opt.bandwidth);
     if (rc != DSDDPCM_OK)
         throw_config_error(rc, dsd_rate_hz, opt);
 
@@ -238,7 +288,7 @@ inline std::string describe_chain(const Options& opt, int dsd_rate_hz) {
     try {
         dsddpcm_config cfg = make_config(dsd_rate_hz, /*lsb_first=*/true, opt, 1u);
         dsddpcm_ctx* ctx = nullptr;
-        if (dsddpcm_create(&ctx, &cfg) != DSDDPCM_OK)
+        if (dsddpcm_create2(&ctx, &cfg, opt.bandwidth) != DSDDPCM_OK)
             return "unsupported";
         char buf[96];
         std::snprintf(buf, sizeof buf, "%s, /%u, %u taps, gd %.1f smp",

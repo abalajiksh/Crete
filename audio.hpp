@@ -157,6 +157,17 @@ inline std::string get_extension(const std::string& path) {
     return to_lower(path.substr(dot));
 }
 
+// macOS AppleDouble sidecar ("._<name>"): the metadata file a Mac writes next
+// to every file on a volume without native support for it (exFAT/FAT USB
+// sticks, SMB shares). It is never audio, even when its name ends in .dsf or
+// .flac, so folder scans skip it -- otherwise every one reports as a damaged
+// track and the run exits 2. A file named explicitly is still attempted.
+inline bool is_appledouble(const std::string& path) {
+    const auto slash = path.find_last_of("/\\");
+    const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+    return name.size() > 2 && name[0] == '.' && name[1] == '_';
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // WAV / RF64 / BW64 / Wave64 Decoder
 // ════════════════════════════════════════════════════════════════════════════

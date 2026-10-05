@@ -2,7 +2,7 @@
 
 Zero-dependency C++17 dynamic range meter. The name is French for *peak* / *crest* — the origin of the audio term *crest factor*.
 
-Measures **TT Dynamic Range** (Pleasurize Music Foundation algorithm), **EBU R128 integrated loudness**, **true peak** (4× polyphase FIR), **PLR**, **PSR**, **LRA**, **crest factor**, and per-channel variants for lossless audio files. PCM output is compatible with [dr.loudness-war.info](http://dr.loudness-war.info/) submission format; DSD is decimated by the vendored, BSD-2-Clause **[libdsddpcm](https://codeberg.org/abksh/libdsddpcm)** kernel — a clean-room linear-phase, unity-DC decoder — with selectable **chain** (Direct / Multistage), **filter**, and **output rate**.
+Measures **TT Dynamic Range** (Pleasurize Music Foundation algorithm), **EBU R128 integrated loudness**, **true peak** (4× polyphase FIR), **PLR**, **PSR**, **LRA**, **crest factor**, and per-channel variants for lossless audio files. PCM output is compatible with [dr.loudness-war.info](http://dr.loudness-war.info/) submission format; DSD is decimated by the vendored, BSD-2-Clause **[libdsddpcm](https://codeberg.org/abksh/libdsddpcm)** kernel — a clean-room linear-phase, unity-DC decoder — with selectable **chain** (Direct / Multistage), **filter**, **output rate** and **output bandwidth**.
 
 crête also **detects MQA-encoded files** and reports them unconditionally: if you are measuring dynamic range, you are entitled to know the source is lossy MQA rather than lossless. Detection is deterministic — it reconstructs the buried MQA bitstream (XOR of the stereo low bits) and verifies the `datasync` packet, then reports the authored sample rate and the green/Studio authentication level. It never asserts MQA from statistics alone, so it does not false-positive on noisy-but-lossless masters (e.g. analog tape hiss). No open MQA decoder exists, so DR is measured on the delivered PCM stream; the warning makes clear the encoded content above the base band is not reconstructed. See *MQA detection* below.
 
@@ -203,6 +203,7 @@ crete --dsd-mode multistage /path/to/dsd/           # default chain (measurement
 crete --dsd-mode direct     /path/to/dsd/           # DSD64 -> 44.1 kHz only
 crete --dsd-filter kaiser   /path/to/dsd/           # final-stage filter (44.1 kHz out only)
 crete --dsd-out-rate 352800 /path/to/dsd/           # 44100 (default) |88200|176400|352800
+crete --dsd-out-rate 352800 --dsd-bandwidth full /path/to/dsd/   # no 50 kHz band limit (<= 0.21 numbers)
 
 crete --dr-mean arithmetic  /path/to/album/         # legacy <=0.12.1 DR averaging (A/B only)
 crete --dr-blocks legacy    /path/to/album/         # pre-0.14.0 3 s block set (A/B only)
@@ -250,7 +251,7 @@ ten times on lossy, where a 7 MB AC-3 clip decodes to ~600 MB.
 only scheduling; the JSON `tracks` array is byte-identical across job counts,
 and results stay in album order regardless.
 
-`--dsd-mode` (chain), `--dsd-filter` (final-stage filter), and `--dsd-out-rate` select the DSD→PCM decode; none affect PCM formats. `crete --version` prints the resolved chain, decimation, tap count, and group delay for each DSD rate at the current settings. See *DSD decimation* below for the support matrix.
+`--dsd-mode` (chain), `--dsd-filter` (final-stage filter), `--dsd-out-rate` and `--dsd-bandwidth` select the DSD→PCM decode; none affect PCM formats. `crete --version` prints the resolved chain, decimation, tap count, and group delay for each DSD rate at the current settings. See *DSD decimation* below for the support matrix.
 
 `--dr-mean` selects how the loudest 20 % of blocks are averaged when computing DR: `quadratic` (default, the PMF procedure) or `arithmetic` (what crête shipped up to 0.12.1). It applies to every format, not just DSD. See *TT Dynamic Range* below.
 
@@ -281,6 +282,8 @@ Since 0.11.0 results stay in the window only by default — writing a log file i
 | an **SACD `.iso`** | every track from the disc TOC; an **SACD IMAGE** strip appears with an `Auto / Stereo / Multichannel` area selector |
 
 Tracks list in **album order**: a folder is sorted numerically rather than lexicographically, so `2 - Track` precedes `10 - Track` (plain string ordering put track 10 third, which made albums with unpadded numbering look randomly ordered). Zero-padded numbering is unaffected. In the GUI the TRACK column is the default sort and ascending restores exactly the order the analysis produced — the TOC order for a cue sheet or an SACD image. Sorting by any other column changes only the view, never the underlying order or the selected track.
+
+A folder scan skips macOS **AppleDouble** sidecars (`._<name>`), the metadata files a Mac writes next to every file on an exFAT/FAT stick or an SMB share. They are never audio, even when named `._01 Track.dsf`; before this they were each reported as a damaged track and the run exited 2. A sidecar named explicitly on the command line is still attempted.
 
 A **multi-stream container** (a Blu-ray `.mkv` carrying several mixes of one album) raises an **AUDIO STREAM** picker listing every stream with its codec, profile, channel count and sample rate, marking the one FFmpeg would choose unaided and flagging any Atmos/DTS:X stream as *bed only*. This is the GUI's equivalent of `--stream N`, shown *before* the run rather than reported after it. It appears for a single selected file; when a whole folder is analysed, crête's "measured stream N of M" warning still lands in the error log.
 
@@ -422,7 +425,7 @@ SACD rips circulate overwhelmingly as `.iso`, so crête reads them directly
 rather than requiring an external extraction to `.dsf`/`.dff` first. The disc's
 own TOC supplies the track list, and each track is decoded from its own sector
 range through the **same libdsddpcm chain** every `.dsf` and `.dff` goes
-through — so `--dsd-mode`, `--dsd-filter` and `--dsd-out-rate` all apply, and
+through — so `--dsd-mode`, `--dsd-filter`, `--dsd-out-rate` and `--dsd-bandwidth` all apply, and
 crête on an ISO must agree with crête on an extracted `.dsf` of the same disc.
 That is a crête-vs-crête gate needing no external oracle, and it is how this
 reader was validated: on the 2018 DSOTM SACD every one of the 10 track
@@ -779,11 +782,11 @@ Since 0.11.0, Max Short-Term, LRA, and Min PSR share one short-term block grid (
 
 ## DSD decimation
 
-DSD bitstreams are decimated to PCM by **[libdsddpcm](https://codeberg.org/abksh/libdsddpcm) v0.2.1**, vendored under `third_party/libdsddpcm/` and statically linked. It is a clean-room, BSD-2-Clause kernel: linear-phase FIR only (constant group delay), **unity DC gain** (the +6 dB SACD makeup gain is *not* applied). crête keeps its own DSF/DFF container parsing and its one-thread-per-channel decode.
+DSD bitstreams are decimated to PCM by **[libdsddpcm](https://codeberg.org/abksh/libdsddpcm) v0.2.2**, vendored under `third_party/libdsddpcm/` and statically linked. It is a clean-room, BSD-2-Clause kernel: linear-phase FIR only (constant group delay), **unity DC gain** (the +6 dB SACD makeup gain is *not* applied). crête keeps its own DSF/DFF container parsing and its one-thread-per-channel decode.
 
 > **This replaces the former `dsd_lut.hpp`** (LGPL, transcribed from foobar's `foo_input_sacd`). DSD numbers **change** versus crête ≤ 0.8.1 — different clean-room filters and a different default output rate — so the DSD reference baselines were regenerated against MAAT DROffline (2026-07; see *DSD decimation → Validation*).
 
-### Three axes: chain, filter, output rate
+### Four axes: chain, filter, output rate, bandwidth
 
 - **`--dsd-out-rate`** — `44100` (default) | `88200` | `176400` | `352800`.
 - **`--dsd-mode`** (chain):
@@ -796,12 +799,15 @@ DSD bitstreams are decimated to PCM by **[libdsddpcm](https://codeberg.org/abksh
   | `default` | equiripple (Parks–McClellan) | 383 | golden default, ~154 dB stopband |
   | `firls` | least-squares | 767 | cross-method check |
   | `kaiser` | Kaiser window (α≈150) | 4095 | reference/maximum decode, higher latency |
+- **`--dsd-bandwidth`** — `default` | `full` | a corner in Hz (≥ 20000). The output rate sets how densely the signal is sampled; the bandwidth sets how much of it is signal. Above 48 kHz output the halving cascade alone keeps the modulator's shaped ultrasonic noise (at 352.8 kHz everything up to the ~157 kHz stage-1 corner), and that noise inflates RMS, peak and DR. **`default`** appends a linear-phase low-pass with a **50 kHz** corner (Scarlet Book Annex D.1 measurement band; flat to the corner, ≥ 153 dB from 1.4× the corner, unity DC, its delay included in the reported group delay). **`full`** turns it off — the numbers crête ≤ 0.21 reported. It acts only at **176400 and 352800** output: at 44.1 kHz the final stage already brickwalls, and at 88.2 kHz the corner sits above Nyquist.
+
+  Measured on the DSD corpus (MAAT, 2026-10): with `full`, DSD64 at 352.8 kHz read up to 4.8 dB louder in RMS and up to 3 DR higher, and one album's sample peaks reached +2.0 dBFS. With `default`, DSD64 RMS and DR at 88.2 / 176.4 / 352.8 kHz agree within 0.07. DSD256/512 barely change (their noise sits 60–80 dB down).
 
 ### Support matrix
 
 | | 44100 | 88200 / 176400 / 352800 |
 |--|-------|--------------------------|
-| **multistage** | DSD64/128/256/512, any filter | DSD64/128/256/512, `default` filter only |
+| **multistage** | DSD64/128/256/512, any filter | DSD64/128/256/512, `default` filter only; `--dsd-bandwidth` acts at 176400/352800 |
 | **direct** | DSD64 only, `default` only | unsupported |
 
 **DSD1024 and above are not supported** (the library's input enum tops out at DSD512); such files are rejected with a clear error. Unsupported chain/filter/rate combinations fail fast with an explanatory message. `crete --version` prints the resolved chain, decimation, tap count, and group delay for the current settings.
@@ -810,6 +816,7 @@ DSD bitstreams are decimated to PCM by **[libdsddpcm](https://codeberg.org/abksh
 
 - **Round-trip:** crête on a `.dsf` and crête on the WAV `dsd2wav` exports from it agree exactly (both go through the same libdsddpcm decode).
 - libdsddpcm ships its own clean-room validation (see its repo). crête's DSD reference suites were **re-baselined against MAAT DROffline (2026-07)** on this engine: MAAT measures the 32-bit-float WAVs `dsd2wav` exports at the pinned decode config, at both 44.1 kHz and 352.8 kHz output. foobar2000 is fully retired as a reference oracle.
+- **libdsddpcm 0.2.2 re-record (2026-10):** the 352.8 kHz references were recorded again with the 50 kHz default; the July rows are kept as the `full` references. Re-recording 44.1 kHz on the same pipeline reproduced all 1869 July values exactly.
 
 ---
 
@@ -911,6 +918,8 @@ DSD DR is output-rate dependent: at 352.8 kHz the retained ultrasonic noise-shap
 
 **The shipping default, `--dsd-out-rate 44100`, is the rate crête's parity claims apply to.** At that rate the **continuous** per-track DR comparison flags nothing on any of the 8 DSD albums (Weekly #77: the only `DR (PMF) raw` flags in the whole run are 3 tracks of `Thriller_DSD64@352800`), and album DR matches on 7 of 8. The exception is not rate-related: `BoneyM_10k_DSD128@44100` misses a `.5` boundary by **0.020 dB**, which no aggregation rule can fix and which is documented as an accuracy question rather than a rounding one. At 352.8 kHz, by contrast, `Thriller_DSD64` mismatches at album level *and* on 4 of 9 tracks with a maximum integer delta of 2. **Results at 88.2 / 176.4 / 352.8 kHz are offered for analysis, not parity** — treat them as a different measurement, not a more precise one.
 
+> **2026-10, libdsddpcm 0.2.2:** the band limit now lives in the decoder (`--dsd-bandwidth`, 50 kHz by default), so `dsd2wav` exports carry it and MAAT measures the same band-limited PCM. That removes the objection below — the filtered number now has a reference — and most of the rate dependence: Thriller's 352.8 kHz peaks are all back under full scale and DSD64 DR at 88.2 / 176.4 / 352.8 kHz agrees within 0.07. A 50 kHz band still keeps 20–50 kHz content that the 44.1 kHz decode removes, so **44.1 kHz remains the parity-guaranteed rate.** The paragraph below describes the 0.2.1 behaviour, which `--dsd-bandwidth full` reproduces.
+
 The cause is quantified rather than assumed. Band-limiting a 352.8 kHz decode to 20 Hz–20 kHz removes roughly **78 %** of the inflation (3.05 dB of a 3.92 dB gap on one measured track) and returns the affected tracks to their 44.1 kHz integer DR — which is simply a worse-quality version of what decimating to 44.1 kHz already does, with libdsddpcm's 641-tap brickwall. Unfiltered, the ultrasonic content alone drives the meter past full scale (a sample peak of **+1.7 dBFS** on one track). There is no `--bandpass` flag for this reason: it would produce a third number with no reference implementation to validate it against.
 
 ### Reference-data hygiene — RESOLVED (2026-07-23)
@@ -968,7 +977,7 @@ crete_theme.hpp           GUI Modernist theme: palette (light/dark), fonts, widg
 analysis.hpp              TT DR, EBU R128, true peak, PLR/PSR/LRA, crest factor
 audio.hpp                 WAV/RF64/BW64/Wave64, AIFF/AIFF-C, FLAC, DSF, DFF decoders + FFmpeg routing
 audio_ffmpeg.hpp          FFmpeg decode backend (guarded by CRETE_HAS_FFMPEG)
-dsd_decode.hpp            DSD decode front-end over libdsddpcm (chain/filter/rate)
+dsd_decode.hpp            DSD decode front-end over libdsddpcm (chain/filter/rate/bandwidth)
 dsd_lut.hpp.bak           Retired LGPL byte-LUT engine (dormant, not built)
 dsd2wav.cpp               DSD -> WAV exporter (make dsd2wav); mirrors --dsd-* flags
 cue.hpp                   Zero-dependency cue sheet parser
@@ -994,6 +1003,6 @@ third_party/              Dear ImGui, nlohmann/json, compact FFmpeg (fetched on 
 
 MIT License — Ashwin Balaji 2026.
 
-**DSD decode** is provided by the vendored **libdsddpcm** (`third_party/libdsddpcm/`, release v0.2.1), which is **BSD-2-Clause** — a clean-room implementation that shares no code with the LGPL `foo_input_sacd` transcription it replaced. Its license text ships at `third_party/libdsddpcm/LICENSE`. This replaces the former `dsd_lut.hpp` (LGPL-2.1, transcribed from foobar's `libdsdpcm`), which is retired to `dsd_lut.hpp.bak` and is no longer built. crête's licensing is therefore now cleanly **MIT + BSD-2-Clause**.
+**DSD decode** is provided by the vendored **libdsddpcm** (`third_party/libdsddpcm/`, release v0.2.2), which is **BSD-2-Clause** — a clean-room implementation that shares no code with the LGPL `foo_input_sacd` transcription it replaced. Its license text ships at `third_party/libdsddpcm/LICENSE`. This replaces the former `dsd_lut.hpp` (LGPL-2.1, transcribed from foobar's `libdsdpcm`), which is retired to `dsd_lut.hpp.bak` and is no longer built. crête's licensing is therefore now cleanly **MIT + BSD-2-Clause**.
 
 `crete-ffmpeg` builds statically link a compact FFmpeg configured LGPL-only (decode-only, no GPL or nonfree components); FFmpeg is used under LGPL 2.1+.

@@ -17,6 +17,7 @@
 // Usage:
 //   dsd2wav [options] <file_or_folder...>
 //     --dsd-mode <direct|multistage>   decimation chain (default: multistage)
+//     --dsd-filter / --dsd-out-rate / --dsd-bandwidth   as crete's flags
 //     -o, --outdir <dir>               output directory (default: ./pcm_out)
 //     --bits <f32|i24>                 sample format (default: f32)
 //     -q, --quiet
@@ -144,6 +145,9 @@ int main(int argc, char** argv) {
                 return 1;
             }
             opt.out_rate = r;
+        } else if (a == "--dsd-bandwidth" && i + 1 < argc) {
+            try { opt.bandwidth = dsd::bandwidth_from_string(argv[++i]); }
+            catch (const std::exception& e) { std::cerr << "Error: " << e.what() << "\n"; return 1; }
         } else if ((a == "-o" || a == "--outdir") && i + 1 < argc) {
             outdir = argv[++i];
         } else if (a == "--bits" && i + 1 < argc) {
@@ -160,6 +164,8 @@ int main(int argc, char** argv) {
               "  --dsd-mode <direct|multistage>              chain (default: multistage)\n"
               "  --dsd-filter <default|firls|kaiser>         final-stage filter (default: default)\n"
               "  --dsd-out-rate <44100|88200|176400|352800>  output rate (default: 44100)\n"
+              "  --dsd-bandwidth <default|full|Hz>           band limit (default: 50 kHz;\n"
+              "                                              acts at 176400/352800 only)\n"
               "  -o, --outdir <dir>                          output dir (default: pcm_out)\n"
               "  --bits <f32|i24>                            format (default: f32)\n"
               "  -q, --quiet\n\n"
@@ -178,7 +184,9 @@ int main(int argc, char** argv) {
         fs::path p(in);
         if (fs::is_directory(p)) {
             for (const auto& e : fs::directory_iterator(p))
-                if (e.is_regular_file() && is_dsd(e.path())) files.push_back(e.path());
+                if (e.is_regular_file() && is_dsd(e.path())
+                    && !audio::is_appledouble(e.path().string()))
+                    files.push_back(e.path());
         } else if (is_dsd(p)) {
             files.push_back(p);
         } else {
@@ -194,6 +202,7 @@ int main(int argc, char** argv) {
         std::cerr << "dsd2wav  mode=" << dsd::mode_name(opt.mode)
                   << "  filter=" << dsd::filter_name(opt.filter)
                   << "  out=" << opt.out_rate << "Hz"
+                  << "  bw=" << dsd::bandwidth_name(opt.bandwidth)
                   << "  bits=" << (bits == Bits::F32 ? "f32" : "i24")
                   << "  files=" << files.size() << "  ->  " << outdir << "\n";
 

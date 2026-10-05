@@ -791,6 +791,14 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
             j["dsd_mode"]     = dsd::mode_name(g_dsd_opt.mode);
             j["dsd_filter"]   = dsd::filter_name(g_dsd_opt.filter);
             j["dsd_out_rate"] = g_dsd_opt.out_rate;
+            // "default" | "full" | the corner in Hz, as passed; *_applied says
+            // whether the post-filter actually ran at this output rate.
+            if (dsd::is_full_bandwidth(g_dsd_opt.bandwidth) ||
+                g_dsd_opt.bandwidth == DSDDPCM_BW_DEFAULT)
+                j["dsd_bandwidth"] = dsd::bandwidth_name(g_dsd_opt.bandwidth);
+            else
+                j["dsd_bandwidth"] = g_dsd_opt.bandwidth;
+            j["dsd_bandwidth_applied"] = dsd::bandwidth_applies(g_dsd_opt);
         }
     }
 
@@ -961,6 +969,12 @@ void print_usage(const char* argv0) {
               << "  --dsd-filter <default|firls|kaiser>  Final-stage filter (default: default)\n"
               << "                   Honoured only at --dsd-out-rate 44100; ignored otherwise.\n"
               << "  --dsd-out-rate <44100|88200|176400|352800>  DSD output rate (default: 44100)\n"
+              << "  --dsd-bandwidth <default|full|Hz>  DSD output band limit (default: default)\n"
+              << "      default    — 50 kHz linear-phase low-pass (Scarlet Book Annex D.1),\n"
+              << "                   so ultrasonic modulator noise does not inflate RMS,\n"
+              << "                   peak or DR. Acts at 176400/352800 only.\n"
+              << "      full       — no band limit: crete <= 0.21 / libdsddpcm 0.2.1 numbers.\n"
+              << "      <Hz>       — custom corner, >= 20000; acts when below the output Nyquist.\n"
               << "  --stream <N>                   Audio stream index to decode in a multi-\n"
               << "                                 stream container (.mkv/.mp4 disc rips).\n"
               << "                                 Index as `ffprobe -show_streams` prints it.\n"
@@ -1050,7 +1064,11 @@ void print_version() {
     }
     std::cout
               << "DSD chains to " << g_dsd_opt.out_rate << " Hz (filter: "
-              << dsd::filter_name(g_dsd_opt.filter) << "):\n";
+              << dsd::filter_name(g_dsd_opt.filter) << ", bandwidth: "
+              << dsd::bandwidth_name(g_dsd_opt.bandwidth)
+              << (dsd::is_full_bandwidth(g_dsd_opt.bandwidth) || dsd::bandwidth_applies(g_dsd_opt)
+                      ? "" : " [no effect at this rate]")
+              << "):\n";
     const int rates[4]     = { 2822400, 5644800, 11289600, 22579200 };
     const char* labels[4]  = { "DSD64 ", "DSD128", "DSD256", "DSD512" };
     for (int i = 0; i < 4; ++i) {
@@ -1218,6 +1236,13 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             g_dsd_opt.out_rate = r;
+        } else if (arg == "--dsd-bandwidth" && i+1 < argc) {
+            try {
+                g_dsd_opt.bandwidth = dsd::bandwidth_from_string(argv[++i]);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << "\n";
+                return 1;
+            }
         } else if (arg == "--stream" && i+1 < argc) {
             char* end = nullptr;
             long v = std::strtol(argv[++i], &end, 10);
