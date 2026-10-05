@@ -28,7 +28,7 @@ extern "C" {
 /* ---- versioning ------------------------------------------------------- */
 #define DSDDPCM_VERSION_MAJOR 0
 #define DSDDPCM_VERSION_MINOR 2
-#define DSDDPCM_VERSION_PATCH 1
+#define DSDDPCM_VERSION_PATCH 2
 /* Runtime SONAME major; must equal DSDDPCM_VERSION_MAJOR at load. */
 int dsddpcm_abi_version(void);
 const char *dsddpcm_version_string(void);
@@ -125,7 +125,27 @@ dsddpcm_status dsddpcm_config_default(dsddpcm_config *cfg,
 /* ---- opaque streaming context ---------------------------------------- */
 typedef struct dsddpcm_ctx dsddpcm_ctx;
 
+/* dsddpcm_create == dsddpcm_create2(out, cfg, DSDDPCM_BW_DEFAULT). */
 dsddpcm_status dsddpcm_create(dsddpcm_ctx **out, const dsddpcm_config *cfg);
+
+/* ---- bandwidth (output low-pass corner), independent of out_rate ------ *
+ * The output rate sets how densely the signal is sampled; the bandwidth sets
+ * how much of the spectrum is signal. Above 48 kHz output, the halving cascade
+ * alone would pass the DSD modulator's shaped ultrasonic noise (at 352.8k,
+ * everything up to the ~157 kHz stage-1 corner), so a linear-phase low-pass
+ * (flat to the corner, >= 150 dB from 1.4x the corner, unity DC) is added at
+ * the end of the chain. Its delay is included in dsddpcm_group_delay().
+ *   DSDDPCM_BW_DEFAULT : 50 kHz (Scarlet Book Annex D.1 measurement band).
+ *                        May become per-DSD-rate later without an API change.
+ *   DSDDPCM_BW_FULL    : no post-filter — the 0.2 behaviour, for archival /
+ *                        DXD-style processing where the caller filters later.
+ *   any value >= 20000 : custom corner in Hz. Below 20 kHz -> DSDDPCM_ERR_ARG.
+ * No effect at 44.1/48 kHz output, or when the corner is at or above the
+ * output Nyquist. */
+#define DSDDPCM_BW_DEFAULT 0.0
+#define DSDDPCM_BW_FULL    (-1.0)
+dsddpcm_status dsddpcm_create2(dsddpcm_ctx **out, const dsddpcm_config *cfg,
+                               double bandwidth_hz);
 void           dsddpcm_free(dsddpcm_ctx *ctx);
 
 /* Clear filter state / history; keep configuration. Call between tracks. */

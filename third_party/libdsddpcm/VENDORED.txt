@@ -1,12 +1,19 @@
 Vendored from https://codeberg.org/abksh/libdsddpcm
-Release: v0.2.1
-Commit:  6889bc62e56c58657465c28e7bdab1540848010a
+Release: v0.2.2
+Commit:  9492cc48848671c9a148b164863845eac05b47ad
 License: BSD-2-Clause (see LICENSE)
 
 Contents: include/dsddpcm.h, src/dsddpcm.c, src/dsddpcm_tables.h
 Built directly into crête (compiled as a C object, statically linked).
 Do not edit in place — update by re-vendoring the upstream tag.
 
-Changes vs v0.1.0: adds DSD512 input support (multistage chain, fir1_64m
-stage-1). Public API/ABI otherwise unchanged (DSDDPCM_DSD512 appended to
-the dsddpcm_dsd_rate enum).
+Changes vs v0.2.1: adds bandwidth control. dsddpcm_create2(out, cfg,
+bandwidth_hz) appends a linear-phase low-pass at the end of the chain:
+DSDDPCM_BW_DEFAULT (0.0) = 50 kHz corner, DSDDPCM_BW_FULL (-1.0) = no
+post-filter (the v0.2.1 behaviour), or a custom corner >= 20000 Hz.
+dsddpcm_create() now means create2(BW_DEFAULT), so 176.4 and 352.8 kHz
+output change by default; 44.1 and 88.2 kHz are unaffected. Tables are
+unchanged; the ABI is extended, not broken.
+
+(The v0.2.1 entry recorded commit 6889bc6; the v0.2.1 tag is 404e353. The
+vendored files were byte-identical to the tag.)

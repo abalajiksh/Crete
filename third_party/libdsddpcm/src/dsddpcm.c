@@ -5,7 +5,8 @@
  *   of 8 FIR coefficients a 256-entry table holds the dot product against all
  *   possible bytes of +/-1 samples; one output sample costs ceil(N/8) lookups
  *   and int64 adds. Platform-invariant by construction.
- *   Stage 2 (PCM domain): double-precision halfband cascade to the target rate.
+ *   Stage 2 (PCM domain): double-precision halfband cascade to the target rate,
+ *   then (above 48 kHz output) an optional bandwidth low-pass at the base rate.
  *
  * Golden (unity-DC) contract: integer accumulation is scaled once, in double, by
  * exactly 1/sum(coeffs) per stage, so every stage — and therefore the cascade —
@@ -28,7 +29,8 @@
 #include <string.h>
 
 #define S1_COMPACT_SLACK 4096   /* stage-1 byte buffer compaction slack */
-#define MAX_HB 3
+#define MAX_HB 4         /* up to 3 halvings + the bandwidth post-filter */
+#define PI 3.14159265358979323846
 
 /* ---- small helpers ---------------------------------------------------- */
 
@@ -47,7 +49,7 @@ int dsddpcm_abi_version(void) { return DSDDPCM_VERSION_MAJOR; }
 
 const char *dsddpcm_version_string(void)
 {
-    return "0.2.1";
+    return "0.2.2";
 }
 
 static uint8_t bit_reverse(uint8_t b)
@@ -64,6 +66,7 @@ typedef struct {
     const int32_t *q;
     int n;
     double inv_sum;
+    int dec;           /* 2 = halving, 1 = bandwidth post-filter (no decimation) */
 } hb_spec;
 
 typedef struct {
@@ -73,8 +76,8 @@ typedef struct {
 } hb_state;
 
 /* Push one sample; emit conv output y[j] = sum h[k] x[j-k] at j = count-1 for
- * j >= n-1, decimated by 2 (j - (n-1) even) — identical alignment to
- * numpy full-convolution [n-1::2]. Returns 1 if *out was written. */
+ * j >= n-1, decimated by dec (j - (n-1) a multiple of dec) — identical
+ * alignment to numpy full-convolution [n-1::dec]. Returns 1 if *out was written. */
 static int hb_push(const hb_spec *sp, hb_state *st, double x, double *out)
 {
     int n = sp->n, k, i;
@@ -82,7 +85,7 @@ static int hb_push(const hb_spec *sp, hb_state *st, double x, double *out)
     st->dl[st->w] = x;
     st->w = (st->w + 1) % n;
     st->count++;
-    if (st->count < n || ((st->count - n) & 1))
+    if (st->count < n || (st->count - n) % sp->dec)
         return 0;
     /* newest sample is at slot w-1, weighted by q[0]; walk backwards */
     i = st->w - 1;
@@ -135,6 +138,68 @@ static int rs_push(const rs_spec *sp, rs_state *st, double x, double *out)
     st->m++;
     *out = acc * sp->inv;
     return 1;
+}
+
+/* ---- bandwidth post-filter, designed at create time ------------------- *
+ * Kaiser-windowed sinc low-pass: flat to the corner fp, >= 150 dB from 1.4 fp
+ * (design target 160 dB; >= 153 dB survives the x2^30 rounding). It runs as a
+ * non-decimating hb stage, so it inherits golden 1/sum scaling and streaming.
+ * libm-free on purpose: only IEEE + - * / (no contraction under strict C99), so
+ * the rounded integers are identical on every platform and tools/lut_verify.py
+ * reproduces them exactly. */
+#define BW_DEFAULT_HZ 50000.0   /* Scarlet Book Annex D.1 measurement band */
+#define BW_MIN_HZ     20000.0
+#define BW_ATTEN_DB   160.0
+
+static double sin_pi(double x)          /* sin(pi x) */
+{
+    double t, term, s;
+    int k;
+    x -= 2.0 * (double)(int64_t)(x / 2.0);          /* |x| < 2 */
+    if (x > 1.0) x -= 2.0; else if (x < -1.0) x += 2.0;
+    if (x > 0.5) x = 1.0 - x; else if (x < -0.5) x = -1.0 - x;
+    t = PI * x;
+    term = s = t;
+    for (k = 1; k < 20; k++) {
+        term *= -t * t / ((2.0 * k) * (2.0 * k + 1.0));
+        s += term;
+    }
+    return s;
+}
+
+static double i0_of_sq(double z2)       /* I0(sqrt(z2)) */
+{
+    double term = 1.0, s = 1.0;
+    int k;
+    for (k = 1; k < 500 && term > 1e-17 * s; k++) {
+        term *= z2 / (4.0 * k * k);
+        s += term;
+    }
+    return s;
+}
+
+static dsddpcm_status bw_design(int32_t **q_out, int *n_out, int64_t *sum_out,
+                                double fp, double fs)
+{
+    double fst = 1.4 * fp, dw = 2.0 * PI * (fst - fp) / fs;
+    double beta = 0.1102 * (BW_ATTEN_DB - 8.7), a = (fp + fst) / fs, i0b, m;
+    int n = ((int)((BW_ATTEN_DB - 7.95) / (2.285 * dw)) + 2) | 1, k;
+    int32_t *q = malloc((size_t)n * sizeof(*q));
+    int64_t sum = 0;
+    if (!q)
+        return DSDDPCM_ERR_NOMEM;
+    m = (double)(n - 1) / 2.0;
+    i0b = i0_of_sq(beta * beta);
+    for (k = 0; k < n; k++) {
+        double j = (double)k - m, r = j / m;
+        double h = (j != 0.0 ? sin_pi(a * j) / (PI * j) : a)
+                 * i0_of_sq(beta * beta * (1.0 - r * r)) / i0b;
+        double v = h * 1073741824.0;                  /* x2^30 */
+        q[k] = (int32_t)(v >= 0.0 ? v + 0.5 : v - 0.5);
+        sum += q[k];
+    }
+    *q_out = q; *n_out = n; *sum_out = sum;
+    return DSDDPCM_OK;
 }
 
 /* ---- stage 1: integer byte-LUT decimator ------------------------------ */
@@ -205,6 +270,8 @@ static int s1_push(const s1_spec *sp, s1_state *st, uint8_t byte, double *out)
 
 struct dsddpcm_ctx {
     dsddpcm_config cfg;
+    double bandwidth;       /* as passed to create2 */
+    int32_t *bwq;           /* owned post-filter coefficients, or NULL */
     s1_spec s1;
     hb_spec hb[MAX_HB];
     int n_hb;
@@ -226,17 +293,17 @@ struct dsddpcm_ctx {
  * response in the 66-74 kHz fold band (docs/COMPARISON.md). fir2_2 stays in
  * the tables for provenance. */
 static const hb_spec HB_MID = { dsddpcm_hb43_150, DSDDPCM_HB43_150_N,
-                                1.0 / (double)DSDDPCM_HB43_150_SUM };
+                                1.0 / (double)DSDDPCM_HB43_150_SUM, 2 };
 /* Final 88.2k -> 44.1k stage: the Phase-3 sweep winners (see dsddpcm_tables.h).
  * fir3_2 (the incumbent-recipe halfband) remains in the tables for provenance but
  * is superseded here by the ranked winners. */
 static const hb_spec HB_EQ383 = { dsddpcm_eq383_w30, DSDDPCM_EQ383_W30_N,
-                                  1.0 / (double)DSDDPCM_EQ383_W30_SUM };
+                                  1.0 / (double)DSDDPCM_EQ383_W30_SUM, 2 };
 static const hb_spec HB_FIRLS767 = { dsddpcm_firls767_w10, DSDDPCM_FIRLS767_W10_N,
-                                     1.0 / (double)DSDDPCM_FIRLS767_W10_SUM };
+                                     1.0 / (double)DSDDPCM_FIRLS767_W10_SUM, 2 };
 static const hb_spec HB_KAISER4095 = { dsddpcm_kaiser4095_a150,
                                        DSDDPCM_KAISER4095_A150_N,
-                                       1.0 / (double)DSDDPCM_KAISER4095_A150_SUM };
+                                       1.0 / (double)DSDDPCM_KAISER4095_A150_SUM, 2 };
 
 /* Map the public filter enum to the final-stage spec; NULL = invalid choice. */
 static const hb_spec *final_stage_spec(dsddpcm_filter f)
@@ -359,17 +426,39 @@ static dsddpcm_status setup_chain(dsddpcm_ctx *c)
                 c->hb[i] = HB_MID;
         }
 
+        /* Bandwidth post-filter at the base rate. Only above 48 kHz output:
+         * at 44.1/48k the final stage already brickwalls below 24 kHz. A corner
+         * at or above the output Nyquist is a no-op. */
+        if (cfg->out_rate > 48000 && c->bandwidth >= 0.0) {
+            double fp = c->bandwidth == 0.0 ? BW_DEFAULT_HZ : c->bandwidth;
+            if (fp < (double)cfg->out_rate / 2.0) {
+                int bn;
+                int64_t bsum;
+                st = bw_design(&c->bwq, &bn, &bsum, fp, (double)base_out);
+                if (st != DSDDPCM_OK)
+                    return st;
+                c->hb[c->n_hb].q = c->bwq;
+                c->hb[c->n_hb].n = bn;
+                c->hb[c->n_hb].inv_sum = 1.0 / (double)bsum;
+                c->hb[c->n_hb].dec = 1;
+                c->n_hb++;
+            }
+        }
+
         st = s1_build(&c->s1, q, n, sum, s1d);
         if (st != DSDDPCM_OK)
             return st;
         c->num_taps = (unsigned)n;
         c->span_dsd = (unsigned)(n - 1) + 1;
         gd_num = (unsigned)(n - 1);            /* 2*delay in DSD samples */
-        for (i = 0; i < c->n_hb; i++) {
-            unsigned up = (unsigned)s1d << i;
-            c->num_taps += (unsigned)c->hb[i].n;
-            c->span_dsd += (unsigned)(c->hb[i].n - 1) * up;
-            gd_num += (unsigned)(c->hb[i].n - 1) * up;
+        {
+            unsigned up = (unsigned)s1d;       /* DSD samples per stage input */
+            for (i = 0; i < c->n_hb; i++) {
+                c->num_taps += (unsigned)c->hb[i].n;
+                c->span_dsd += (unsigned)(c->hb[i].n - 1) * up;
+                gd_num += (unsigned)(c->hb[i].n - 1) * up;
+                up *= (unsigned)c->hb[i].dec;
+            }
         }
         c->group_delay = (double)gd_num / 2.0 / (double)c->decim;
         if (c->use_rs) {
@@ -388,6 +477,12 @@ static dsddpcm_status setup_chain(dsddpcm_ctx *c)
 
 dsddpcm_status dsddpcm_create(dsddpcm_ctx **out, const dsddpcm_config *cfg)
 {
+    return dsddpcm_create2(out, cfg, DSDDPCM_BW_DEFAULT);
+}
+
+dsddpcm_status dsddpcm_create2(dsddpcm_ctx **out, const dsddpcm_config *cfg,
+                               double bandwidth_hz)
+{
     dsddpcm_ctx *c;
     dsddpcm_status st;
     unsigned ch;
@@ -399,11 +494,15 @@ dsddpcm_status dsddpcm_create(dsddpcm_ctx **out, const dsddpcm_config *cfg)
     if (cfg->format != DSDDPCM_FMT_F32 && cfg->format != DSDDPCM_FMT_F64 &&
         cfg->format != DSDDPCM_FMT_S32)
         return DSDDPCM_ERR_ARG;
+    /* DEFAULT (0), FULL (< 0), or a corner >= 20 kHz; rejects NaN too */
+    if (!(bandwidth_hz <= 0.0 || bandwidth_hz >= BW_MIN_HZ))
+        return DSDDPCM_ERR_ARG;
 
     c = calloc(1, sizeof(*c));
     if (!c)
         return DSDDPCM_ERR_NOMEM;
     c->cfg = *cfg;
+    c->bandwidth = bandwidth_hz;
     st = setup_chain(c);
     if (st != DSDDPCM_OK) {
         dsddpcm_free(c);
@@ -475,6 +574,7 @@ void dsddpcm_free(dsddpcm_ctx *c)
     free(c->hbst);
     free(c->rsst);
     free(c->s1.lut);
+    free(c->bwq);
     free(c);
 }
 
