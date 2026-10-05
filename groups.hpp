@@ -212,6 +212,7 @@ inline std::vector<Group> collect(const std::string& path,
     for (const auto& e : fs::directory_iterator(path)) {
         if (!e.is_regular_file()) continue;
         std::string fp = e.path().string();
+        if (audio::is_appledouble(fp)) continue;   // "._x.flac" is Mac metadata
         std::string ext = audio::get_extension(fp);
         if (ext == ".cue")                       cue_paths.push_back(fp);
         else if (audio::is_disc_image_format(ext)) {

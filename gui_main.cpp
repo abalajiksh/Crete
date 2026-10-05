@@ -239,7 +239,8 @@ static bool probe_path_is_dsd(const std::string& path) {
     if (fs::is_directory(path)) {
         try {
             for (const auto& e : fs::directory_iterator(path)) {
-                if (e.is_regular_file() && probe_one_is_dsd(e.path().string()))
+                const std::string f = e.path().string();
+                if (e.is_regular_file() && !audio::is_appledouble(f) && probe_one_is_dsd(f))
                     return true;
             }
         } catch (...) {}
@@ -258,7 +259,8 @@ static bool probe_path_is_sacd(const std::string& path) {
     if (fs::is_directory(path)) {
         try {
             for (const auto& e : fs::directory_iterator(path))
-                if (e.is_regular_file() && one(e.path().string())) return true;
+                if (e.is_regular_file() && !audio::is_appledouble(e.path().string())
+                    && one(e.path().string())) return true;
         } catch (...) {}
     }
     return false;

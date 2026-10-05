@@ -178,7 +178,9 @@ int main(int argc, char** argv) {
         fs::path p(in);
         if (fs::is_directory(p)) {
             for (const auto& e : fs::directory_iterator(p))
-                if (e.is_regular_file() && is_dsd(e.path())) files.push_back(e.path());
+                if (e.is_regular_file() && is_dsd(e.path())
+                    && !audio::is_appledouble(e.path().string()))
+                    files.push_back(e.path());
         } else if (is_dsd(p)) {
             files.push_back(p);
         } else {
