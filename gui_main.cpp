@@ -58,6 +58,7 @@ static const char* DSD_MODE_LABELS[]   = { "Multistage", "Direct" };
 static const char* DSD_FILTER_LABELS[] = { "default", "firls", "kaiser" };
 static const char* DSD_RATE_LABELS[]   = { "44.1", "88.2", "176.4", "352.8" };
 static const int   DSD_RATES[]         = { 44100, 88200, 176400, 352800 };
+static const char* DSD_BW_LABELS[]     = { "50 kHz", "full" };
 static const char* SACD_AREA_LABELS[]  = { "Auto", "Stereo", "Multichannel" };
 static const sacd::AreaSel SACD_AREAS[] = { sacd::AreaSel::Auto,
                                             sacd::AreaSel::Stereo,
@@ -78,6 +79,7 @@ struct AppState {
     int  dsd_mode_idx   = 0;   // 0 Multistage, 1 Direct
     int  dsd_filter_idx = 0;   // 0 default, 1 firls, 2 kaiser
     int  dsd_rate_idx   = 0;   // index into DSD_RATES
+    int  dsd_bw_idx     = 0;   // 0 default (50 kHz), 1 full
     dsd::Options active_dsd_opt;   // snapshotted at analysis start
 
     // Count the LFE toward DR? crete's rule is no (a .1 track is a
@@ -151,6 +153,10 @@ struct AppState {
         // Final-stage filter is honoured only at a 44.1 kHz output rate; above
         // that the engine ignores it, so snapshot Default to keep the record honest.
         else if (o.out_rate != 44100) { o.filter = dsd::Filter::Default; }
+        // Bandwidth acts only at 176.4/352.8k; below that snapshot the default,
+        // as with the filter, so the record shows what actually ran.
+        o.bandwidth = (dsd_bw_idx == 1) ? DSDDPCM_BW_FULL : DSDDPCM_BW_DEFAULT;
+        if (!dsd::bandwidth_applies(o)) o.bandwidth = DSDDPCM_BW_DEFAULT;
         return o;
     }
 
@@ -703,6 +709,11 @@ static void row_dsd(AppState& app) {
     theme::Segmented("dsdrate", DSD_RATE_LABELS, 4, &app.dsd_rate_idx, direct ? 0b1110u : 0u);
     ImGui::SameLine(0, 6);
     ImGui::TextDisabled(rate_441 ? "kHz" : "kHz · filter n/a");
+
+    // Band limit: the 50 kHz post-filter acts only at 176.4/352.8k output.
+    bool bw_live = !direct && app.dsd_rate_idx >= 2;
+    ImGui::SameLine(0, 16); theme::Kicker("BAND"); ImGui::SameLine();
+    theme::Segmented("dsdbw", DSD_BW_LABELS, 2, &app.dsd_bw_idx, bw_live ? 0u : 0b11u);
 }
 
 // The two rows above describe ONE thing -- how this source is decoded -- so
@@ -1383,7 +1394,7 @@ static void side_panel(AppState& app) {
             "the top 20%% loudest blocks, per channel, then averaged.");
     } else {
         theme::SectionLabel("DSD DECIMATION");
-        ImGui::TextWrapped("DSD bitstreams are decimated to PCM by libdsddpcm v0.2.1 — "
+        ImGui::TextWrapped("DSD bitstreams are decimated to PCM by libdsddpcm v0.2.2 — "
             "vendored under third_party/libdsddpcm/ and statically linked. A clean-room, "
             "BSD-2-Clause kernel: linear-phase FIR only (constant group delay), unity DC "
             "gain (the +6 dB SACD makeup gain is not applied). crête keeps its own DSF/DFF "
@@ -1417,6 +1428,13 @@ static void side_panel(AppState& app) {
             ImGui::TextWrapped("%s", f.d);
             ImGui::Dummy(ImVec2(0,3));
         }
+
+        theme::SectionLabel("BAND");
+        ImGui::TextWrapped("At 176.4 and 352.8 kHz output the halving cascade alone keeps the "
+            "modulator's shaped ultrasonic noise, which inflates RMS, peak and DR. 50 kHz "
+            "(default) adds a linear-phase low-pass at the Scarlet Book Annex D.1 measurement "
+            "band. Full keeps everything — the numbers crête 0.21 and earlier reported. "
+            "No effect at 44.1 or 88.2 kHz.");
 
         theme::SectionLabel("SUPPORT MATRIX");
         struct MRow { const char* head; const char* body; };
