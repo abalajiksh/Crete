@@ -441,6 +441,7 @@ static void analysis_worker(AppState* app) {
     gopt.blocks   = dr::BlockSet::Reference;
     gopt.short_tracks = dr::ShortTracks::Exclude;   // < 10 s: no DR, as MAAT
     gopt.stream   = app->active_stream;
+    gopt.dolby_drc = 0.0;   // the encoded audio; --dolby-drc is CLI-only
 
     // Called on a worker thread, once per track, before that track's work
     // starts -- so it must do its own locking.

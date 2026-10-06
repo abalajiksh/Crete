@@ -78,6 +78,9 @@ struct Options {
     dr::BlockSet   blocks   = dr::BlockSet::Reference;
     dr::ShortTracks short_tracks = dr::ShortTracks::Exclude;   // < 10 s: no DR
     int            stream   = -1;   // container audio-stream index, -1 = auto
+    // drc_scale for AC-3 / E-AC-3. 0 = the encoded audio, the default and
+    // what every reference was measured with; see --dolby-drc.
+    double         dolby_drc = 0.0;
     // Describe a layout by the file's speaker mask where it declares one that
     // the channel count does not imply (chan::use_mask). false = by count
     // alone, which reproduces <= 0.20.0.
@@ -373,7 +376,8 @@ inline GroupResult analyse(const Group& g, const Options& opt,
             return out;
         }
 
-        auto ad = audio::decode_file(g.audio_path, opt.dsd, opt.stream);
+        auto ad = audio::decode_file(g.audio_path, opt.dsd, opt.stream,
+                                     opt.dolby_drc);
         const uint32_t mask = opt.channel_mask ? ad.channel_mask : 0;
 
         // Several audio streams and no explicit choice: say which one was
@@ -417,6 +421,7 @@ inline GroupResult analyse(const Group& g, const Options& opt,
             out.tracks.back().stream_index       = ad.stream_index;
             out.tracks.back().audio_stream_count = ad.audio_stream_count;
             out.tracks.back().codec_profile      = ad.codec_profile;
+            out.tracks.back().dolby_drc          = ad.dolby_drc;
         } else {
             size_t total_samples = ad.channels.empty()
                                    ? 0 : ad.channels[0].size();
@@ -472,6 +477,7 @@ inline GroupResult analyse(const Group& g, const Options& opt,
                 out.tracks.back().stream_index       = ad.stream_index;
                 out.tracks.back().audio_stream_count = ad.audio_stream_count;
                 out.tracks.back().codec_profile      = ad.codec_profile;
+                out.tracks.back().dolby_drc          = ad.dolby_drc;
             }
         }
 

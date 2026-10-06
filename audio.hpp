@@ -65,6 +65,13 @@ struct AudioData {
     // measure the delivered stream, name the premium layer separately.
     std::string codec_profile;
 
+    // Dolby DRC actually applied by this decode: the decoder's drc_scale, so
+    // 0 is the encoded audio (crete's default) and 1 the full playback
+    // compression the stream's metadata asks for. -1 when the decoder has no
+    // DRC to apply -- every native decode, and every FFmpeg codec other than
+    // AC-3 / E-AC-3. See --dolby-drc and the note in decode_with_ffmpeg().
+    double dolby_drc = -1.0;
+
     // The speaker mask the file declares, in WAVEFORMATEXTENSIBLE bits:
     // dwChannelMask from a WAVE_FORMAT_EXTENSIBLE fmt chunk (WAV, RF64, W64),
     // FLAC's WAVEFORMATEXTENSIBLE_CHANNEL_MASK tag, or FFmpeg's native
@@ -1442,7 +1449,7 @@ struct StreamInfo {
 #ifdef CRETE_HAS_FFMPEG
 // Defined in audio_ffmpeg.hpp (included at the end of this header).
 inline AudioData decode_with_ffmpeg(const std::vector<std::string>& parts,
-                                    int want_stream);
+                                    int want_stream, double dolby_drc);
 inline std::vector<StreamInfo> probe_streams(const std::vector<std::string>& parts);
 #endif
 
@@ -1573,9 +1580,13 @@ inline AudioData decode_sacd_track(sacd::Image& img, const sacd::Area& area,
     return ad;
 }
 
+// dolby_drc: the drc_scale handed to an AC-3 / E-AC-3 decoder. 0 (the
+// default) measures the encoded audio; anything else measures a playback
+// rendition. Every other format ignores it.
 inline AudioData decode_file(const std::string& path,
                              const dsd::Options& dsd_opt = {},
-                             int want_stream = -1) {
+                             int want_stream = -1,
+                             double dolby_drc = 0.0) {
     auto ext = get_extension(path);
 
 #ifdef CRETE_HAS_FFMPEG
@@ -1585,8 +1596,11 @@ inline AudioData decode_file(const std::string& path,
     if (!is_native_format(ext)) {
         // A DVD title set is several files and ONE stream. dvd::fragments_of
         // returns {path} for everything else, so this is unconditional.
-        return decode_with_ffmpeg(dvd::fragments_of(path), want_stream);
+        return decode_with_ffmpeg(dvd::fragments_of(path), want_stream,
+                                  dolby_drc);
     }
+#else
+    (void)dolby_drc;   // AC-3 / E-AC-3 need the FFmpeg tier
 #endif
 
     if (want_stream >= 0)

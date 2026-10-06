@@ -212,6 +212,7 @@ crete --dr-short include    /path/to/album/         # score tracks under 10 s as
 crete --channel-mask ignore /path/to/album/         # layout by channel count only, as <=0.20.0 (A/B only)
 
 crete-ffmpeg /path/to/album/           # cli-json-ffmpeg build: adds ALAC/MP3/AAC/Opus
+crete-ffmpeg --dolby-drc on disc.mkv   # apply AC-3/E-AC-3 Dolby DRC, as a player does (off by default)
 ```
 
 ### Memory and parallelism
@@ -396,11 +397,13 @@ Warning: album.mkv has 6 audio streams; measured stream 2 (PCM_S24LE, 6 ch, 9600
 
 In zero-dependency builds these formats are rejected with a hint to use `crete-ffmpeg` (or transcode: `ffmpeg -i input.m4a -c:a flac output.flac`).
 
-#### Dolby DRC is disabled
+#### Dolby DRC is off by default
 
 AC-3 and E-AC-3 carry Dolby dynamic-range-control metadata, and FFmpeg's decoder **applies it by default**. That is right for a player and wrong for a meter — DRC is a playback-time compressor driven by authoring metadata, so measuring it means measuring a rendition that is not on the disc. crête pins `drc_scale=0` (and `heavy_compr`, `target_level`) so it measures the encoded audio.
 
 The difference is large and easy to miss: on one JOC 5.1 bed, leaving DRC on moved **peak by 6.2 dB** (−0.75 → −6.91), RMS by 3.9 dB and integrated loudness by 4.0 LU — while DR itself moved only 0.24, because DR is peak-minus-RMS and DRC scales both. If you compare crête against a player's readout, this is usually why they differ.
+
+To see that rendition on purpose, **`--dolby-drc on`** applies the stream's DRC as FFmpeg and most players do by default, and **`--dolby-drc <scale>`** (0–6, FFmpeg's `drc_scale`; `1` = `on`) sets how much of it. Only `drc_scale` moves: `heavy_compr` (RF mode) and `target_level` stay pinned. The default stays `off`, and every reference crête is validated against was measured that way, so a DRC-on number has no oracle. It is labelled as a playback rendition in text output, and JSON carries `dolby_drc` (the scale applied) on every AC-3/E-AC-3 track, `0` included, so a result records how it was made. Other codecs ignore the flag. The GUI has no control for it and always measures the encoded audio.
 
 #### Object audio (Atmos, DTS:X) — the bed is measured, the objects are not
 

@@ -31,6 +31,7 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/samplefmt.h>
 #include <libavutil/dict.h>
+#include <libavutil/opt.h>
 #include <libswresample/swresample.h>
 }
 
@@ -349,8 +350,11 @@ inline std::vector<StreamInfo> probe_streams(const std::vector<std::string>& par
 
 // want_stream: the container's audio-stream index to decode (as ffprobe prints
 // it), or -1 to let FFmpeg choose.
+// dolby_drc: drc_scale for an AC-3 / E-AC-3 decoder, 0 = the encoded audio.
+// See the DRC note below before changing its default.
 inline AudioData decode_with_ffmpeg(const std::vector<std::string>& parts,
-                                    int want_stream = -1) {
+                                    int want_stream = -1,
+                                    double dolby_drc = 0.0) {
     AudioData ad;
     if (parts.empty()) throw std::runtime_error("FFmpeg: no input");
     const std::string& path = parts.front();
@@ -446,14 +450,28 @@ inline AudioData decode_with_ffmpeg(const std::vector<std::string>& parts,
     // target_level (0) and heavy_compr (false) already default to inert;
     // they are pinned anyway so a future FFmpeg cannot change them under us.
     // Unknown options are ignored by other decoders, so this is unconditional.
+    //
+    // --dolby-drc puts the playback rendition back on request (0.22.2), for
+    // comparing against what a player shows. It moves drc_scale only:
+    // heavy_compr (RF mode) and target_level stay pinned, so "1" means what
+    // FFmpeg's own default means and nothing more. The caller validates the
+    // range; avcodec_open2 would reject anything outside FFmpeg's 0..6.
+    char drc_buf[32];
+    std::snprintf(drc_buf, sizeof(drc_buf), "%.17g", dolby_drc);
     AVDictionary* dec_opts = nullptr;
-    av_dict_set(&dec_opts, "drc_scale",    "0", 0);
+    av_dict_set(&dec_opts, "drc_scale",    drc_buf, 0);
     av_dict_set(&dec_opts, "heavy_compr",  "0", 0);
     av_dict_set(&dec_opts, "target_level", "0", 0);
     struct OptGuard { AVDictionary** p; ~OptGuard() { if (*p) av_dict_free(p); } } og{&dec_opts};
 
     if (avcodec_open2(ctx, dec, &dec_opts) < 0)
         throw std::runtime_error("FFmpeg: cannot open decoder");
+
+    // Record the scale only where a decoder took it. Asking the decoder
+    // rather than matching codec names keeps this right for ac3_fixed and
+    // anything FFmpeg adds later, and a DTS or TrueHD file says nothing.
+    if (ctx->priv_data && av_opt_find(ctx->priv_data, "drc_scale", nullptr, 0, 0))
+        ad.dolby_drc = dolby_drc;
 
     int in_rate = ctx->sample_rate;
     int nch     = ctx->ch_layout.nb_channels;

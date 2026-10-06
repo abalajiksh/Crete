@@ -67,6 +67,32 @@ static dsd::Options g_dsd_opt;
 // Container audio-stream index to decode, or -1 for "let FFmpeg choose".
 // Only multi-stream containers (.mkv/.mp4 Blu-ray rips) can honour it.
 static int g_stream = -1;
+
+// drc_scale for AC-3 / E-AC-3 decodes. 0 = the encoded audio: crete's rule
+// since 0.15 and what every reference row was measured with. Anything else
+// measures a playback rendition, which is what --dolby-drc exists to show.
+static double g_dolby_drc = 0.0;
+
+// --dolby-drc <off|on|SCALE>. off = 0, on = 1 (FFmpeg's and most players'
+// default: the full compression the metadata asks for), SCALE in [0, 6] --
+// FFmpeg's own range for drc_scale, where > 1 over-applies it.
+static bool parse_dolby_drc(const std::string& v, double& out) {
+    if (v == "off") { out = 0.0; return true; }
+    if (v == "on")  { out = 1.0; return true; }
+    char* end = nullptr;
+    const double d = std::strtod(v.c_str(), &end);
+    if (v.empty() || !end || *end || !(d >= 0.0 && d <= 6.0)) return false;
+    out = d;
+    return true;
+}
+
+// "on" / "0.5" for a message; only called when DRC was applied (> 0).
+static std::string dolby_drc_label(double scale) {
+    if (scale == 1.0) return "on (scale 1)";
+    char b[32];
+    std::snprintf(b, sizeof(b), "scale %g", scale);
+    return b;
+}
 static dr::RmsMean  g_rms_mean = dr::RmsMean::Quadratic;
 
 // Whether the LFE counts toward the TT DR score. Exclude is crete's rule and
@@ -528,6 +554,9 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
                     t.codec.c_str(), t.bit_depth, t.sample_rate);
         if (!t.codec_profile.empty())
             std::printf("  Profile:             %s\n", t.codec_profile.c_str());
+        if (t.dolby_drc > 0.0)
+            std::printf("  Dolby DRC:           %s -- a playback rendition, not the encoded audio\n",
+                        dolby_drc_label(t.dolby_drc).c_str());
         {
             // An immersive carrier is measured as its channel bed -- FFmpeg has
             // no Atmos or DTS:X renderer -- so the layout says which it is.
@@ -664,6 +693,9 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
                       << (audio::profile_is_immersive(first.codec_profile)
                               ? "  [measured as the channel bed]" : "")
                       << "\n";
+        if (first.dolby_drc > 0.0)
+            std::cout << "Dolby DRC:         " << dolby_drc_label(first.dolby_drc)
+                      << "  [a playback rendition, not the encoded audio]\n";
         if (first.audio_stream_count > 1)
             std::cout << "Audio stream:      " << first.stream_index
                       << " of " << first.audio_stream_count
@@ -778,6 +810,10 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
             j["codec_profile"] = first.codec_profile;
             j["immersive_bed"] = audio::profile_is_immersive(first.codec_profile);
         }
+        // Present wherever the codec carries Dolby DRC, 0 included, so a
+        // result says how its numbers were produced -- as dsd_* does for DSD.
+        if (first.dolby_drc >= 0.0)
+            j["dolby_drc"] = first.dolby_drc;
         j["dr_rms_mean"] = dr::rms_mean_name(g_rms_mean);
         j["dr_blocks"]   = dr::block_set_name(g_dr_blocks);
         j["dr_lfe"]      = dr::lfe_scoring_name(g_lfe);
@@ -812,6 +848,8 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
             jt["codec_profile"] = t.codec_profile;
             jt["immersive_bed"] = audio::profile_is_immersive(t.codec_profile);
         }
+        if (t.dolby_drc >= 0.0)
+            jt["dolby_drc"] = t.dolby_drc;
         jt["sample_rate"] = t.sample_rate;
         jt["bit_depth"] = t.bit_depth;
         jt["channels"] = t.channels;
@@ -981,6 +1019,12 @@ void print_usage(const char* argv0) {
               << "                                 Default: FFmpeg's own choice, which ranks by\n"
               << "                                 bitrate/channels and is reported when the\n"
               << "                                 file holds more than one audio stream.\n"
+              << "  --dolby-drc <off|on|SCALE>     Dolby DRC on AC-3/E-AC-3 (default: off).\n"
+              << "      off        — measure the encoded audio, as every reference does.\n"
+              << "      on         — apply the stream's DRC as FFmpeg and most players do\n"
+              << "                   by default: a playback rendition. Moves peak, RMS and\n"
+              << "                   loudness by several dB; DR far less.\n"
+              << "      SCALE      — 0 to 6, FFmpeg's drc_scale (1 = on). FFmpeg builds.\n"
               << "  -j, --jobs <N>                 Parallel file workers. Default fits the pool\n"
               << "                                 to free memory as well as core count; an\n"
               << "                                 explicit N is obeyed. Changes no numbers.\n"
@@ -1252,6 +1296,12 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             g_stream = static_cast<int>(v);
+        } else if (arg == "--dolby-drc" && i+1 < argc) {
+            if (!parse_dolby_drc(argv[++i], g_dolby_drc)) {
+                std::cerr << "Error: --dolby-drc must be off, on, or a scale"
+                             " from 0 to 6\n";
+                return 1;
+            }
         } else if ((arg == "-o" || arg == "--output") && i+1 < argc) {
             output_file = argv[++i];
         } else {
@@ -1326,6 +1376,7 @@ int main(int argc, char* argv[]) {
         gopt.blocks   = g_dr_blocks;
         gopt.short_tracks = g_short;
         gopt.stream   = g_stream;
+        gopt.dolby_drc = g_dolby_drc;
         gopt.channel_mask = g_channel_mask;
 
         std::atomic<size_t> done{0};
