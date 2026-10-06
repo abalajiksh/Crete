@@ -290,6 +290,9 @@ struct TrackResult {
     // native decode. Descriptive only: no measured value depends on it, and
     // the numbers are the BED's, not the immersive presentation's.
     std::string codec_profile;
+    // Dolby DRC scale the decode applied (AudioData::dolby_drc): 0 = the
+    // encoded audio, > 0 = a playback rendition, -1 = codec has no DRC.
+    double      dolby_drc      = -1.0;
     double      duration_secs  = 0.0;
 
     // False when the track is shorter than MIN_DR_SECONDS (and --dr-short is
