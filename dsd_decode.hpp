@@ -136,17 +136,33 @@ inline bool bandwidth_applies(const Options& opt) {
 
 // ── Enum mapping helpers (throwing; used on the decode path) ─────────────────
 inline dsddpcm_dsd_rate to_dsd_rate(int dsd_rate_hz) {
-    switch (dsd_rate_hz / 44100) {
-        case 64:  return DSDDPCM_DSD64;
-        case 128: return DSDDPCM_DSD128;
-        case 256: return DSDDPCM_DSD256;
-        case 512: return DSDDPCM_DSD512;
-        default:
+    // Exact multiples only. Dividing alone would take any rate within 44.1 kHz
+    // above 2.8224 MHz -- a damaged header claiming 2.85 MHz -- as DSD64 and
+    // meter it at the wrong rate, with a duration that is wrong by the ratio.
+    if (dsd_rate_hz > 0 && dsd_rate_hz % 44100 == 0) {
+        switch (dsd_rate_hz / 44100) {
+            case 64:  return DSDDPCM_DSD64;
+            case 128: return DSDDPCM_DSD128;
+            case 256: return DSDDPCM_DSD256;
+            case 512: return DSDDPCM_DSD512;
+            default:  break;
+        }
+    }
+    // The 48 kHz family (3.072 / 6.144 / 12.288 / 24.576 MHz) is real -- some
+    // ADCs and studio recorders write it -- and is worth naming, because
+    // "supports DSD64" reads as a contradiction for a file its maker calls DSD64.
+    if (dsd_rate_hz > 0 && dsd_rate_hz % 48000 == 0) {
+        const int m = dsd_rate_hz / 48000;
+        if (m == 64 || m == 128 || m == 256 || m == 512)
             throw std::runtime_error(
                 "dsd: unsupported DSD rate " + std::to_string(dsd_rate_hz) +
-                " Hz — libdsddpcm supports DSD64/128/256/512 only "
-                "(DSD1024 and above are not available)");
+                " Hz — this is 48 kHz-family DSD" + std::to_string(m) +
+                "; libdsddpcm decodes the 44.1 kHz family only (2.8224 MHz x 1/2/4/8)");
     }
+    throw std::runtime_error(
+        "dsd: unsupported DSD rate " + std::to_string(dsd_rate_hz) +
+        " Hz — libdsddpcm supports DSD64/128/256/512 (exact multiples of "
+        "2.8224 MHz) only; DSD1024 and above are not available");
 }
 
 inline dsddpcm_pcm_rate to_pcm_rate(int out_rate_hz) {
