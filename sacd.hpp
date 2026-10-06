@@ -339,6 +339,17 @@ read_dsd(Image& img, const Area& area, uint32_t first_lsn, uint32_t n_lsn) {
 
     std::vector<uint8_t> carry;          // partial frame across sector reads
     carry.reserve(frame * 2);
+    // A track's first sector rarely starts on a frame: it usually opens with
+    // the tail of the previous track's last frame, and only a later packet
+    // carries frame_start. Collecting from the first byte instead shifts the
+    // whole track by that tail -- every frame then straddles two real frames
+    // and the track gains the previous track's last few ms while losing its
+    // own. It still measures plausibly (Hotel California, UDSACD 2233: tracks
+    // 3, 4, 7 and 9 start 336 or 672 bytes/ch early, DR within 1e-3 dB), and
+    // a tail that is not a multiple of the channel count would also rotate
+    // the channels. So, like the DST path, nothing is kept before the first
+    // frame_start.
+    bool dsd_started = false;
 
     // DST state. A DST frame is variable length and delimited by the
     // frame_start flag on its first audio packet, not by a byte count, so it
@@ -412,7 +423,20 @@ read_dsd(Image& img, const Area& area, uint32_t first_lsn, uint32_t n_lsn) {
                         if (dst_started)
                             dstframe.insert(dstframe.end(), sec + off, sec + off + plen);
                     } else {
-                        carry.insert(carry.end(), sec + off, sec + off + plen);
+                        if (fstart) {
+                            // Frames drain only at sector ends, so a frame
+                            // start must find the carry on a frame boundary.
+                            // Anything else means the packet walk has lost
+                            // sync, which would measure, not fail.
+                            if (dsd_started && carry.size() % frame != 0)
+                                throw std::runtime_error(
+                                    "SACD: frame start " +
+                                    std::to_string(carry.size() % frame) +
+                                    " bytes into a frame -- packet walk out of sync");
+                            dsd_started = true;
+                        }
+                        if (dsd_started)
+                            carry.insert(carry.end(), sec + off, sec + off + plen);
                     }
                 }
                 off += plen;
