@@ -272,10 +272,31 @@ inline std::string layout_short(unsigned nch, uint32_t mask = 0) {
     return s;
 }
 
+// The Auro-3D name of a discrete layout, or nullptr. The Auro whitepaper
+// ("AURO-3D in multi-channel WAV-files", NEWAURO, Rev 2, 2024-04-19) gives the
+// exact mask of each Auro layout, so this is a lookup, not an inference --
+// but a mask names SPEAKERS, not a format. Auro 9.1 (0x2D60F) is speaker for
+// speaker 5.1.4, and Auro 11.1 in its 7.1 + 4H form (0x2D63F) is 7.1.4; an
+// Atmos bed rendered to either would be called Auro-3D. So only the masks no
+// other system uses are named: those with Top (T) or a front height centre
+// (HC), and 8.0, the 4.0.4 that has no other name.
+inline const char* auro_layout(unsigned nch, uint32_t mask = 0) {
+    if (!use_mask(nch, mask)) return nullptr;
+    switch (mask) {
+        case 0x2D603: return "Auro-3D 8.0";    // L R Ls Rs HL HR HLs HRs
+        case 0x2DE0F: return "Auro-3D 10.1";   // 5.1 + T + 4H
+        case 0x2FE0F: return "Auro-3D 11.1";   // 5.1 + T + 5H
+        case 0x2F63F: return "Auro-3D 12.1";   // 7.1 + 5H
+        case 0x2FE3F: return "Auro-3D 13.1";   // 7.1 + T + 5H
+        default:      return nullptr;
+    }
+}
+
 inline std::string layout_detail(unsigned nch, uint32_t mask = 0) {
     if (!use_mask(nch, mask)) return count::layout_detail(nch);
     std::string s = layout_short(nch, mask) + " ·";
     for (size_t i = 0; i < nch; ++i) s += std::string(" ") + mask_speaker(mask, i).label;
+    if (const char* auro = auro_layout(nch, mask)) s += std::string(" · ") + auro + " layout";
     return s;
 }
 

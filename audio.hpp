@@ -49,6 +49,11 @@ struct AudioData {
     // or -1 for a native decode, where the file IS the stream.
     int stream_index        = -1;
     int audio_stream_count  = 1;
+    // For an MPEG program stream (.vob / .aob), the measured stream's ID as
+    // the disc gives it -- the private_stream_1 sub-stream ID (0x80 AC-3,
+    // 0xA2 LPCM) or the stream_id (0xC0) -- which, unlike stream_index, does
+    // not move between fragments of one title. -1 for any other container.
+    int ps_stream_id        = -1;
 
     // The codec's own profile string, where the bitstream carries one --
     // "Dolby TrueHD + Dolby Atmos", "Dolby Digital Plus + Dolby Atmos",
@@ -1439,6 +1444,7 @@ struct StreamInfo {
     int         sample_rate = 0;
     bool        is_default  = false;  // what FFmpeg would choose unaided
     bool        decodable   = true;   // false if this build has no decoder
+    int         ps_id       = -1;     // program-stream ID (0x80, 0xA2), -1 if none
     // Container duration, 0 when it declares none. Carried so the memory
     // planner can size a LOSSY stream, where file size says nothing useful:
     // a 40 MB AC-3 decodes to several GB of f64, and a file-size rule of

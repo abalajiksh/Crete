@@ -327,6 +327,9 @@ Two measurement axes are deliberately **not** exposed: `--dr-mean` and `--dr-blo
 
 `.mkv` and `.mp4` are video containers; crête ignores video and subtitles, so music Blu-ray rips work directly.
 
+MPEG-H 3D Audio (Sony 360 Reality Audio) is not decodable by any build and is refused by name;
+see *Immersive carriers*.
+
 #### DVD title sets
 
 A DVD does not store a title as one file. The spec caps a file at 1 GB, so the
@@ -336,6 +339,13 @@ program stream is split at a pack boundary and numbered:
 VIDEO_TS/VTS_02_1.VOB  VTS_02_2.VOB  VTS_02_3.VOB    one 43-minute title
 AUDIO_TS/ATS_01_1.AOB  ...           ATS_01_5.AOB    one DVD-Audio title set
 ```
+
+**Point crête at a `VIDEO_TS` or `AUDIO_TS` folder** and it measures each title set
+once, reported under its first fragment's name, and skips the menu objects
+(`VIDEO_TS.VOB`, `VTS_NN_0.VOB`, `AUDIO_TS.VOB`, `AUDIO_SV.VOB`) with a note. Before
+0.23.0 a folder scan listed every fragment — each of which reads the whole set — so a
+three-fragment title was measured three times and counted three times in the album
+value, and the menus were metered as tracks.
 
 **Point crête at any one fragment and it measures the whole title set.** The
 pieces are one stream and metering them separately would be wrong twice over:
@@ -352,13 +362,40 @@ the second, because the index follows order of first appearance in the program
 stream. Reading the set as one stream means one probe and one answer, which is
 what makes `--stream` meaningful here at all.
 
-One caveat on `--stream` for `.vob`: the compact FFmpeg reports **one more
-audio stream than the disc carries**. It cannot identify the MPEG-2 video
-elementary stream, content-probes it, and matches it as MP3 — so a disc with
-three audio streams lists four, the extra decoding to a fraction of a second of
-noise. A full FFmpeg types it correctly. Automatic selection is unaffected (it
-ranks by bitrate and the phantom has none) and every genuine stream is
-reachable by index; only the listing is wrong.
+**Every stream is also named by the ID the disc gives it**, which does not move:
+`0x80` is the first AC-3 stream in every fragment of every title. The
+multi-stream warning carries it, and the detail output says what carried the
+track and which of its streams was measured:
+
+```
+Warning: VTS_02_1.VOB has 3 audio streams; measured stream 4 [0xA2] (PCM_DVD, 2 ch, 48000 Hz). Use --stream N to choose.
+
+  Carrier:             DVD-Video title set VTS_02, 3 fragments · MPEG-2 video 720x480 29.97 fps
+  Measured stream:     0xA2 LPCM (of 0x80 AC-3, 0x81 AC-3, 0xA2 LPCM)
+```
+
+JSON carries the same as a per-track `program_stream` object (`carrier`,
+`fragments`, `mpeg`, `video` — null for a DVD-Audio title — `audio_streams` as
+`{id, codec}`, `measured_stream_id`, and how much of the set the list was read
+from). It comes from crête's own reader, `mpegps.hpp`, which walks the MPEG
+packs and PES headers (ITU-T H.222.0 | ISO/IEC 13818-1) and decodes nothing;
+the measured stream's ID comes from the demuxer that decoded it. Checked
+against ffprobe on every VOB and AOB of three DVD-Video discs and one DVD-Audio
+disc: stream IDs, types, codecs, video size and frame rate agree on all 36.
+Descriptive only — no measured value depends on it.
+
+`mpegps-info` (`make mpegps-info`) prints the same for any program stream, in any
+build, reading the whole title set: every stream with its packet and byte
+counts, the system header, pack alignment. The zero-dependency `crete` names a
+`.vob` or `.aob` it cannot decode — once per title set, with its streams —
+instead of skipping it in silence; an `.mpg` is named and refused in every build.
+
+The compact FFmpeg used to report **one more audio stream than the disc
+carries**: it cannot identify the MPEG-2 video elementary stream, content-probes
+it, and matches it as MP3 — a phantom that decodes to a fraction of a second of
+noise. Its stream ID (`0xE0`) says what it is, so since 0.23.0 it is not
+counted (`audio_stream_count` is the disc's own), not listed, and `--stream` on
+it is refused by name. A full FFmpeg types it as video and is unaffected.
 
 #### DVD-Audio title sets hold more than one mix
 
@@ -708,6 +745,19 @@ which makes loudness arithmetic: Auro 8.0 and 9.1 must land on `10·log10(ΣG/2)
 stereo reading, and a 7.1 or 5.1(side) mask must print exactly what the same audio without
 a mask prints.
 
+**Auro-3D is named only where the mask is Auro's alone.** The Auro whitepaper gives each
+layout's exact mask, so naming is a lookup, not an inference — but a mask describes speakers,
+not a format. Auro 9.1 (`0x2D60F`) is speaker for speaker 5.1.4, and Auro 11.1 in its
+7.1 + 4H form (`0x2D63F`) is 7.1.4: an Atmos bed rendered to either would otherwise be called
+Auro-3D. So 8.0, 10.1, 11.1 (5.1 + T + 5H), 12.1 and 13.1 are named and those two are not:
+
+```
+Layout:              7.1.6 · L R C LFE Lrs Rrs Lss Rss T HL HC HR HLs HRs · Auro-3D 13.1 layout
+```
+
+JSON adds `layout_name` (e.g. `"Auro-3D 13.1"`) at album and track level when, and only when,
+a name applies. The name is descriptive: no weight, label or measured value depends on it.
+
 **Loudness** follows ITU-R BS.1770-4 channel weighting: front channels (L, R, C) unity,
 surrounds +1.5 dB, **LFE excluded**. BS.1770-4 tabulates weights only to 5.1; the 7.1 rears
 take the same +1.5 dB as the sides, as EBU and broadcast meters do. Mono and stereo weights
@@ -770,6 +820,25 @@ but reading it is inference, so if it is ever built it belongs in the confidence
 `forensics` namespace, gated off, never in `metrics`. Worth knowing meanwhile: such a carrier
 reads as ~19 effective bits and is useless for noise-floor or bit-depth forensics, while DR
 and loudness are untouched (−116 dB is nowhere near a 3 s block).
+
+**MPEG-H 3D Audio (including Sony 360 Reality Audio) is identified and refused, in every
+build.** No crête build can measure it: the compact FFmpeg has no MPEG-H decoder, and the one
+open decoder renders to a speaker layout of the caller's choosing, so a DR taken from it would
+depend on that choice and have no oracle. Rather than pass FFmpeg's "unspecified number of
+channels" through, crête reads the container's own declaration — the MP4 `mhm1`/`mha1` sample
+entry and its `mhaC` box, or the MPEG-2 TS PMT's stream type 0x2D and MPEG-H descriptor (188-
+and 192-byte packets) — and says what the file is:
+
+```
+Warning: x.mp4 is MPEG-H 3D Audio in MP4 (mhm1, Baseline profile, level 3, reference layout
+CICP 19 = 7.1.4, 12 channels). crete cannot measure MPEG-H: ... Skipped.
+```
+
+The TS case is where this adds most: ffprobe misidentifies an MPEG-H transport stream as MP3.
+A file that carries another audio track beside the MPEG-H one (an AAC or AC-3 fallback) is not
+refused; the decoder measures what it can, as for any multi-stream file. Field layouts were
+checked against all 200 files of Fraunhofer IIS's MPEG-H transport-layer test set, whose MP4
+box dumps are the oracle; `scripts/check_mpegh.sh` gates it with synthetic containers.
 
 A **discrete** Auro-3D file is a different case: one PCM channel per speaker, as the Auro
 Encoder Service takes and as downloads ship. It declares its layout in its channel mask, so
@@ -988,12 +1057,17 @@ sacd.hpp                  SACD (Scarlet Book) ISO reader: TOC, areas, tracks, DS
 dst.hpp                   DST decoder (ISO/IEC 14496-3 Subpart 10), zero-dependency
 file_dialog.hpp           Portable native file/folder dialogs (Linux/macOS/Windows)
 mqa_detect.hpp            MQA identification (forensics; never feeds metrics)
+mpegh.hpp                 MPEG-H 3D Audio identification in MP4 / MPEG-2 TS (refusal only)
+mpegps.hpp                MPEG program-stream reader: streams by ID, carrier (no decode)
+mpegps_info.cpp           mpegps-info: list a .vob / .aob / .mpg's streams (make mpegps-info)
 channels.hpp              Channel layout table: speaker names, LFE, BS.1770 weights
 Makefile                  Build system (cli / cli-json / cli-json-ffmpeg / gui / dsd2wav)
 scripts/setup-deps.sh     Install build dependencies (macOS + Linux; also runs under zsh)
 scripts/setup-deps.ps1    Install build dependencies (Windows, via MSYS2)
 scripts/build_ffmpeg_compact.sh  One-time compact static FFmpeg (LGPL-only, decode-only)
 scripts/check_fix12.sh    Corpus-free synthetic DR self-check
+scripts/check_mpegh.sh    Corpus-free MPEG-H identification self-check
+scripts/check_mpegps.sh   Corpus-free program-stream identification self-check
 third_party/libdsddpcm/   Vendored BSD-2-Clause DSD decode kernel (committed, compiled in)
 third_party/              Dear ImGui, nlohmann/json, compact FFmpeg (fetched on demand)
 ```

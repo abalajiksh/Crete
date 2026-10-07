@@ -179,7 +179,7 @@ CLI_TARGET = crete$(EXE_EXT)
 # FFmpeg tiers emit a distinctly-named binary so the in-house decoder (crete)
 # and the FFmpeg-enabled decoder (crete-ffmpeg) never overwrite each other.
 FFMPEG_TARGET = crete-ffmpeg$(EXE_EXT)
-CLI_HEADERS = analysis.hpp audio.hpp budget.hpp channels.hpp dsd_decode.hpp mqa_detect.hpp cue.hpp groups.hpp \
+CLI_HEADERS = analysis.hpp audio.hpp budget.hpp channels.hpp dsd_decode.hpp mpegh.hpp mqa_detect.hpp cue.hpp groups.hpp \
               sacd.hpp dst.hpp dvd.hpp \
               $(LIBDSDDPCM_DIR)/include/dsddpcm.h
 
@@ -319,6 +319,13 @@ DVDA_INFO_TARGET = dvda-info$(EXE_EXT)
 $(DVDA_INFO_TARGET): dvda_info.cpp dvda.hpp dvd.hpp
 	$(CXX) $(CXXFLAGS) -O2 -DNDEBUG -o $@ dvda_info.cpp $(LDFLAGS) $(CLI_LDFLAGS)
 
+# ── mpegps-info (MPEG program-stream structure) ─────────────────────────────
+# Packs and PES headers only, like dvda-info: links against nothing, so the
+# streams a .vob / .aob / .mpg carries can be listed in any build.
+MPEGPS_INFO_TARGET = mpegps-info$(EXE_EXT)
+$(MPEGPS_INFO_TARGET): mpegps_info.cpp mpegps.hpp dvd.hpp
+	$(CXX) $(CXXFLAGS) -O2 -DNDEBUG -o $@ mpegps_info.cpp $(LDFLAGS) $(CLI_LDFLAGS)
+
 # ── Install ─────────────────────────────────────────────────────────────────
 install: release
 	install -Dm755 $(CLI_TARGET) $(DESTDIR)$(PREFIX)/bin/crete$(EXE_EXT)
@@ -335,7 +342,7 @@ install-gui-ffmpeg: gui-ffmpeg
 # ── Clean ───────────────────────────────────────────────────────────────────
 clean:
 	rm -f crete crete.exe crete-gui crete-gui.exe crete-ffmpeg crete-ffmpeg.exe crete-gui-ffmpeg crete-gui-ffmpeg.exe \
-	      dsd2wav dsd2wav.exe dvda-info dvda-info.exe
+	      dsd2wav dsd2wav.exe dvda-info dvda-info.exe mpegps-info mpegps-info.exe
 	rm -rf $(BUILD_ROOT)
 
 distclean: clean

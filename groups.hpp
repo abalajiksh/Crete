@@ -29,6 +29,8 @@
 #include "audio.hpp"
 #include "budget.hpp"
 #include "cue.hpp"
+#include "dvd.hpp"
+#include "mpegh.hpp"
 #include "mqa_detect.hpp"
 #include "sacd.hpp"
 
@@ -38,6 +40,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <system_error>
@@ -200,6 +203,24 @@ inline std::vector<Group> collect(const std::string& path,
             }
             return groups;
         }
+        // MPEG-H is refused by content before the decoder sees it, in every
+        // tier: crete-ffmpeg would otherwise fail with FFmpeg's "unspecified
+        // number of channels", and a .ts is not an accepted extension at all.
+        if (mpegh::is_candidate_ext(fext)) {
+            if (const mpegh::Info m = mpegh::identify(path); mpegh::refuse(m)) {
+                warnings.push_back(mpegh::refusal(fs::path(path).filename().string(), m));
+                return groups;
+            }
+        }
+        // A program stream this build cannot measure -- any .vob / .aob in
+        // the zero-dependency tier, any .mpg in every tier -- is named, with
+        // its streams, rather than passed over in silence.
+        if (mpegps::is_candidate_ext(fext) && !audio::is_supported_format(path) &&
+            mpegps::looks_like_ps(path)) {
+            warnings.push_back(mpegps::refusal(path, dvd::fragments_of(path),
+                                               audio::is_ffmpeg_extra_format(".vob")));
+            return groups;
+        }
         if (audio::is_supported_format(path)) {
             Group g;
             g.audio_path = path;
@@ -212,19 +233,70 @@ inline std::vector<Group> collect(const std::string& path,
     // Pass 1: enumerate cue and audio files separately.
     std::vector<std::string> cue_paths;
     std::vector<std::string> audio_paths;
+    std::vector<std::string> refused;      // refusals, each "Warning: <filename>..."
+    // A DVD title set is several files and one stream, and decode_file reads
+    // the whole set from any one of them -- so a folder scan that listed
+    // every fragment measured the set once per fragment, and the album mean
+    // counted it that many times. One fragment (the first) now stands for
+    // its set. Menu objects are not title content and are skipped by name.
+    //
+    // The same grouping serves a program stream this build cannot measure (a
+    // .vob / .aob without the FFmpeg tier, a .mpg in any): it is named once
+    // per title set, with its streams, instead of being passed over.
+    std::map<std::string, std::pair<int, std::string>> title_sets;   // set -> (part, path)
+    std::vector<std::string> menus;
+    std::vector<std::string> unmeasurable;                           // program streams
     for (const auto& e : fs::directory_iterator(path)) {
         if (!e.is_regular_file()) continue;
         std::string fp = e.path().string();
         if (audio::is_appledouble(fp)) continue;   // "._x.flac" is Mac metadata
         std::string ext = audio::get_extension(fp);
+        const bool supported = audio::is_supported_format(fp);
         if (ext == ".cue")                       cue_paths.push_back(fp);
         else if (audio::is_disc_image_format(ext)) {
             if (sacd::looks_like_sacd_iso(fp)) audio_paths.push_back(fp);
         }
-        else if (audio::is_supported_format(fp)) audio_paths.push_back(fp);
+        else if (supported || mpegps::is_candidate_ext(ext)) {
+            // Only files this build would otherwise decode are sniffed: a
+            // zero-dependency folder scan never considered an .mp4 and still
+            // does not.
+            if (supported && mpegh::is_candidate_ext(ext)) {
+                if (const mpegh::Info m = mpegh::identify(fp); mpegh::refuse(m)) {
+                    refused.push_back(mpegh::refusal(e.path().filename().string(), m));
+                    continue;
+                }
+            }
+            const std::string name = e.path().filename().string();
+            std::string set; int part;
+            if (dvd::is_menu(name)) { menus.push_back(name); continue; }
+            if (dvd::parse_fragment(name, set, part)) {
+                auto it = title_sets.find(set);
+                if (it == title_sets.end() || part < it->second.first)
+                    title_sets[set] = {part, fp};
+                continue;
+            }
+            (supported ? audio_paths : unmeasurable).push_back(fp);
+        }
     }
+    for (auto& ts : title_sets) {
+        std::string& fp = ts.second.second;
+        (audio::is_supported_format(fp) ? audio_paths : unmeasurable).push_back(std::move(fp));
+    }
+    for (const auto& fp : unmeasurable)
+        if (mpegps::looks_like_ps(fp))
+            refused.push_back(mpegps::refusal(fp, dvd::fragments_of(fp),
+                                              audio::is_ffmpeg_extra_format(".vob")));
     std::sort(cue_paths.begin(), cue_paths.end(), natural_less);
     std::sort(audio_paths.begin(), audio_paths.end(), natural_less);
+    std::sort(refused.begin(), refused.end(), natural_less);   // listing order is the filesystem's
+    warnings.insert(warnings.end(), refused.begin(), refused.end());
+    if (!menus.empty()) {
+        std::sort(menus.begin(), menus.end(), natural_less);
+        std::string list;
+        for (const auto& m : menus) list += (list.empty() ? "" : ", ") + m;
+        warnings.push_back("Note: skipped DVD menu object" + std::string(menus.size() > 1 ? "s " : " ")
+                           + list + " (not title content)");
+    }
 
     // Pass 2: parse each cue, resolve its referenced audio file(s), claim
     // them. A sheet may name several FILEs (one per vinyl side or disc), and
@@ -380,16 +452,32 @@ inline GroupResult analyse(const Group& g, const Options& opt,
                                      opt.dolby_drc);
         const uint32_t mask = opt.channel_mask ? ad.channel_mask : 0;
 
+        // A program stream (.vob / .aob) is described by its own structure:
+        // the carrier, whether it holds video, and every audio stream by the
+        // ID the disc gives it. Read from the head of the title set, after
+        // the decode, and stamped on every track below. See mpegps.hpp.
+        mpegps::Carriage carriage;
+        if (mpegps::is_candidate_ext(audio::get_extension(g.audio_path))) {
+            const auto parts = dvd::fragments_of(g.audio_path);
+            if (mpegps::looks_like_ps(parts.front())) {
+                carriage = mpegps::carriage(g.audio_path, parts,
+                                            mpegps::scan(parts, mpegps::kDescribeBytes));
+                carriage.measured = ad.ps_stream_id;
+            }
+        }
+
         // Several audio streams and no explicit choice: say which one was
         // measured. A Blu-ray rip's LPCM 5.1, DTS-HD MA 5.1 and TrueHD 7.1
         // tracks are different mixes with different DR, so silently metering
         // whichever FFmpeg ranks highest would make the number unreproducible
-        // without this line.
+        // without this line. On a DVD the stream's own ID is given too: the
+        // index is not stable across the title's fragments, the ID is.
         if (opt.stream < 0 && ad.audio_stream_count > 1) {
             out.note("Warning: " + basename + " has "
                 + std::to_string(ad.audio_stream_count)
                 + " audio streams; measured stream "
                 + std::to_string(ad.stream_index)
+                + (ad.ps_stream_id >= 0 ? " [" + mpegps::hex_id(ad.ps_stream_id) + "]" : "")
                 + " (" + ad.codec + ", "
                 + std::to_string(ad.num_channels()) + " ch, "
                 + std::to_string(ad.sample_rate)
@@ -422,6 +510,7 @@ inline GroupResult analyse(const Group& g, const Options& opt,
             out.tracks.back().audio_stream_count = ad.audio_stream_count;
             out.tracks.back().codec_profile      = ad.codec_profile;
             out.tracks.back().dolby_drc          = ad.dolby_drc;
+            out.tracks.back().ps                 = carriage;
         } else {
             size_t total_samples = ad.channels.empty()
                                    ? 0 : ad.channels[0].size();
@@ -478,6 +567,7 @@ inline GroupResult analyse(const Group& g, const Options& opt,
                 out.tracks.back().audio_stream_count = ad.audio_stream_count;
                 out.tracks.back().codec_profile      = ad.codec_profile;
                 out.tracks.back().dolby_drc          = ad.dolby_drc;
+                out.tracks.back().ps                 = carriage;
             }
         }
 

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "channels.hpp"
+#include "mpegps.hpp"
 #include "mqa_detect.hpp"
 
 namespace dr {
@@ -349,6 +350,10 @@ struct TrackResult {
     // to report. See audio::AudioData.
     int         stream_index       = -1;
     int         audio_stream_count = 1;
+
+    // An MPEG program stream's carrier and the measured stream's ID, stamped
+    // by the caller like the two above. Descriptive; see mpegps.hpp.
+    mpegps::Carriage ps;
 };
 
 // ── Helper functions ───────────────────────────────────────────────────────

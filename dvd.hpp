@@ -85,6 +85,19 @@ inline bool parse_fragment(const std::string& filename,
     return true;
 }
 
+// A menu or still-video object rather than title content: the disc menu
+// VIDEO_TS.VOB, a title set's menu VTS_NN_0.VOB, and DVD-Audio's AUDIO_TS.VOB
+// and AUDIO_SV.VOB (the still-picture set). parse_fragment() already refuses
+// all four; this names them, so a folder scan can say why it skipped them.
+inline bool is_menu(const std::string& filename) {
+    const std::string f = upper(filename);
+    if (f == "VIDEO_TS.VOB" || f == "AUDIO_TS.VOB" || f == "AUDIO_SV.VOB") return true;
+    return f.size() == 12 && f.compare(0, 4, "VTS_") == 0 &&
+           std::isdigit(static_cast<unsigned char>(f[4])) &&
+           std::isdigit(static_cast<unsigned char>(f[5])) &&
+           f.compare(6, 6, "_0.VOB") == 0;
+}
+
 inline bool is_fragment(const std::string& path) {
     std::string k; int p;
     return parse_fragment(fs::path(path).filename().string(), k, p);

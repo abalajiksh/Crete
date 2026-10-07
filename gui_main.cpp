@@ -658,8 +658,12 @@ static void band_streams(AppState& app) {
 
     for (const auto& si : app.streams) {
         char lbl[256];
-        std::snprintf(lbl, sizeof(lbl), "%d  —  %s%s%s, %d ch, %d Hz##st%d",
-                      si.index, si.codec.c_str(),
+        // A DVD stream also shows the ID the disc gives it, which -- unlike
+        // the index -- is the same in every fragment of the title.
+        char psid[16] = "";
+        if (si.ps_id >= 0) std::snprintf(psid, sizeof(psid), " [0x%02X]", si.ps_id);
+        std::snprintf(lbl, sizeof(lbl), "%d%s  —  %s%s%s, %d ch, %d Hz##st%d",
+                      si.index, psid, si.codec.c_str(),
                       si.profile.empty() ? "" : " · ",
                       si.profile.c_str(), si.channels, si.sample_rate, si.index);
         if (!si.decodable) ImGui::BeginDisabled();
@@ -973,6 +977,16 @@ static void detail_panel(AppState& app) {
             ImGui::TextWrapped("Measured as the %s bed — %s.",
                                chan::layout_short(t.channels, t.channel_mask).c_str(), q.c_str());
         }
+        ImGui::PopStyleColor();
+    }
+
+    // DVD program stream: what carried it, and which of its streams this is,
+    // by the ID the disc gives it (see mpegps.hpp).
+    if (t.ps.present) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("%s", mpegps::carriage_line(t.ps).c_str());
+        const std::string m = mpegps::measured_line(t.ps);
+        if (!m.empty()) ImGui::TextWrapped("Measured stream %s", m.c_str());
         ImGui::PopStyleColor();
     }
 
