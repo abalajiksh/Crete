@@ -340,6 +340,13 @@ VIDEO_TS/VTS_02_1.VOB  VTS_02_2.VOB  VTS_02_3.VOB    one 43-minute title
 AUDIO_TS/ATS_01_1.AOB  ...           ATS_01_5.AOB    one DVD-Audio title set
 ```
 
+**Point crête at a `VIDEO_TS` or `AUDIO_TS` folder** and it measures each title set
+once, reported under its first fragment's name, and skips the menu objects
+(`VIDEO_TS.VOB`, `VTS_NN_0.VOB`, `AUDIO_TS.VOB`, `AUDIO_SV.VOB`) with a note. Before
+0.23.0 a folder scan listed every fragment — each of which reads the whole set — so a
+three-fragment title was measured three times and counted three times in the album
+value, and the menus were metered as tracks.
+
 **Point crête at any one fragment and it measures the whole title set.** The
 pieces are one stream and metering them separately would be wrong twice over:
 each is metered alone, and the split lands wherever 1 GB fell, so the 3 s DR

@@ -29,6 +29,7 @@
 #include "audio.hpp"
 #include "budget.hpp"
 #include "cue.hpp"
+#include "dvd.hpp"
 #include "mpegh.hpp"
 #include "mqa_detect.hpp"
 #include "sacd.hpp"
@@ -39,6 +40,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <system_error>
@@ -223,6 +225,13 @@ inline std::vector<Group> collect(const std::string& path,
     std::vector<std::string> cue_paths;
     std::vector<std::string> audio_paths;
     std::vector<std::string> refused;      // MPEG-H warnings, each led by its filename
+    // A DVD title set is several files and one stream, and decode_file reads
+    // the whole set from any one of them -- so a folder scan that listed
+    // every fragment measured the set once per fragment, and the album mean
+    // counted it that many times. One fragment (the first) now stands for
+    // its set. Menu objects are not title content and are skipped by name.
+    std::map<std::string, std::pair<int, std::string>> title_sets;   // set -> (part, path)
+    std::vector<std::string> menus;
     for (const auto& e : fs::directory_iterator(path)) {
         if (!e.is_regular_file()) continue;
         std::string fp = e.path().string();
@@ -242,13 +251,30 @@ inline std::vector<Group> collect(const std::string& path,
                     continue;
                 }
             }
+            const std::string name = e.path().filename().string();
+            std::string set; int part;
+            if (dvd::is_menu(name)) { menus.push_back(name); continue; }
+            if (dvd::parse_fragment(name, set, part)) {
+                auto it = title_sets.find(set);
+                if (it == title_sets.end() || part < it->second.first)
+                    title_sets[set] = {part, fp};
+                continue;
+            }
             audio_paths.push_back(fp);
         }
     }
+    for (auto& ts : title_sets) audio_paths.push_back(std::move(ts.second.second));
     std::sort(cue_paths.begin(), cue_paths.end(), natural_less);
     std::sort(audio_paths.begin(), audio_paths.end(), natural_less);
     std::sort(refused.begin(), refused.end(), natural_less);   // listing order is the filesystem's
     warnings.insert(warnings.end(), refused.begin(), refused.end());
+    if (!menus.empty()) {
+        std::sort(menus.begin(), menus.end(), natural_less);
+        std::string list;
+        for (const auto& m : menus) list += (list.empty() ? "" : ", ") + m;
+        warnings.push_back("Note: skipped DVD menu object" + std::string(menus.size() > 1 ? "s " : " ")
+                           + list + " (not title content)");
+    }
 
     // Pass 2: parse each cue, resolve its referenced audio file(s), claim
     // them. A sheet may name several FILEs (one per vinyl side or disc), and
