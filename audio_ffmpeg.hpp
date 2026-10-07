@@ -36,6 +36,7 @@ extern "C" {
 }
 
 #include <cctype>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -269,6 +270,29 @@ inline bool duration_is_plausible(double secs, uint64_t bytes, int nch, int rate
            >= MIN_CODED_BITS_PER_SAMPLE;
 }
 
+// ── MPEG program streams (.vob / .aob) ─────────────────────────────────────
+inline bool is_program_stream(const AVFormatContext* fmt) {
+    return fmt->iformat && std::strcmp(fmt->iformat->name, "mpeg") == 0;
+}
+
+// FFmpeg's mpeg demuxer sets AVStream::id to the private_stream_1 sub-stream
+// ID (0x80, 0xA2) or to the full start code 0x1C0 / 0x1E0. crete reports the
+// ID the disc uses, as mpegps.hpp does: the sub-stream ID or the stream_id.
+inline int ps_stream_id(const AVStream* st) {
+    return st->id >= 0x100 ? (st->id & 0xFF) : st->id;
+}
+
+// The compact FFmpeg builds no video decoder or parser, so it cannot identify
+// a DVD's MPEG-2 video stream (stream_id 0xE0-0xEF), content-probes it, and
+// matches it as MP3 -- a phantom audio stream that decodes to a fraction of
+// a second of noise. The stream ID says what it really is, so it is neither
+// counted, listed nor selectable. A full FFmpeg types it as video and this
+// never matches.
+inline bool is_misprobed_video(const AVFormatContext* fmt, const AVStream* st) {
+    return is_program_stream(fmt) && st->id >= 0x1E0 && st->id <= 0x1EF &&
+           st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO;
+}
+
 // ── Enumerate a container's audio streams, without decoding one ────────────
 //
 // A music Blu-ray rip routinely carries several mixes of the same album and
@@ -314,12 +338,14 @@ inline std::vector<StreamInfo> probe_streams(const std::vector<std::string>& par
     for (unsigned i = 0; i < fmt->nb_streams; ++i) {
         AVCodecParameters* par = fmt->streams[i]->codecpar;
         if (par->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+        if (is_misprobed_video(fmt, fmt->streams[i])) continue;
 
         StreamInfo si;
         si.index       = static_cast<int>(i);
         si.channels    = par->ch_layout.nb_channels;
         si.sample_rate = par->sample_rate;
         si.is_default  = (static_cast<int>(i) == best);
+        if (is_program_stream(fmt)) si.ps_id = ps_stream_id(fmt->streams[i]);
 
         const AVCodec* dec = avcodec_find_decoder(par->codec_id);
         si.decodable = (dec != nullptr);
@@ -391,7 +417,8 @@ inline AudioData decode_with_ffmpeg(const std::vector<std::string>& parts,
     // index are recorded on AudioData and --stream overrides them.
     int n_audio = 0;
     for (unsigned i = 0; i < fmt->nb_streams; ++i)
-        if (fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) ++n_audio;
+        if (fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO &&
+            !is_misprobed_video(fmt, fmt->streams[i])) ++n_audio;
     if (n_audio == 0)
         throw std::runtime_error("FFmpeg: no audio stream in " + path);
 
@@ -407,6 +434,11 @@ inline AudioData decode_with_ffmpeg(const std::vector<std::string>& parts,
             throw std::runtime_error(
                 "--stream " + std::to_string(want_stream) + ": not an audio "
                 "stream in " + path);
+        if (is_misprobed_video(fmt, fmt->streams[want_stream]))
+            throw std::runtime_error(
+                "--stream " + std::to_string(want_stream) + ": that is the MPEG "
+                "video stream (0xE0) of " + path + ", which this FFmpeg build "
+                "misreads as audio; it is not an audio stream");
         stream_idx = want_stream;
         dec = avcodec_find_decoder(fmt->streams[stream_idx]->codecpar->codec_id);
         if (!dec)
@@ -417,12 +449,20 @@ inline AudioData decode_with_ffmpeg(const std::vector<std::string>& parts,
         stream_idx = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, &dec, 0);
         if (stream_idx < 0 || !dec)
             throw std::runtime_error("FFmpeg: no audio stream in " + path);
+        // FFmpeg ranks by bitrate and the phantom has none, so this has not
+        // been seen; if it ever happens, measuring it would be measuring
+        // noise, so refuse and point at --stream instead.
+        if (is_misprobed_video(fmt, fmt->streams[stream_idx]))
+            throw std::runtime_error(
+                "FFmpeg chose the MPEG video stream (0xE0) of " + path +
+                " as its audio; choose an audio stream with --stream N");
     }
 
     ad.stream_index       = stream_idx;
     ad.audio_stream_count = n_audio;
 
     AVStream* st = fmt->streams[stream_idx];
+    if (is_program_stream(fmt)) ad.ps_stream_id = ps_stream_id(st);
 
     AVCodecContext* ctx = avcodec_alloc_context3(dec);
     if (!ctx) throw std::runtime_error("FFmpeg: codec context alloc failed");

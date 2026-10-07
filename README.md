@@ -362,13 +362,40 @@ the second, because the index follows order of first appearance in the program
 stream. Reading the set as one stream means one probe and one answer, which is
 what makes `--stream` meaningful here at all.
 
-One caveat on `--stream` for `.vob`: the compact FFmpeg reports **one more
-audio stream than the disc carries**. It cannot identify the MPEG-2 video
-elementary stream, content-probes it, and matches it as MP3 — so a disc with
-three audio streams lists four, the extra decoding to a fraction of a second of
-noise. A full FFmpeg types it correctly. Automatic selection is unaffected (it
-ranks by bitrate and the phantom has none) and every genuine stream is
-reachable by index; only the listing is wrong.
+**Every stream is also named by the ID the disc gives it**, which does not move:
+`0x80` is the first AC-3 stream in every fragment of every title. The
+multi-stream warning carries it, and the detail output says what carried the
+track and which of its streams was measured:
+
+```
+Warning: VTS_02_1.VOB has 3 audio streams; measured stream 4 [0xA2] (PCM_DVD, 2 ch, 48000 Hz). Use --stream N to choose.
+
+  Carrier:             DVD-Video title set VTS_02, 3 fragments · MPEG-2 video 720x480 29.97 fps
+  Measured stream:     0xA2 LPCM (of 0x80 AC-3, 0x81 AC-3, 0xA2 LPCM)
+```
+
+JSON carries the same as a per-track `program_stream` object (`carrier`,
+`fragments`, `mpeg`, `video` — null for a DVD-Audio title — `audio_streams` as
+`{id, codec}`, `measured_stream_id`, and how much of the set the list was read
+from). It comes from crête's own reader, `mpegps.hpp`, which walks the MPEG
+packs and PES headers (ITU-T H.222.0 | ISO/IEC 13818-1) and decodes nothing;
+the measured stream's ID comes from the demuxer that decoded it. Checked
+against ffprobe on every VOB and AOB of three DVD-Video discs and one DVD-Audio
+disc: stream IDs, types, codecs, video size and frame rate agree on all 36.
+Descriptive only — no measured value depends on it.
+
+`mpegps-info` (`make mpegps-info`) prints the same for any program stream, in any
+build, reading the whole title set: every stream with its packet and byte
+counts, the system header, pack alignment. The zero-dependency `crete` names a
+`.vob` or `.aob` it cannot decode — once per title set, with its streams —
+instead of skipping it in silence; an `.mpg` is named and refused in every build.
+
+The compact FFmpeg used to report **one more audio stream than the disc
+carries**: it cannot identify the MPEG-2 video elementary stream, content-probes
+it, and matches it as MP3 — a phantom that decodes to a fraction of a second of
+noise. Its stream ID (`0xE0`) says what it is, so since 0.23.0 it is not
+counted (`audio_stream_count` is the disc's own), not listed, and `--stream` on
+it is refused by name. A full FFmpeg types it as video and is unaffected.
 
 #### DVD-Audio title sets hold more than one mix
 
@@ -1031,6 +1058,8 @@ dst.hpp                   DST decoder (ISO/IEC 14496-3 Subpart 10), zero-depende
 file_dialog.hpp           Portable native file/folder dialogs (Linux/macOS/Windows)
 mqa_detect.hpp            MQA identification (forensics; never feeds metrics)
 mpegh.hpp                 MPEG-H 3D Audio identification in MP4 / MPEG-2 TS (refusal only)
+mpegps.hpp                MPEG program-stream reader: streams by ID, carrier (no decode)
+mpegps_info.cpp           mpegps-info: list a .vob / .aob / .mpg's streams (make mpegps-info)
 channels.hpp              Channel layout table: speaker names, LFE, BS.1770 weights
 Makefile                  Build system (cli / cli-json / cli-json-ffmpeg / gui / dsd2wav)
 scripts/setup-deps.sh     Install build dependencies (macOS + Linux; also runs under zsh)
@@ -1038,6 +1067,7 @@ scripts/setup-deps.ps1    Install build dependencies (Windows, via MSYS2)
 scripts/build_ffmpeg_compact.sh  One-time compact static FFmpeg (LGPL-only, decode-only)
 scripts/check_fix12.sh    Corpus-free synthetic DR self-check
 scripts/check_mpegh.sh    Corpus-free MPEG-H identification self-check
+scripts/check_mpegps.sh   Corpus-free program-stream identification self-check
 third_party/libdsddpcm/   Vendored BSD-2-Clause DSD decode kernel (committed, compiled in)
 third_party/              Dear ImGui, nlohmann/json, compact FFmpeg (fetched on demand)
 ```

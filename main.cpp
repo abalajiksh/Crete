@@ -557,6 +557,13 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
         if (t.dolby_drc > 0.0)
             std::printf("  Dolby DRC:           %s -- a playback rendition, not the encoded audio\n",
                         dolby_drc_label(t.dolby_drc).c_str());
+        if (t.ps.present) {
+            // What carried it, and which of its streams this is, by the ID
+            // the disc gives it -- stable across fragments, unlike the index.
+            std::printf("  Carrier:             %s\n", mpegps::carriage_line(t.ps).c_str());
+            const std::string m = mpegps::measured_line(t.ps);
+            if (!m.empty()) std::printf("  Measured stream:     %s\n", m.c_str());
+        }
         {
             // An immersive carrier is measured as its channel bed -- FFmpeg has
             // no Atmos or DTS:X renderer -- so the layout says which it is.
@@ -698,8 +705,11 @@ void print_detail(const std::vector<dr::TrackResult>& tracks,
                       << "  [a playback rendition, not the encoded audio]\n";
         if (first.audio_stream_count > 1)
             std::cout << "Audio stream:      " << first.stream_index
+                      << (first.ps.measured >= 0 ? " [" + mpegps::hex_id(first.ps.measured) + "]" : "")
                       << " of " << first.audio_stream_count
                       << " in container\n";
+        if (first.ps.present)
+            std::cout << "Carrier:           " << mpegps::carriage_line(first.ps) << "\n";
         if (first.channels > 2)
             std::cout << "Loudness summing:  "
                       << chan::loudness_mode(first.channels, first.channel_mask) << "\n";
@@ -859,6 +869,24 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         if (t.audio_stream_count > 1) {
             jt["audio_stream_count"] = t.audio_stream_count;
             jt["stream_index"]       = t.stream_index;
+        }
+        // Program streams (.vob / .aob) only: the carrier, and every audio
+        // stream by the ID the disc gives it. Descriptive -- see mpegps.hpp.
+        if (t.ps.present) {
+            json jp;
+            jp["carrier"]   = t.ps.carrier;
+            jp["fragments"] = t.ps.fragments;
+            jp["mpeg"]      = t.ps.mpeg;
+            jp["video"]     = t.ps.video.empty() ? json(nullptr) : json(t.ps.video);
+            json ja = json::array();
+            for (const auto& a : t.ps.audio)
+                ja.push_back({{"id", mpegps::hex_id(a.first)}, {"codec", a.second}});
+            jp["audio_streams"] = ja;
+            jp["measured_stream_id"] = t.ps.measured >= 0 ? json(mpegps::hex_id(t.ps.measured))
+                                                          : json(nullptr);
+            jp["scanned_bytes"] = t.ps.scanned;
+            jp["scan_complete"] = t.ps.complete;
+            jt["program_stream"] = jp;
         }
 
         // A track under dr::MIN_DR_SECONDS has no DR: null, not 0, and

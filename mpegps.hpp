@@ -480,6 +480,87 @@ inline Info scan(const std::vector<std::string>& parts, uint64_t max_bytes = 0) 
     return m;
 }
 
+// ── What crete records on a measured track ─────────────────────────────────
+
+// How a track measured from a program stream was carried, and which of the
+// stream's audio streams it is. Descriptive only: no measured value depends
+// on any of it.
+struct Carriage {
+    bool        present   = false;
+    std::string carrier;            // carrier(): "DVD-Video title set VTS_02"
+    size_t      fragments = 1;
+    int         mpeg      = 0;      // 1 or 2
+    std::string video;              // "MPEG-2 video 720x480 29.97 fps", "" if none
+    std::vector<std::pair<int, std::string>> audio;   // (ID, codec), by ID
+    int         measured  = -1;     // ID of the measured stream, -1 unknown
+    uint64_t    scanned   = 0;      // bytes the stream list was read from
+    bool        complete  = false;  // ... which was the whole input
+};
+
+// How much of a title set is read to describe it. Every audio stream of a
+// DVD title is interleaved from its first VOBU, so the head describes the
+// whole; JSON says how much was read.
+constexpr uint64_t kDescribeBytes = 32ull << 20;
+
+inline Carriage carriage(const std::string& path, const std::vector<std::string>& parts,
+                         const Info& m) {
+    Carriage c;
+    c.present   = m.is_ps;
+    c.carrier   = carrier(path, m);
+    c.fragments = parts.size();
+    c.mpeg      = m.mpeg;
+    for (const auto& s : m.streams) {
+        if (s.kind == Kind::Video && c.video.empty()) c.video = stream_desc(s);
+        if (s.kind == Kind::Audio) c.audio.emplace_back(s.id(), s.codec);
+    }
+    c.scanned  = m.scanned;
+    c.complete = m.reached_end;
+    return c;
+}
+
+// "DVD-Video title set VTS_02, 3 fragments · MPEG-2 video 720x480 29.97 fps"
+inline std::string carriage_line(const Carriage& c) {
+    std::string s = c.carrier;
+    if (c.fragments > 1) s += ", " + std::to_string(c.fragments) + " fragments";
+    s += c.video.empty() ? " · no video" : " · " + c.video;
+    return s;
+}
+
+// "0xA2 LPCM (of 0x80 AC-3, 0x81 AC-3, 0xA2 LPCM)"; just "0xA2 LPCM" when
+// it is the only one; "" when the measured stream's ID is not known.
+inline std::string measured_line(const Carriage& c) {
+    std::string self, all;
+    for (const auto& a : c.audio) {
+        const std::string one = hex_id(a.first) + " " + a.second;
+        if (a.first == c.measured) self = one;
+        all += (all.empty() ? "" : ", ") + one;
+    }
+    if (self.empty()) return {};
+    return c.audio.size() > 1 ? self + " (of " + all + ")" : self;
+}
+
+// The warning a build that cannot measure this input prints instead.
+// `ffmpeg_tier`: whether this build decodes DVD .vob / .aob at all.
+inline std::string refusal(const std::string& path, const std::vector<std::string>& parts,
+                           bool ffmpeg_tier) {
+    const Info m = scan(parts, kDescribeBytes);
+    const std::string name = std::filesystem::path(path).filename().string();
+    std::string s = "Warning: " + name + ": ";
+    const std::string what = carrier(path, m);
+    if (what != (m.mpeg == 1 ? "MPEG-1 system stream" : "MPEG-2 program stream")) {
+        s += what;
+        if (parts.size() > 1) s += ", " + std::to_string(parts.size()) + " fragments";
+        s += " -- ";
+    }
+    s += summary(m) + ". Not measured: ";
+    const std::string ext = dvd::upper(std::filesystem::path(path).extension().string());
+    if ((ext == ".VOB" || ext == ".AOB") && !ffmpeg_tier)
+        s += "this build has no decoder for DVD audio; crete-ffmpeg measures it.";
+    else
+        s += "crete reads program streams only from DVD .vob / .aob files.";
+    return s;
+}
+
 // Is this file a program stream? Reads 14 bytes.
 inline bool looks_like_ps(const std::string& path) {
     std::ifstream f(path, std::ios::binary);

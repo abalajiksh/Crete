@@ -29,8 +29,11 @@
 #      (stuffing, STD buffer, PTS), MPEG-1 video 352x288 25 fps (no
 #      sequence_extension) and MPEG-1 Layer II audio.
 #
-# Usage: scripts/check_mpegps.sh [path-to-mpegps-info]   (default ./mpegps-info)
-# Run it after touching mpegps.hpp or dvd.hpp.
+#   8-9. With a zero-dependency crete as the second argument: the refusals
+#      and the folder grouping (see the cases at the end).
+#
+# Usage: scripts/check_mpegps.sh [mpegps-info] [crete]    (default ./mpegps-info)
+# Run it after touching mpegps.hpp, dvd.hpp or the collector in groups.hpp.
 # ============================================================================
 set -euo pipefail
 
@@ -179,5 +182,33 @@ expect_ids "MPEG-1 system stream (7)" mpeg1.mpg \
     "0x1e0 video MPEG-1 video 352x288 25 fps"
 "$INFO" "$TMP/mpeg1.mpg" | grep -q "^Format           : MPEG-1 system stream" \
     && pass "MPEG-1 pack header recognised" || flunk "MPEG-1 pack header not recognised"
+
+# ── crete itself (zero-dependency build only) ──────────────────────────────
+#   8. A folder holding a title set's two fragments and a menu VOB: ONE
+#      refusal naming the set, its fragment count and its audio streams by
+#      ID, plus one note for the skipped menu -- not one line per fragment.
+#   9. An .mpg is named and refused in every build.
+# Skipped for an FFmpeg build, which decodes the .vob (and would choke on the
+# fixtures' synthetic payloads, which is not what this checks).
+CRETE="${2:-}"
+if [ -n "$CRETE" ] && [ -x "$CRETE" ]; then
+    if "$CRETE" --version 2>/dev/null | head -1 | grep -q ffmpeg; then
+        echo "  skip  crete checks: $CRETE is an FFmpeg build"
+    else
+        cp "$TMP/dvdv.vob" "$TMP/VIDEO_TS/VIDEO_TS.VOB"
+        out="$("$CRETE" "$TMP/VIDEO_TS" 2>&1 >/dev/null || true)"
+        n=$(grep -c "^Warning: VTS_01_1.VOB: DVD-Video title set VTS_01, 2 fragments -- MPEG-2 program stream; MPEG-2 video 720x576 25 fps; audio 0x80 AC-3, 0xA0 LPCM, 0xA1 MLP, 0xA2 LPCM, 0xC0 MPEG-1 Layer II; 1 subpicture. Not measured: this build has no decoder for DVD audio; crete-ffmpeg measures it.$" <<<"$out" || true)
+        [ "$n" = 1 ] && pass "zero-dep folder: one refusal for the title set, streams by ID (8)" \
+                     || { flunk "zero-dep folder refusal (8)"; printf '%s\n' "$out" | sed 's/^/        /'; }
+        grep -q "^Note: skipped DVD menu object VIDEO_TS.VOB (not title content)$" <<<"$out" \
+            && pass "menu object skipped with a note (8)" || flunk "menu object note missing (8)"
+        grep -q "VTS_01_2.VOB" <<<"$out" \
+            && flunk "second fragment reported on its own (8)" \
+            || pass "second fragment not reported separately (8)"
+        out="$("$CRETE" "$TMP/mpeg1.mpg" 2>&1 >/dev/null || true)"
+        grep -q "^Warning: mpeg1.mpg: MPEG-1 system stream; MPEG-1 video 352x288 25 fps; audio 0xC0 MPEG-1 Layer II. Not measured: crete reads program streams only from DVD .vob / .aob files.$" <<<"$out" \
+            && pass ".mpg named and refused (9)" || { flunk ".mpg refusal (9)"; printf '%s\n' "$out" | sed 's/^/        /'; }
+    fi
+fi
 
 [ "$fail" -eq 0 ] && echo "check_mpegps: PASS" || { echo "check_mpegps: FAIL"; exit 1; }
