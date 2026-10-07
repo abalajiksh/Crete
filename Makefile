@@ -319,6 +319,13 @@ DVDA_INFO_TARGET = dvda-info$(EXE_EXT)
 $(DVDA_INFO_TARGET): dvda_info.cpp dvda.hpp dvd.hpp
 	$(CXX) $(CXXFLAGS) -O2 -DNDEBUG -o $@ dvda_info.cpp $(LDFLAGS) $(CLI_LDFLAGS)
 
+# ── mpegps-info (MPEG program-stream structure) ─────────────────────────────
+# Packs and PES headers only, like dvda-info: links against nothing, so the
+# streams a .vob / .aob / .mpg carries can be listed in any build.
+MPEGPS_INFO_TARGET = mpegps-info$(EXE_EXT)
+$(MPEGPS_INFO_TARGET): mpegps_info.cpp mpegps.hpp dvd.hpp
+	$(CXX) $(CXXFLAGS) -O2 -DNDEBUG -o $@ mpegps_info.cpp $(LDFLAGS) $(CLI_LDFLAGS)
+
 # ── Install ─────────────────────────────────────────────────────────────────
 install: release
 	install -Dm755 $(CLI_TARGET) $(DESTDIR)$(PREFIX)/bin/crete$(EXE_EXT)
@@ -335,7 +342,7 @@ install-gui-ffmpeg: gui-ffmpeg
 # ── Clean ───────────────────────────────────────────────────────────────────
 clean:
 	rm -f crete crete.exe crete-gui crete-gui.exe crete-ffmpeg crete-ffmpeg.exe crete-gui-ffmpeg crete-gui-ffmpeg.exe \
-	      dsd2wav dsd2wav.exe dvda-info dvda-info.exe
+	      dsd2wav dsd2wav.exe dvda-info dvda-info.exe mpegps-info mpegps-info.exe
 	rm -rf $(BUILD_ROOT)
 
 distclean: clean
