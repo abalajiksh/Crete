@@ -30,6 +30,12 @@
 #      with the mask than without it (scored count 8 vs 7, loudness 0.09 dB
 #      apart).  Without this, a fixture both readings agreed on would pass
 #      2-4 trivially and gate nothing.
+#   6. Auro naming (0.23.0): the masks only Auro uses are named, the two it
+#      shares with standard layouts are not.  0x2FE3F (14 ch) reads
+#      "7.1.6 · ... · Auro-3D 13.1 layout"; 0x2D63F (12 ch, Auro's 7.1 + 4H
+#      form) is speaker for speaker 7.1.4 and must carry no Auro name, as
+#      case 2 shows for 5.1.4.  JSON names it as layout_name (when built
+#      with JSON).
 #
 # Usage: scripts/check_channel_mask.sh [path-to-crete]     (default ./crete)
 #
@@ -72,6 +78,8 @@ write('m71_63F.wav',     8,  0x63F)
 write('m51_60F.wav',     6,  0x60F)
 write('auro80.wav',      8,  0x2D603)
 write('auro91.wav',      10, 0x2D60F)
+write('auro131.wav',     14, 0x2FE3F)
+write('m714.wav',        12, 0x2D63F)
 PY
 
 # The per-file detail report without the lines that name the file or the run.
@@ -110,7 +118,7 @@ expect_lufs() {   # expect_lufs <file> <sum-of-weights> <label>
 
 # 1. Auro 8.0
 lay=$(layout auro80.wav)
-[ "$lay" = "4.0.4 · L R Ls Rs HL HR HLs HRs" ] \
+[ "$lay" = "4.0.4 · L R Ls Rs HL HR HLs HRs · Auro-3D 8.0 layout" ] \
     && pass "Auro 8.0 layout: $lay" || flunk "Auro 8.0 layout: '$lay'"
 n=$(scored auro80.wav)
 [ "$n" = 8 ] && pass "Auro 8.0: all 8 channels scored (no LFE)" \
@@ -125,6 +133,24 @@ n=$(scored auro91.wav)
 [ "$n" = 9 ] && pass "Auro 9.1: 9 scored, LFE excluded" \
              || flunk "Auro 9.1: $n scored, expected 9"
 expect_lufs auro91.wav 9.82 "Auro 9.1"
+
+# 6. Auro naming: distinctive masks only.
+lay=$(layout auro131.wav)
+[ "$lay" = "7.1.6 · L R C LFE Lrs Rrs Lss Rss T HL HC HR HLs HRs · Auro-3D 13.1 layout" ] \
+    && pass "Auro 13.1 layout: $lay" || flunk "Auro 13.1 layout: '$lay'"
+lay=$(layout m714.wav)
+[ "$lay" = "7.1.4 · L R C LFE Lrs Rrs Lss Rss HL HR HLs HRs" ] \
+    && pass "7.1.4 (0x2D63F) carries no Auro name: $lay" || flunk "7.1.4 (0x2D63F) layout: '$lay'"
+if "$CRETE" -f json "$TMP/auro131.wav" >/dev/null 2>&1; then
+    jn=$("$CRETE" -f json "$TMP/auro131.wav" 2>/dev/null | python3 -c \
+        'import json,sys; d=json.load(sys.stdin); print(d.get("layout_name"), d["tracks"][0].get("layout_name"))')
+    [ "$jn" = "Auro-3D 13.1 Auro-3D 13.1" ] && pass "JSON layout_name: $jn" \
+                                             || flunk "JSON layout_name: '$jn'"
+    jn=$("$CRETE" -f json "$TMP/m714.wav" 2>/dev/null | python3 -c \
+        'import json,sys; d=json.load(sys.stdin); print(d.get("layout_name"), d["tracks"][0].get("layout_name"))')
+    [ "$jn" = "None None" ] && pass "JSON: 7.1.4 has no layout_name" \
+                            || flunk "JSON: 7.1.4 layout_name '$jn'"
+fi
 
 # 3. A mask that agrees with the count table moves nothing.
 cmp -s <(report m71_63F.wav) <(report plain_8.wav) \

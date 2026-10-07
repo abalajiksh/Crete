@@ -711,6 +711,19 @@ which makes loudness arithmetic: Auro 8.0 and 9.1 must land on `10·log10(ΣG/2)
 stereo reading, and a 7.1 or 5.1(side) mask must print exactly what the same audio without
 a mask prints.
 
+**Auro-3D is named only where the mask is Auro's alone.** The Auro whitepaper gives each
+layout's exact mask, so naming is a lookup, not an inference — but a mask describes speakers,
+not a format. Auro 9.1 (`0x2D60F`) is speaker for speaker 5.1.4, and Auro 11.1 in its
+7.1 + 4H form (`0x2D63F`) is 7.1.4: an Atmos bed rendered to either would otherwise be called
+Auro-3D. So 8.0, 10.1, 11.1 (5.1 + T + 5H), 12.1 and 13.1 are named and those two are not:
+
+```
+Layout:              7.1.6 · L R C LFE Lrs Rrs Lss Rss T HL HC HR HLs HRs · Auro-3D 13.1 layout
+```
+
+JSON adds `layout_name` (e.g. `"Auro-3D 13.1"`) at album and track level when, and only when,
+a name applies. The name is descriptive: no weight, label or measured value depends on it.
+
 **Loudness** follows ITU-R BS.1770-4 channel weighting: front channels (L, R, C) unity,
 surrounds +1.5 dB, **LFE excluded**. BS.1770-4 tabulates weights only to 5.1; the 7.1 rears
 take the same +1.5 dB as the sides, as EBU and broadcast meters do. Mono and stereo weights

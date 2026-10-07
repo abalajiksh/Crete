@@ -801,6 +801,8 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         // channel count already describes keeps its pre-0.21.0 JSON.
         if (const uint32_t m = chan::effective_mask(first.channels, first.channel_mask))
             j["channel_mask"] = chan::mask_string(m);
+        if (const char* n = chan::auro_layout(first.channels, first.channel_mask))
+            j["layout_name"] = n;
         j["scored_channels"] = chan::scored_count(first.channels, g_lfe == dr::LfeScoring::Include,
                                                   first.channel_mask);
         j["loudness_summing"] = chan::loudness_mode(first.channels, first.channel_mask);
@@ -909,6 +911,8 @@ void print_json(const std::vector<dr::TrackResult>& tracks,
         jt["channel_layout"]  = chan::layout_short(t.channels, t.channel_mask);
         if (const uint32_t m = chan::effective_mask(t.channels, t.channel_mask))
             jt["channel_mask"] = chan::mask_string(m);
+        if (const char* n = chan::auro_layout(t.channels, t.channel_mask))
+            jt["layout_name"] = n;
         jt["scored_channels"] = chan::scored_count(t.channels, g_lfe == dr::LfeScoring::Include,
                                                    t.channel_mask);
         // Multichannel companions to dr_score_raw. On mono/stereo dr_front_raw
