@@ -327,6 +327,9 @@ Two measurement axes are deliberately **not** exposed: `--dr-mean` and `--dr-blo
 
 `.mkv` and `.mp4` are video containers; crête ignores video and subtitles, so music Blu-ray rips work directly.
 
+MPEG-H 3D Audio (Sony 360 Reality Audio) is not decodable by any build and is refused by name;
+see *Immersive carriers*.
+
 #### DVD title sets
 
 A DVD does not store a title as one file. The spec caps a file at 1 GB, so the
@@ -771,6 +774,25 @@ but reading it is inference, so if it is ever built it belongs in the confidence
 reads as ~19 effective bits and is useless for noise-floor or bit-depth forensics, while DR
 and loudness are untouched (−116 dB is nowhere near a 3 s block).
 
+**MPEG-H 3D Audio (including Sony 360 Reality Audio) is identified and refused, in every
+build.** No crête build can measure it: the compact FFmpeg has no MPEG-H decoder, and the one
+open decoder renders to a speaker layout of the caller's choosing, so a DR taken from it would
+depend on that choice and have no oracle. Rather than pass FFmpeg's "unspecified number of
+channels" through, crête reads the container's own declaration — the MP4 `mhm1`/`mha1` sample
+entry and its `mhaC` box, or the MPEG-2 TS PMT's stream type 0x2D and MPEG-H descriptor (188-
+and 192-byte packets) — and says what the file is:
+
+```
+Warning: x.mp4 is MPEG-H 3D Audio in MP4 (mhm1, Baseline profile, level 3, reference layout
+CICP 19 = 7.1.4, 12 channels). crete cannot measure MPEG-H: ... Skipped.
+```
+
+The TS case is where this adds most: ffprobe misidentifies an MPEG-H transport stream as MP3.
+A file that carries another audio track beside the MPEG-H one (an AAC or AC-3 fallback) is not
+refused; the decoder measures what it can, as for any multi-stream file. Field layouts were
+checked against all 200 files of Fraunhofer IIS's MPEG-H transport-layer test set, whose MP4
+box dumps are the oracle; `scripts/check_mpegh.sh` gates it with synthetic containers.
+
 A **discrete** Auro-3D file is a different case: one PCM channel per speaker, as the Auro
 Encoder Service takes and as downloads ship. It declares its layout in its channel mask, so
 crête labels and weights it from that — see *Channel layouts* above.
@@ -988,12 +1010,14 @@ sacd.hpp                  SACD (Scarlet Book) ISO reader: TOC, areas, tracks, DS
 dst.hpp                   DST decoder (ISO/IEC 14496-3 Subpart 10), zero-dependency
 file_dialog.hpp           Portable native file/folder dialogs (Linux/macOS/Windows)
 mqa_detect.hpp            MQA identification (forensics; never feeds metrics)
+mpegh.hpp                 MPEG-H 3D Audio identification in MP4 / MPEG-2 TS (refusal only)
 channels.hpp              Channel layout table: speaker names, LFE, BS.1770 weights
 Makefile                  Build system (cli / cli-json / cli-json-ffmpeg / gui / dsd2wav)
 scripts/setup-deps.sh     Install build dependencies (macOS + Linux; also runs under zsh)
 scripts/setup-deps.ps1    Install build dependencies (Windows, via MSYS2)
 scripts/build_ffmpeg_compact.sh  One-time compact static FFmpeg (LGPL-only, decode-only)
 scripts/check_fix12.sh    Corpus-free synthetic DR self-check
+scripts/check_mpegh.sh    Corpus-free MPEG-H identification self-check
 third_party/libdsddpcm/   Vendored BSD-2-Clause DSD decode kernel (committed, compiled in)
 third_party/              Dear ImGui, nlohmann/json, compact FFmpeg (fetched on demand)
 ```

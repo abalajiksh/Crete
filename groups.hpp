@@ -29,6 +29,7 @@
 #include "audio.hpp"
 #include "budget.hpp"
 #include "cue.hpp"
+#include "mpegh.hpp"
 #include "mqa_detect.hpp"
 #include "sacd.hpp"
 
@@ -200,6 +201,15 @@ inline std::vector<Group> collect(const std::string& path,
             }
             return groups;
         }
+        // MPEG-H is refused by content before the decoder sees it, in every
+        // tier: crete-ffmpeg would otherwise fail with FFmpeg's "unspecified
+        // number of channels", and a .ts is not an accepted extension at all.
+        if (mpegh::is_candidate_ext(fext)) {
+            if (const mpegh::Info m = mpegh::identify(path); mpegh::refuse(m)) {
+                warnings.push_back(mpegh::refusal(fs::path(path).filename().string(), m));
+                return groups;
+            }
+        }
         if (audio::is_supported_format(path)) {
             Group g;
             g.audio_path = path;
@@ -212,6 +222,7 @@ inline std::vector<Group> collect(const std::string& path,
     // Pass 1: enumerate cue and audio files separately.
     std::vector<std::string> cue_paths;
     std::vector<std::string> audio_paths;
+    std::vector<std::string> refused;      // MPEG-H warnings, each led by its filename
     for (const auto& e : fs::directory_iterator(path)) {
         if (!e.is_regular_file()) continue;
         std::string fp = e.path().string();
@@ -221,10 +232,23 @@ inline std::vector<Group> collect(const std::string& path,
         else if (audio::is_disc_image_format(ext)) {
             if (sacd::looks_like_sacd_iso(fp)) audio_paths.push_back(fp);
         }
-        else if (audio::is_supported_format(fp)) audio_paths.push_back(fp);
+        else if (audio::is_supported_format(fp)) {
+            // Only files this build would otherwise decode are sniffed: a
+            // zero-dependency folder scan never considered an .mp4 and still
+            // does not.
+            if (mpegh::is_candidate_ext(ext)) {
+                if (const mpegh::Info m = mpegh::identify(fp); mpegh::refuse(m)) {
+                    refused.push_back(mpegh::refusal(e.path().filename().string(), m));
+                    continue;
+                }
+            }
+            audio_paths.push_back(fp);
+        }
     }
     std::sort(cue_paths.begin(), cue_paths.end(), natural_less);
     std::sort(audio_paths.begin(), audio_paths.end(), natural_less);
+    std::sort(refused.begin(), refused.end(), natural_less);   // listing order is the filesystem's
+    warnings.insert(warnings.end(), refused.begin(), refused.end());
 
     // Pass 2: parse each cue, resolve its referenced audio file(s), claim
     // them. A sheet may name several FILEs (one per vinyl side or disc), and
