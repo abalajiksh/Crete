@@ -470,7 +470,13 @@ inline AudioData decode_with_ffmpeg(const std::vector<std::string>& parts,
     // Record the scale only where a decoder took it. Asking the decoder
     // rather than matching codec names keeps this right for ac3_fixed and
     // anything FFmpeg adds later, and a DTS or TrueHD file says nothing.
-    if (ctx->priv_data && av_opt_find(ctx->priv_data, "drc_scale", nullptr, 0, 0))
+    //
+    // av_opt_find() reads priv_data's first field as an AVClass*, which is
+    // true only when the decoder declares a priv_class. pcm_dvd has private
+    // data and no class, so without the dec->priv_class test this read
+    // garbage and every DVD-Video LPCM title segfaulted (Weekly #108).
+    if (dec->priv_class && ctx->priv_data &&
+        av_opt_find(ctx->priv_data, "drc_scale", nullptr, 0, 0))
         ad.dolby_drc = dolby_drc;
 
     int in_rate = ctx->sample_rate;
